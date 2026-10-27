@@ -31,7 +31,7 @@ Serve the folder and open a game:
 python -m http.server 4180
 ```
 
-Then go to http://localhost:4180/games/flow.html. Everything is plain HTML and JavaScript with no build step, no dependencies and no network requests (the fonts ship in `skins/pinball/fonts`).
+Then go to http://localhost:4180/games/flow.html, or play the live site at https://kyleillgen.github.io/flow-engine/. Everything is plain HTML and JavaScript with no build step, no dependencies and no network requests (the fonts ship in `skins/pinball/fonts`).
 
 ## Make a game
 
@@ -60,6 +60,12 @@ npm test
 ```
 
 The engine's controller is pure, so the tests drive it at a simulated 60 fps with scripted taps: tempo matching, folding half- and double-time tappers into the band, lock and re-sync limits, autopilot, misses and the pacer.
+
+`npm run smoke` plays every game in a headless browser for a few seconds (it needs `puppeteer`, or `puppeteer-core` with `BROWSER` set to a Chrome or Edge executable). CI runs both on every pull request.
+
+## Contributing
+
+Changes go through pull requests, and each one gets a playable preview. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

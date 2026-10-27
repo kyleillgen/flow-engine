@@ -1,0 +1,32 @@
+# main is the live site; every pull request gets its own playable copy at
+# https://kyleillgen.github.io/flow-engine/pr-preview/pr-<number>/, linked in a comment on the PR
+# and removed when the PR closes.
+name: Pages
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+concurrency: pages
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  site:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: .
+          branch: gh-pages
+          clean-exclude: pr-preview/
+  preview:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: .

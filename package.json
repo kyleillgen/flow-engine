@@ -5,7 +5,8 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "test": "node --test",
+    "test": "node --test \"tests/*.test.cjs\"",
+    "smoke": "node tests/smoke.cjs",
     "serve": "python -m http.server 4180"
   }
 }
