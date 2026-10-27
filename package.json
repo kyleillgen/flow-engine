@@ -1,0 +1,12 @@
+{
+  "name": "flow-engine",
+  "version": "0.1.0",
+  "description": "A tiny engine for rhythm micro-games that find your tempo and help you settle into flow between tasks.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "node --test \"tests/*.test.cjs\"",
+    "smoke": "node tests/smoke.cjs",
+    "serve": "python -m http.server 4180"
+  }
+}
