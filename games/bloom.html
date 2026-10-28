@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Star seeds drift down onto a little moon. Tap as each one lands and a glowing flower blooms. A rhythm micro-game that finds your tempo.">
+<meta property="og:title" content="Bloom · Flow Engine">
+<meta property="og:description" content="Star seeds drift down onto a little moon. Tap as each one lands and a glowing flower blooms.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/games/bloom.html">
+<meta name="twitter:card" content="summary_large_image">
+<title>Bloom</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/neon/neon-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Bloom: a garden on a little moon. Star seeds drift down out of the sky, swaying, and land in
+// the moon's soil on a whole beat. Tap as one lands and a glowing flower grows there: a bell, a
+// star lily, a mushroom lamp or a puffball. The garden fills up as you play; when a plot is
+// needed again, its old flower lets go of its petals and they float off into the sky. A seed you
+// miss still lands and becomes a sleepy sprout; nothing is lost.
+//
+// Fern, the gardener (a little lilac alien in a leaf hat, riding a cloud), drifts over to each
+// seed's plot ahead of it and watches it come down.
+// Clean is ±0.3 beat (wider with assist), perfect ±0.1.
+// Fidget (F): every press blooms the next seed on the spot. Hold then let go for a glowing rain;
+// a full charge makes the whole garden bloom again and lets out fireflies. Never scores.
+(() => {
+  "use strict";
+
+  const S = NeonSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const INK = "#2a1640";
+  const FERN = "#c9b4ff";
+  // Flowers: bell, star lily, mushroom lamp, puffball, each with its own colour and note
+  const KINDS = [
+    { name: "bell", color: "#ff9ccf", note: 0.2 },
+    { name: "lily", color: "#ffc46b", note: 0.35 },
+    { name: "lamp", color: "#8dffc4", note: 0.5 },
+    { name: "puff", color: "#9fe8ff", note: 0.65 }
+  ];
+  const MOODS = [
+    { top: "#0a0a28", mid: "#251a52", low: "#5a2f78", clouds: ["#ff8fd8", "#7fe9ff", "#b69cff", "#ffb38a"], band: "#d4c4ff", seed: 7, ground: ["#3a2464", "#170c30"], rim: "#c4a0ff" },
+    { top: "#04142a", mid: "#123a58", low: "#2a6e70", clouds: ["#8dffc4", "#7fe9ff", "#b69cff", "#c8fff0"], band: "#c8fff0", seed: 19, ground: ["#1c4152", "#0a1a26"], rim: "#8dffc4" },
+    { top: "#170826", mid: "#45164e", low: "#9a3a76", clouds: ["#ff8fd8", "#c49cff", "#ff9a8a", "#7fe9ff"], band: "#ffd0f0", seed: 31, ground: ["#4a1a4e", "#1c0a22"], rim: "#ff8fd8" },
+    { top: "#170c26", mid: "#4f2546", low: "#b8604e", clouds: ["#ffc46b", "#ff8fd8", "#ffe0a0", "#c49cff"], band: "#ffe8c8", seed: 47, ground: ["#4a2a3a", "#1e0e1a"], rim: "#ffc46b" }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let plots = []; // { x, y, ang, plant: { kind, born, sprout, scale, bump } | null }
+  let seeds = []; // { kind, plot, t0, at, sx, sy, sway, window, state: "fall" | "done" }
+  let petals = [], motes = [], pops = [], rain = [], flies = [];
+  let beatsSince = 99, lastAt = -99, lastPlot = 4;
+  let clock = 0, lastTier = 1, warp = 0, hits = 0;
+  let fern = { x: 0, from: 0, t: 0, aim: null, hop: -9 };
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // The timing ring warms toward gold in the last third of a beat and is full gold, with a glow,
+  // inside the perfect window. Only while timing counts (not in Fidget).
+  const GOLD = "#ffd76a";
+  let timed = true;
+  const gilt = (left) => (!timed ? 0 : Math.abs(left) < PERFECT ? 1 : 0.55 * clamp(1 - (Math.abs(left) - PERFECT) / 0.3, 0, 1));
+  function cueRing(ctx, x, y, r, color, a, w, left) {
+    const g = gilt(left);
+    S.softRing(ctx, x, y, r, g ? S.mix(color, GOLD, g) : color, a, w * (1 + g * 0.8));
+    if (g >= 1) S.glow(ctx, x, y, r * 2.4, GOLD, 0.4 * a);
+  }
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const back = (u) => (u >= 1 ? 1 : 1 + 2.4 * Math.pow(u - 1, 3) + 1.4 * Math.pow(u - 1, 2));
+  const smooth = (u) => u * u * (3 - 2 * u);
+  const frac = (v) => v - Math.floor(v);
+
+  // The moon's surface: a wide circle whose top crosses the lower part of the screen
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const R = Math.max(W * 1.1, 520);
+    const top = H - Math.max(H < 320 ? 84 : 130, H * 0.3); // a short screen keeps more sky for the seeds
+    L = { R, cx: W / 2, cy: top + R, top, k: clamp(Math.min(W, H) / 400, 0.85, 1.5) };
+    L.stem = 70 * L.k;
+    const n = clamp(Math.round(W / (70 * L.k)), 5, 13);
+    const old = plots;
+    plots = [];
+    for (let i = 0; i < n; i++) {
+      const x = W * (0.08 + (0.84 * i) / (n - 1));
+      const ang = Math.asin(clamp((x - L.cx) / L.R, -1, 1));
+      plots.push({ x, y: L.cy - Math.cos(ang) * L.R, ang, plant: old[i] ? old[i].plant : null });
+    }
+    if (!fern.x) fern.x = fern.from = W / 2;
+    lastPlot = Math.min(lastPlot, n - 1);
+  }
+
+  // A seed's path: down from the sky, swaying less as it nears the soil, landing on `at`
+  function seedPos(s, now) {
+    const p = plots[s.plot];
+    const u = clamp((now - s.t0) / (s.at - s.t0), 0, 1.2);
+    const x = s.sx + (p.x - s.sx) * smooth(Math.min(1, u)) + Math.sin(u * Math.PI * 2.5 + s.sway) * 26 * L.k * (1 - Math.min(1, u));
+    return [x, s.sy + (p.y - 6 - s.sy) * u];
+  }
+  const nextSeed = () => seeds.find((s) => s.state === "fall");
+
+  // ---- Drawing helpers --------------------------------------------------------------------------
+  function face(ctx, x, y, r, mood, look) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(r / 10, r / 10);
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1;
+    ctx.fillStyle = "#ff7fae";
+    ctx.globalAlpha = mood === "happy" ? 0.8 : 0.45;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(s * 5.4, 2.6, 1.8, 1.05, 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = ctx.fillStyle = INK;
+    for (const s of [-1, 1]) {
+      const ex = s * 3 + look * 0.8;
+      ctx.beginPath();
+      if (mood === "sleep") {
+        ctx.arc(ex, -0.4, 1.4, Math.PI * 0.15, Math.PI * 0.85);
+        ctx.stroke();
+      } else if (mood === "happy") {
+        ctx.arc(ex, 0.8, 1.5, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      } else {
+        ctx.ellipse(ex, 0, 1.25, 1.65, 0, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(ex - 0.4, -0.6, 0.5, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = INK;
+      }
+    }
+    ctx.beginPath();
+    if (mood === "happy") {
+      ctx.arc(look * 0.5, 2.5, 1.4, 0, Math.PI);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.arc(look * 0.5, 2.1, 1.1, Math.PI * 0.2, Math.PI * 0.8);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function scene(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "bloom" + tier, W, H, (g) => {
+      const m = MOODS[(tier - 1) % 4];
+      S.dreamSky(g, W, H, m);
+      // a big soft planet low in the sky behind the moon
+      const px = W * 0.22, py = L.top - 30, pr = Math.min(W, H) * 0.2;
+      g.globalCompositeOperation = "lighter";
+      const at = g.createRadialGradient(px, py, pr * 0.8, px, py, pr * 1.8);
+      at.addColorStop(0, S.rgba(m.clouds[1], 0.22));
+      at.addColorStop(1, S.rgba(m.clouds[1], 0));
+      g.fillStyle = at;
+      g.fillRect(px - pr * 2, py - pr * 2, pr * 4, pr * 4);
+      g.globalCompositeOperation = "source-over";
+      const body = g.createRadialGradient(px - pr * 0.4, py - pr * 0.4, 0, px, py, pr);
+      body.addColorStop(0, S.mix(m.clouds[1], "#ffffff", 0.35));
+      body.addColorStop(0.6, S.mix(m.clouds[1], m.mid, 0.55));
+      body.addColorStop(1, m.mid);
+      g.fillStyle = body;
+      g.beginPath();
+      g.arc(px, py, pr, 0, TAU);
+      g.fill();
+      // the moon's ground, rim-lit, with soft craters and grass tufts
+      const lin = g.createLinearGradient(0, L.top, 0, H);
+      lin.addColorStop(0, m.ground[0]);
+      lin.addColorStop(1, m.ground[1]);
+      g.fillStyle = lin;
+      g.beginPath();
+      g.arc(L.cx, L.cy, L.R, 0, TAU);
+      g.fill();
+      g.save();
+      g.beginPath();
+      g.arc(L.cx, L.cy, L.R, 0, TAU);
+      g.clip();
+      const r = (i) => frac(Math.sin(i * 91.7 + tier) * 4375.5);
+      for (let i = 0; i < 14; i++) {
+        const x = W * r(i), y = L.top + 30 + (H - L.top) * r(i + 50) * 0.9, s = 8 + r(i + 9) * 26;
+        g.fillStyle = "rgba(10,4,24,0.25)";
+        g.beginPath();
+        g.ellipse(x, y, s, s * 0.4, 0, 0, TAU);
+        g.fill();
+        g.fillStyle = S.rgba(m.rim, 0.08);
+        g.beginPath();
+        g.ellipse(x, y + s * 0.12, s * 0.9, s * 0.3, 0, 0, Math.PI);
+        g.fill();
+      }
+      g.restore();
+      S.haloed(g, m.rim, (g, c, core) => {
+        g.strokeStyle = c;
+        g.lineWidth = core ? 1 : 2.4;
+        g.beginPath();
+        g.arc(L.cx, L.cy, L.R, Math.PI * 1.05, Math.PI * 1.95);
+        g.stroke();
+      });
+      g.strokeStyle = S.rgba(m.rim, 0.5);
+      g.lineWidth = 1.2;
+      g.lineCap = "round";
+      for (let x = 6; x < W; x += 9 + r(x) * 10) {
+        const ang = Math.asin(clamp((x - L.cx) / L.R, -1, 1));
+        const y = L.cy - Math.cos(ang) * L.R;
+        const h = 4 + r(x + 3) * 7;
+        g.beginPath();
+        g.moveTo(x, y + 1);
+        g.quadraticCurveTo(x + 1, y - h * 0.6, x + (r(x + 7) - 0.5) * 6, y - h);
+        g.stroke();
+      }
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // A flower at its plot. grow: 0..1 the stem, 1..2 the bloom opening
+  function drawPlant(ctx, p, now) {
+    const pl = p.plant;
+    const K = KINDS[pl.kind];
+    const age = now - pl.born;
+    const g = clamp(age / 0.6, 0, 1);
+    const open = back(clamp((age - 0.4) / 0.8, 0, 1));
+    const bump = Math.max(0, 1 - (clock - pl.bump) / 0.5);
+    const sway = Math.sin(now * Math.PI * 0.5 + p.x * 0.05) * 0.08 + p.ang;
+    const k = L.k * pl.scale * (1 + 0.15 * bump);
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(sway);
+    if (pl.sprout) {
+      // a sleepy sprout: two leaves and a tiny bud with its eyes shut
+      ctx.strokeStyle = "#8dffc4";
+      ctx.lineWidth = 2 * L.k;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, -14 * L.k * g);
+      ctx.stroke();
+      ctx.fillStyle = "#5ed6a0";
+      for (const s of [-1, 1]) {
+        ctx.beginPath();
+        ctx.ellipse(s * 6 * L.k, -10 * L.k * g, 6 * L.k * g, 3 * L.k * g, s * -0.5, 0, TAU);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+    const h = L.stem * k * (0.7 + (pl.kind % 2) * 0.35) * g;
+    ctx.strokeStyle = S.mix("#8dffc4", K.color, 0.25);
+    ctx.lineWidth = 2.4 * k;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(8 * k, -h * 0.5, 0, -h);
+    ctx.stroke();
+    ctx.fillStyle = "#5ed6a0";
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(s * 7 * k, -h * 0.35, 8 * k * g, 3.2 * k * g, s * -0.6, 0, TAU);
+      ctx.fill();
+    }
+    const pulse = 1 - frac(now);
+    ctx.translate(0, -h);
+    if (open > 0) {
+      const s = open * k;
+      S.glow(ctx, 0, 0, 30 * s * (1 + 0.15 * pulse), K.color, 0.45 + 0.2 * bump);
+      ctx.globalCompositeOperation = "lighter";
+      if (K.name === "bell") {
+        ctx.fillStyle = S.rgba(K.color, 0.85);
+        ctx.beginPath();
+        ctx.moveTo(-10 * s, 4 * s);
+        ctx.quadraticCurveTo(-10 * s, -12 * s, 0, -12 * s);
+        ctx.quadraticCurveTo(10 * s, -12 * s, 10 * s, 4 * s);
+        for (let i = 0; i < 4; i++) ctx.quadraticCurveTo((7.5 - i * 5) * s, 1 * s, (5 - i * 5) * s, 4 * s);
+        ctx.fill();
+        S.glow(ctx, 0, 6 * s, 6 * s, "#fff1d6", 0.8 + 0.2 * pulse);
+      } else if (K.name === "lily") {
+        ctx.fillStyle = S.rgba(K.color, 0.8);
+        for (let i = 0; i < 5; i++) {
+          ctx.save();
+          ctx.rotate((i / 5) * TAU + now * 0.1);
+          ctx.beginPath();
+          ctx.ellipse(0, -9 * s, 4 * s, 9 * s, 0, 0, TAU);
+          ctx.fill();
+          ctx.restore();
+        }
+        S.glow(ctx, 0, 0, 7 * s, "#ffffff", 0.9);
+      } else if (K.name === "lamp") {
+        ctx.fillStyle = S.rgba(K.color, 0.85);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 14 * s, 10 * s, 0, Math.PI, TAU);
+        ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.7)";
+        for (const [x, y] of [[-6, -5], [3, -7], [7, -3]]) {
+          ctx.beginPath();
+          ctx.arc(x * s, y * s, 1.6 * s, 0, TAU);
+          ctx.fill();
+        }
+      } else {
+        for (let i = 0; i < 14; i++) {
+          const a = (i / 14) * TAU + now * 0.15;
+          S.glow(ctx, Math.cos(a) * 11 * s, Math.sin(a) * 11 * s, 4 * s, i % 2 ? K.color : "#ffffff", 0.9);
+        }
+      }
+      ctx.globalCompositeOperation = "source-over";
+      // every flower has a little face, sleepy-happy, swaying with the beat
+      face(ctx, 0, K.name === "bell" ? -3 * s : K.name === "lamp" ? -3 * s : 0, 5.5 * s, bump > 0.1 ? "happy" : (Math.floor(now) + p.x) % 7 === 0 && frac(now) < 0.15 ? "sleep" : "idle", Math.sin(now * 0.7 + p.x) * 0.6);
+    }
+    ctx.restore();
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function plant(api, s, perfect, sprout) {
+    s.state = "done";
+    const p = plots[s.plot];
+    if (p.plant && !p.plant.sprout) {
+      // the old flower lets its petals go
+      for (let i = 0; i < 6; i++) petals.push({ x: p.x, y: p.y - L.stem * L.k * 0.8, vx: (Math.random() - 0.5) * 40, vy: -20 - Math.random() * 30, t: 0, life: 3 + Math.random() * 2, color: KINDS[p.plant.kind].color, spin: Math.random() * TAU });
+    }
+    p.plant = { kind: s.kind, born: api.eng.beatPos(), sprout, scale: perfect ? 1.15 : 0.9 + Math.random() * 0.2, bump: sprout ? -9 : clock };
+    if (sprout) return;
+    const K = KINDS[s.kind];
+    pops.push({ x: p.x, y: p.y, t: 0, size: perfect ? 70 : 46, color: K.color });
+    for (let i = 0; i < (perfect ? 14 : 8) && motes.length < 200; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.4, v = 50 + Math.random() * 80, life = 0.8 + Math.random() * 0.6;
+      motes.push({ x: p.x, y: p.y - 10, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? K.color : "#ffffff", r: 2.5 + Math.random() * 3, star: i % 3 === 0 });
+    }
+    fern.hop = clock;
+    if (perfect) api.ring(p.x, p.y - 20, api.color(), 60);
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: a seed leaves the sky, landing `4` beats on, two at least after the last
+  function onBeat(n, api) {
+    if (++beatsSince < Math.max(2, api.eng.paceBeats()) || !W) return;
+    beatsSince = 0;
+    const at = Math.max(n + 4, lastAt + 2);
+    lastAt = at;
+    // the next plot is a short step from the last, so Fern doesn't have to dash
+    let plot = lastPlot + (Math.random() < 0.5 ? -1 : 1) * (1 + Math.floor(Math.random() * 3));
+    if (plot < 0 || plot >= plots.length) plot = lastPlot - (plot - lastPlot);
+    plot = clamp(plot, 0, plots.length - 1);
+    lastPlot = plot;
+    const p = plots[plot];
+    seeds.push({ kind: Math.floor(Math.random() * KINDS.length), plot, t0: n, at, sx: clamp(p.x + (Math.random() - 0.5) * W * 0.6, W * 0.1, W * 0.9), sy: 40, sway: Math.random() * TAU, window: 0.3 + 0.15 * api.eng.assist, state: "fall" });
+  }
+
+  // 3. A tap: the seed landing now blooms
+  function onFire(api) {
+    const now = api.eng.beatPos();
+    if (api.style === "fidget") {
+      const s = nextSeed();
+      if (s) {
+        plant(api, s, false, false);
+        api.eng.tap({ height: KINDS[s.kind].note });
+      } else {
+        const plot = Math.floor(Math.random() * plots.length);
+        plant(api, { kind: Math.floor(Math.random() * 4), plot }, false, false);
+        api.eng.tap({ height: 0.5 });
+      }
+      return;
+    }
+    let s = null;
+    for (const x of seeds) if (x.state === "fall" && Math.abs(now - x.at) < x.window && (!s || Math.abs(now - x.at) < Math.abs(now - s.at))) s = x;
+    api.eng.tap({ height: s ? KINDS[s.kind].note : 0.85 });
+    if (!s) {
+      pops.push({ x: fern.x, y: L.top - 70 * L.k, t: 0, size: 26, color: FERN });
+      return;
+    }
+    const perfect = Math.abs(now - s.at) < PERFECT;
+    plant(api, s, perfect, false);
+    // 4. Score it
+    api.hit(perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 1.5);
+    if (++hits === 16) api.hint("rain", 'Hold <span class="pb-kbd">Space</span>, let go: a glowing rain');
+  }
+
+  // A hold then release: glowing rain over the garden; a full charge blooms it all again and
+  // lets out fireflies
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    for (let i = 0; i < 20 + c * 40; i++) rain.push({ x: Math.random() * W, y: -Math.random() * H * 0.6, v: 300 + Math.random() * 200, color: api.color() });
+    if (c >= 1) {
+      for (const p of plots) if (p.plant) {
+        p.plant.sprout = false;
+        p.plant.bump = clock;
+        p.plant.scale = Math.max(p.plant.scale, 1.1);
+      }
+      for (let i = 0; i < 24; i++) flies.push({ x: Math.random() * W, y: L.top - Math.random() * 60, p: Math.random() * TAU, t: 0, life: 8 + Math.random() * 6 });
+      api.callout("Full bloom", W / 2, H * 0.3, "#ffc46b", 1.2);
+      api.eng.chime();
+      warp = 1;
+    }
+  }
+
+  function autopilot(dt, api) {
+    const now = api.eng.beatPos();
+    for (const s of seeds) if (s.state === "fall" && now >= s.at) plant(api, s, false, false);
+  }
+
+  // 2. Movement and misses
+  // ---- Asides: now and then something happens far off ---------------------------------------
+  // Slow and faint, behind everything and never on the beat, so it never gets in the way of the
+  // timing, and never gold, which means "tap now". One at a time, every 14 to 30 seconds,
+  // and never the same one twice running.
+  let aside = null, asideIn = 8 + Math.random() * 6, asideLast = -1;
+  const fadeIO = (u) => Math.min(1, u * 5, (1 - u) * 5);
+  // x across the screen at progress u, coming in from the side a.dir says, m of a width off each edge
+  const across = (a, u, m) => (a.dir > 0 ? -W * m + u * W * (1 + 2 * m) : W * (1 + m) - u * W * (1 + 2 * m));
+  function asides(dt) {
+    if (aside) {
+      if ((aside.t += dt) >= aside.dur) {
+        aside = null;
+        asideIn = 14 + Math.random() * 16;
+      }
+      return;
+    }
+    if ((asideIn -= dt) > 0) return;
+    let i = Math.floor(Math.random() * ASIDES.length);
+    if (i === asideLast) i = (i + 1) % ASIDES.length;
+    asideLast = i;
+    aside = Object.assign({ i, t: 0, dir: Math.random() < 0.5 ? -1 : 1, y: 0.06 + Math.random() * 0.14, x0: 0.15 + Math.random() * 0.55 }, ASIDES[i].start);
+  }
+  function drawAside(ctx) {
+    if (!aside) return;
+    const u = aside.t / aside.dur;
+    ASIDES[aside.i].draw(ctx, aside, u, fadeIO(u), Math.min(W, H) / 500);
+  }
+  const ASIDES = [
+    { // a moon moth flutters across
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.1), y = H * (0.16 + a.y) + Math.sin(a.t * 1.7) * 26 * k;
+        const flap = 0.3 + 0.7 * Math.abs(Math.sin(a.t * 8));
+        for (const s of [-1, 1]) S.glow(ctx, x + s * 8 * k * flap, y - 2 * k, 9 * k, "#e8d6ff", f * 0.45);
+        S.glow(ctx, x, y, 3 * k, "#ffffff", f * 0.7);
+      }
+    },
+    { // sky lanterns rising from far away
+      start: { dur: 17 },
+      draw(ctx, a, u, f, k) {
+        for (let n = 0; n < 4; n++) {
+          const v = u * 1.3 - n * 0.1;
+          if (v < 0) continue;
+          const x = W * (a.x0 + n * 0.08) + Math.sin(a.t * 0.6 + n) * 10 * k, y = H * (0.5 - v * 0.5);
+          S.glow(ctx, x, y, 14 * k, "#ff9ccf", f * 0.35);
+          S.glow(ctx, x, y, 4 * k, "#fff1d6", f * 0.6);
+        }
+      }
+    },
+    { // a comet, slow, its tail of light behind it
+      start: { dur: 11 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + u * 0.05);
+        for (let j = 9; j >= 0; j--) S.glow(ctx, x - a.dir * j * 13 * k, y - j * 0.8 * k, (16 - j) * k, "#bba6ff", f * 0.2 * (1 - j / 11));
+        S.twinkle(ctx, x, y, 9 * k, "#ffffff", f * 0.7);
+      }
+    },
+    { // three shooting stars, one after another
+      start: { dur: 3.4 },
+      draw(ctx, a, u, f, k) {
+        ["#ffc2ea", "#8dffc4", "#9fe8ff"].forEach((c, n) => {
+          const v = (u * 3.4 - n * 0.8) / 0.9;
+          if (v < 0 || v > 1) return;
+          const x0 = W * (0.15 + 0.22 * n + a.y), y0 = H * (0.05 + 0.05 * n);
+          for (let j = 0; j < 7; j++) {
+            const w = Math.max(0, v - j * 0.035);
+            S.glow(ctx, x0 + a.dir * w * W * 0.3, y0 + w * H * 0.12, (6 - j * 0.6) * k, c, (1 - v) * 0.55 * (1 - j / 7));
+          }
+        });
+      }
+    },
+    { // night birds in a loose V, drifting over
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + 0.04) + Math.sin(a.t * 0.8) * 8 * k;
+        for (let i = 0; i < 7; i++) {
+          const row = Math.ceil(i / 2), side = i % 2 ? 1 : -1;
+          const bx = x - a.dir * row * 15 * k, by = y + side * row * 8 * k + Math.sin(a.t * 3 + i) * 2 * k;
+          S.glow(ctx, bx, by, 6 * k, "#d6c8ff", f * 0.45);
+          S.glow(ctx, bx, by, 2.5 * k, "#ffffff", f * 0.5);
+        }
+      }
+    }
+  ];
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    asides(dt);
+    for (const s of seeds) {
+      if (s.state === "fall" && now > s.at + s.window) {
+        plant(api, s, false, true);
+        if (api.miss()) api.hint("land", "Tap as the seed touches the soil");
+      }
+    }
+    seeds = seeds.filter((s) => s.state === "fall");
+    // Fern drifts over above the next seed's plot, there half a beat before it lands
+    const nd = nextSeed();
+    if (nd !== fern.aim) {
+      fern.aim = nd;
+      fern.from = fern.x;
+      fern.t = now;
+    }
+    if (nd) {
+      const tx = plots[nd.plot].x + (plots[nd.plot].x > W / 2 ? -1 : 1) * 46 * L.k;
+      const u = clamp((now - fern.t) / Math.max(0.3, nd.at - 0.5 - fern.t), 0, 1);
+      fern.x = fern.from + (tx - fern.from) * smooth(u);
+    }
+    const drag = Math.pow(0.15, dt);
+    for (let i = motes.length - 1; i >= 0; i--) {
+      const p = motes[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 22 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) motes.splice(i, 1);
+    }
+    for (let i = petals.length - 1; i >= 0; i--) {
+      const p = petals[i];
+      p.x += (p.vx + Math.sin(clock + p.spin) * 14) * dt;
+      p.y += p.vy * dt;
+      if ((p.t += dt) > p.life) petals.splice(i, 1);
+    }
+    for (let i = rain.length - 1; i >= 0; i--) if ((rain[i].y += rain[i].v * dt) > L.top + 20) rain.splice(i, 1);
+    for (let i = flies.length - 1; i >= 0; i--) if ((flies[i].t += dt) > flies[i].life) flies.splice(i, 1);
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    if (api.tier !== lastTier) {
+      if (api.tier > lastTier) warp = 1;
+      sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    }
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    warp = Math.max(0, warp - dt * 0.9);
+  }
+
+  // 5. The look
+  function draw(ctx, api) {
+    timed = api.style !== "fidget";
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) scene(ctx, sky.from, 1);
+    scene(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const mood = MOODS[(api.tier - 1) % 4];
+    S.glow(ctx, W * (0.6 + 0.1 * Math.sin(clock * 0.06)), H * 0.25, W * 0.7, mood.clouds[0], 0.08);
+    S.stars(ctx, W, H * 0.8, warp);
+    drawAside(ctx);
+    S.motes(ctx, W, H * 0.8, clock, [mood.clouds[1], mood.clouds[2], "#fff1d6"], { n: 10, size: 8, rise: 5, sway: 18, alpha: 0.25, seed: 6 });
+    // the garden's glow on the ground breathes with the beat
+    S.glow(ctx, W / 2, L.top + 10, W * 0.6, mood.rim, 0.06 + 0.05 * pulse);
+
+    for (const r of rain) {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = S.rgba(r.color, 0.5);
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(r.x, r.y);
+      ctx.lineTo(r.x, r.y - 14);
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+    }
+    for (const p of plots) if (p.plant) drawPlant(ctx, p, now);
+
+    // Seeds: a little star with a tail of light, and the ring closing on its plot
+    for (const s of seeds) {
+      const K = KINDS[s.kind];
+      const trail = [];
+      for (let i = 0; i < 8; i++) {
+        const at = now - i * 0.05;
+        if (at < s.t0) break;
+        trail.push(seedPos(s, at));
+      }
+      if (trail.length > 1) S.streak(ctx, trail, 3 * L.k + 2, K.color);
+      const [x, y] = seedPos(s, now);
+      S.glow(ctx, x, y, 22 * L.k + 8, K.color, 0.5);
+      S.twinkle(ctx, x, y, 12 * L.k + 4, K.color, 0.9);
+      const left = s.at - now;
+      if (left < 2) {
+        const p = plots[s.plot];
+        cueRing(ctx, p.x, p.y - 4, 8 + Math.max(0, left) * 34 * L.k, K.color, Math.min(1, (2 - left) / 0.6), 1.4, left);
+      }
+    }
+
+    // Fern on her cloud, bobbing to the beat, watching the seed come down
+    const fy = L.top - 78 * L.k + Math.sin(clock * 1.6) * 4;
+    const hop = Math.max(0, 1 - (clock - fern.hop) / 0.4);
+    const fyy = fy - Math.sin(hop * Math.PI) * 10 * L.k;
+    const fk = L.k;
+    for (let i = -2; i <= 2; i++) S.glow(ctx, fern.x + i * 11 * fk, fy + 18 * fk + Math.abs(i) * 2, (16 - Math.abs(i) * 3) * fk, "#ffffff", 0.35);
+    ctx.save();
+    ctx.translate(fern.x, fyy);
+    S.glow(ctx, 0, 0, 34 * fk, FERN, 0.25);
+    const body = ctx.createRadialGradient(-5 * fk, -6 * fk, 1, 0, 0, 16 * fk);
+    body.addColorStop(0, "#f2ecff");
+    body.addColorStop(0.5, FERN);
+    body.addColorStop(1, "#6a4fb0");
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 14 * fk, 15 * fk * (1 - 0.08 * hop), 0, 0, TAU);
+    ctx.fill();
+    // the leaf hat
+    ctx.fillStyle = "#5ed6a0";
+    ctx.beginPath();
+    ctx.ellipse(-2 * fk, -15 * fk, 11 * fk, 4.5 * fk, -0.35, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = "#c8fff0";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-11 * fk, -12 * fk);
+    ctx.lineTo(7 * fk, -18 * fk);
+    ctx.stroke();
+    const nd = nextSeed();
+    const look = nd ? clamp((seedPos(nd, now)[0] - fern.x) / 80, -1, 1) : 0;
+    face(ctx, 0, 1 * fk, 9 * fk, hop > 0 ? "happy" : "idle", look);
+    ctx.restore();
+
+    for (const f of flies) {
+      const a = Math.min(1, f.t, f.life - f.t);
+      const x = f.x + Math.sin(clock * 0.8 + f.p) * 30, y = f.y - f.t * 12 + Math.sin(clock * 1.3 + f.p * 2) * 12;
+      S.glow(ctx, x, y, 8, "#ffe08a", a * (0.6 + 0.4 * Math.sin(clock * 5 + f.p)));
+    }
+    for (const p of petals) {
+      const a = Math.min(1, p.life - p.t);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.spin + p.t * 1.5);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = a * 0.8;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 5, 2.4, 0, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    for (const f of pops) {
+      const e = Math.min(1, f.t / 0.5);
+      S.glow(ctx, f.x, f.y, f.size * (0.6 + e), f.color, (1 - e) * 0.7);
+      S.softRing(ctx, f.x, f.y, f.size * 0.3 + f.size * 0.8 * ease(e), f.color, (1 - e) * 0.8, 1.4);
+    }
+    for (const p of motes) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, p.r * 2, p.color, a);
+      else S.glow(ctx, p.x, p.y, p.r * 1.6, p.color, a * 0.9);
+    }
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const color = c >= 1 ? "#ffc46b" : FERN;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = color;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(fern.x, fyy, 26 * fk, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+    S.motes(ctx, W, H, clock, [api.color(), "#ffc2ea", "#d6c8ff"], { n: 5, size: 24, rise: 12, sway: 26, alpha: 0.1, seed: 33 });
+  }
+
+  SpaceShell.mount({
+    key: "bloom",
+    title: "Bloom",
+    hint: "Tap as each seed touches the soil",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Sprouting", "Blossom", "Full bloom"],
+    onPhrase: () => (warp = Math.max(warp, 0.45)),
+    fidgetPoint: () => ({ x: fern.x, y: L.top - 78 * L.k }),
+    resize: layout,
+    onBeat,
+    onFire,
+    onRelease,
+    autopilot,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

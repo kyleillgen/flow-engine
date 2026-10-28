@@ -1,12 +1,18 @@
 // Plays every game for a few seconds in a headless browser: it must load without errors, draw,
 // keep animating, and survive presses (a held one too). Run with `npm run smoke`.
 // Uses the full `puppeteer` package when installed (CI); otherwise `puppeteer-core` with the
-// browser named in BROWSER.
+// browser named in BROWSER, or Edge or Chrome where they usually live.
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-let puppeteer;
-try { puppeteer = require("puppeteer"); } catch { puppeteer = require("puppeteer-core"); }
+let puppeteer, full = true;
+try { puppeteer = require("puppeteer"); } catch { puppeteer = require("puppeteer-core"); full = false; }
+const guess = ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Google/Chrome/Application/chrome.exe", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "/usr/bin/google-chrome", "/usr/bin/chromium"].find((p) => fs.existsSync(p));
+const executablePath = process.env.BROWSER || (full ? undefined : guess);
+if (!full && !executablePath) {
+  console.error("No browser found: set BROWSER to a Chrome or Edge executable, or npm install puppeteer");
+  process.exit(1);
+}
 
 const ROOT = path.join(__dirname, "..");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".woff2": "font/woff2", ".md": "text/markdown", ".png": "image/png", ".json": "application/json" };
@@ -22,8 +28,16 @@ const server = http.createServer((req, res) => {
 (async () => {
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await puppeteer.launch({ headless: true, executablePath: process.env.BROWSER || undefined, args: ["--mute-audio", "--no-sandbox"] });
-  const games = fs.readdirSync(path.join(ROOT, "games")).filter((f) => f.endsWith(".html"));
+  const browser = await puppeteer.launch({ headless: true, executablePath, args: ["--mute-audio", "--no-sandbox"] });
+  // Every game in games/ and in each cartridge's games/ folder. An argument narrows it: a
+  // cartridge id (its cart.json games) or part of a file name, e.g. npm run smoke -- hunt
+  const inDir = (d) => (fs.existsSync(path.join(ROOT, d)) ? fs.readdirSync(path.join(ROOT, d)).filter((f) => f.endsWith(".html")).map((f) => d + "/" + f) : []);
+  let games = [...inDir("games"), ...fs.readdirSync(path.join(ROOT, "carts")).flatMap((c) => inDir(`carts/${c}/games`))];
+  const only = process.argv[2];
+  if (only) {
+    const cart = path.join(ROOT, "carts", only, "cart.json");
+    games = fs.existsSync(cart) ? JSON.parse(fs.readFileSync(cart, "utf8")).games.map((g) => g.file) : games.filter((g) => g.includes(only));
+  }
   let failed = 0;
   for (const g of games) {
     const page = await browser.newPage();
@@ -32,7 +46,7 @@ const server = http.createServer((req, res) => {
     page.on("requestfailed", (r) => errs.push("failed to load " + r.url()));
     page.on("response", (r) => r.status() >= 400 && errs.push(`${r.status()} ${r.url()}`));
     await page.setViewport({ width: 400, height: 720 });
-    await page.goto(`${base}/games/${g}`);
+    await page.goto(`${base}/${g}`);
     await sleep(1200);
     const frame = () => page.evaluate(() => {
       const c = document.querySelector("canvas");

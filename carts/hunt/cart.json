@@ -1,0 +1,39 @@
+{
+  "id": "hunt",
+  "name": "Hunt",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "A woods lodge at dusk: deer, birds, a roosting turkey and a gallery booth. The sights glide in by themselves; timing is the whole game.",
+  "colors": [
+    "#ffb547",
+    "#ff6a2b"
+  ],
+  "files": [
+    "shell/space-shell.js",
+    "skins/hunt/hunt-skin.js",
+    "skins/pinball/fonts/oswald-latin.woff2",
+    "skins/pinball/fonts/inter-latin.woff2"
+  ],
+  "games": [
+    {
+      "file": "games/leap.html",
+      "label": "Leap",
+      "hint": "Tap at the top of each deer's leap"
+    },
+    {
+      "file": "games/flush.html",
+      "label": "Flush",
+      "hint": "Tap as each bird hangs at the top"
+    },
+    {
+      "file": "games/roost.html",
+      "label": "Roost",
+      "hint": "Tap as the turkey pops out"
+    },
+    {
+      "file": "games/range.html",
+      "label": "Range",
+      "hint": "Tap as each target crosses the brass mark"
+    }
+  ]
+}

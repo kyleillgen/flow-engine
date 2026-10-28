@@ -10,15 +10,15 @@ It runs on [Neutralinojs](https://neutralino.js.org), which uses the WebView2 en
 node pocket/setup.mjs
 ```
 
-This downloads the Neutralino runtime from its official GitHub release, pinned to v6.10.0 (only the Windows exe is kept, as `pocket/flow-pocket.exe`, plus the 18 KB `neutralino.js` client), then copies the engine, shell, skin and games into `pocket/resources`. Nothing is installed system-wide. The exe is not code-signed, which is normal for Neutralino releases.
+This downloads the Neutralino runtime from its official GitHub release, pinned to v6.10.0 (only the Windows exe is kept, as `pocket/flow-pocket.exe`, plus the 18 KB `neutralino.js` client), then installs the cartridges into `pocket/resources/carts`: every one in `carts/`, plus any `.cart` file you've put in `~/.flow-pocket/carts/`. Nothing is installed system-wide. The exe is not code-signed, which is normal for Neutralino releases.
 
-After changing a game, run `node pocket/setup.mjs --sync`. A running pocket notices and reloads itself within a couple of seconds.
+After changing a game or adding a cartridge, run `node pocket/setup.mjs --sync`. A running pocket notices and reloads itself within a couple of seconds.
 
 ## Run
 
 Double-click **`pocket/Flow Pocket.cmd`** (or pin a shortcut to it on the taskbar).
 
-- **Flow / Orbit / Flip / Rico** switch games, or press **1–4**. The last one you played is remembered.
+- **The cartridge button** (first on the second row) switches to the next cartridge; the strip takes its colours. The game buttons switch games within it, or press **1–6**. Each cartridge remembers the last game you played. The last one you played is remembered. The window itself wears the neon skin.
 - **F** switches between Flow and Fidget.
 - **Side / Corner / Mini** docks the window: a full-height column on the right edge, the bottom-right corner, or a small square. Drag or resize it and the new spot is remembered for that dock.
 - **Pin** keeps the window on top (on by default; it re-asserts itself if Windows drops it).
@@ -62,8 +62,8 @@ It summarises each game and flags anything out of range, naming the knob to adju
 |---|---|
 | `neutralino.config.json` | Window settings, a fixed local port (41823, below the ranges Windows reserves for Hyper-V and WSL) and the short list of native calls the app may use |
 | `resources/index.html` | The launcher: game switcher, dock, pin, Claude lamp, and the game in a frame |
-| `setup.mjs` | Downloads the runtime and copies the engine, shell, skin and games in |
+| `setup.mjs` | Downloads the runtime and installs the cartridges |
 | `signal.mjs` | Writes the signal for Claude Code hooks or build scripts |
 | `report.mjs` | The tuning report from `sessions.log` |
 | `Flow Pocket.cmd` | Starts the app |
-| `flow-pocket.exe`, `bin/`, `resources/{engine,shell,skins,games,js}/` | Downloaded or copied by setup; not in git |
+| `flow-pocket.exe`, `bin/`, `resources/{carts,js}/` | Downloaded or installed by setup; not in git |

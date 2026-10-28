@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Late at the café, cups slide along the counter on the beat. Tap as each one passes under the pitcher and pour a heart into the crema. A rhythm micro-game that finds your tempo.">
+<title>Pour</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/cafe/cafe-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Pour: a night shift at the café. Cups slide along the counter at a steady pace, each one
+// reaching the milk pitcher on a whole beat. Tap as it passes under the spout and the pitcher
+// tips: a heart blooms in the crema, or a rosetta if you're right on it. A cup you miss just goes
+// on as a plain black coffee; nothing is lost.
+//
+// A cup's place is a function of the beat position: x = spout + (at - now) * pace. Clean is
+// ±0.3 beat (wider with assist, for cups not yet on the counter), perfect ±0.1.
+// Fidget (F): every press pours into the next cup wherever it is. Hold then let go for a flourish;
+// a full charge pours a swan of steam over every cup and wakes Biscuit. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = CafeSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const MILK = "#f3e7d3";
+  const CUPS = ["#efe3cf", "#a3b596", "#d9a093", "#8fa3b5", "#e8cf8f"];
+  // The wall's mood per tier: a slow drift from plum to rose to moss to honey
+  const WALLS = [["#241a1d", "#1a1214"], ["#2a1a1c", "#1c1213"], ["#1e1f1a", "#141510"], ["#2a2118", "#1c1510"]];
+
+  let W = 0, H = 0, L = {};
+  let track = { list: [] }; // the shell's tracker; cups: { at, kind, state, art, litAt, window, seed }
+  let pops = [], sparks = [];
+  let clock = 0, lastTier = 1, hits = 0;
+  let pour = null; // { t0, x } the pitcher tipping, in clock seconds, toward cup x (world)
+  let flourish = null; // { t0, full }
+  let catWake = 0, catEar = 0;
+  // Life in the background, on its own clock and never on a beat: the street outside, a moth that
+  // finds the lamp now and then, and Biscuit stirring in his sleep
+  const life = S.street();
+  let moth = { on: 0, wait: 20 + Math.random() * 20 }, stir = 6 + Math.random() * 8;
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const rx = clamp(Math.min(W, H) * 0.085, 26, 50);
+    const counter = Math.round(H * 0.7);
+    L = {
+      rx,
+      counter,
+      cupY: counter - rx * 1.15,
+      spout: W * 0.5,
+      pace: clamp(W * 0.19, 80, 230),
+      win: { x: Math.round(W * 0.05), y: Math.round(H * 0.13), w: Math.round(W * 0.56), h: Math.round(H * 0.36) }
+    };
+    L.spoutY = L.cupY - rx * 1.9;
+    L.lead = Math.ceil((W - L.spout + rx * 2) / L.pace) + 1;
+  }
+  const cupX = (c, now) => L.spout + (c.at - now) * L.pace;
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  function cupSprite(ctx, kind) {
+    const rx = Math.round(L.rx), c = CUPS[kind];
+    return S.sprite(ctx, "cup" + kind + "_" + rx, rx * 3.4, rx * 2.2, rx * 1.7, rx * 0.5, (g) => {
+      // saucer
+      g.fillStyle = "rgba(10,6,6,0.35)";
+      g.beginPath();
+      g.ellipse(0, rx * 1.12, rx * 1.55, rx * 0.36, 0, 0, TAU);
+      g.fill();
+      const sau = g.createLinearGradient(-rx * 1.5, 0, rx * 1.5, 0);
+      sau.addColorStop(0, S.mix(c, "#2b1b17", 0.35));
+      sau.addColorStop(0.65, S.mix(c, "#fff6e4", 0.2));
+      sau.addColorStop(1, S.mix(c, "#2b1b17", 0.2));
+      g.fillStyle = sau;
+      g.beginPath();
+      g.ellipse(0, rx * 1.02, rx * 1.45, rx * 0.34, 0, 0, TAU);
+      g.fill();
+      g.fillStyle = S.mixA(c, "#2b1b17", 0.3, 0.6);
+      g.beginPath();
+      g.ellipse(0, rx * 0.98, rx * 0.8, rx * 0.17, 0, 0, TAU);
+      g.fill();
+      // handle
+      g.strokeStyle = S.mix(c, "#2b1b17", 0.15);
+      g.lineWidth = rx * 0.16;
+      g.beginPath();
+      g.ellipse(rx * 1.02, rx * 0.36, rx * 0.3, rx * 0.26, 0, -Math.PI * 0.6, Math.PI * 0.6);
+      g.stroke();
+      // the bowl, lit from the lamp on the right
+      const body = g.createLinearGradient(-rx, 0, rx, 0);
+      body.addColorStop(0, S.mix(c, "#2b1b17", 0.45));
+      body.addColorStop(0.7, S.mix(c, "#fff6e4", 0.25));
+      body.addColorStop(1, S.mix(c, "#2b1b17", 0.15));
+      g.fillStyle = body;
+      g.beginPath();
+      g.moveTo(-rx, 0);
+      g.bezierCurveTo(-rx, rx * 0.7, -rx * 0.6, rx * 0.98, 0, rx * 0.98);
+      g.bezierCurveTo(rx * 0.6, rx * 0.98, rx, rx * 0.7, rx, 0);
+      g.closePath();
+      g.fill();
+      // the rim and the inside wall
+      g.fillStyle = S.mix(c, "#fff6e4", 0.35);
+      g.beginPath();
+      g.ellipse(0, 0, rx, rx * 0.36, 0, 0, TAU);
+      g.fill();
+      g.fillStyle = S.mix(c, "#2b1b17", 0.25);
+      g.beginPath();
+      g.ellipse(0, rx * 0.02, rx * 0.92, rx * 0.31, 0, 0, TAU);
+      g.fill();
+    });
+  }
+  // The coffee's surface, top down (drawn squashed into the rim): crema, and the art in milk
+  function surfaceSprite(ctx, art) {
+    const R = Math.round(L.rx * 0.88);
+    return S.sprite(ctx, "surf" + art + "_" + R, R * 2 + 4, R * 2 + 4, R + 2, R + 2, (g) => {
+      const cr = g.createRadialGradient(0, 0, R * 0.1, 0, 0, R);
+      cr.addColorStop(0, art === "plain" ? "#4a2e20" : "#b98656");
+      cr.addColorStop(0.75, art === "plain" ? "#5b3a2a" : "#a36d42");
+      cr.addColorStop(1, "#5b3a2a");
+      g.fillStyle = cr;
+      g.beginPath();
+      g.arc(0, 0, R, 0, TAU);
+      g.fill();
+      if (art === "plain") {
+        g.strokeStyle = "rgba(201,155,109,0.35)";
+        g.lineWidth = R * 0.05;
+        g.beginPath();
+        g.arc(0, 0, R * 0.45, 0.4, 4.6);
+        g.stroke();
+        return;
+      }
+      g.fillStyle = MILK;
+      if (art === "heart") heart(g, 0, R * 0.05, R * 0.62);
+      else if (art === "rosetta") {
+        // a fern of leaves down a stem, a little heart on top
+        for (let i = 0; i < 6; i++) {
+          const y = -R * 0.45 + i * R * 0.17, w = R * (0.62 - i * 0.07);
+          g.globalAlpha = 0.92 - i * 0.05;
+          g.beginPath();
+          g.moveTo(-w, y - R * 0.04);
+          g.quadraticCurveTo(0, y + R * 0.2, w, y - R * 0.04);
+          g.quadraticCurveTo(0, y + R * 0.08, -w, y - R * 0.04);
+          g.fill();
+        }
+        g.globalAlpha = 1;
+        heart(g, 0, -R * 0.62, R * 0.2);
+        g.strokeStyle = MILK;
+        g.lineWidth = R * 0.04;
+        g.beginPath();
+        g.moveTo(0, -R * 0.5);
+        g.lineTo(0, R * 0.62);
+        g.stroke();
+      } else {
+        // a tulip: three stacked blobs
+        for (let i = 0; i < 3; i++) {
+          g.beginPath();
+          g.ellipse(0, R * (0.35 - i * 0.32), R * (0.5 - i * 0.1), R * 0.17, 0, 0, TAU);
+          g.fill();
+        }
+      }
+    });
+  }
+  function heart(g, x, y, s) {
+    g.beginPath();
+    g.moveTo(x, y + s * 0.75);
+    g.bezierCurveTo(x - s * 1.1, y + s * 0.05, x - s * 0.7, y - s * 0.75, x, y - s * 0.3);
+    g.bezierCurveTo(x + s * 0.7, y - s * 0.75, x + s * 1.1, y + s * 0.05, x, y + s * 0.75);
+    g.fill();
+  }
+  function pitcherSprite(ctx) {
+    const k = Math.round(L.rx);
+    // origin at the spout's lip
+    return S.sprite(ctx, "pitcher" + k, k * 3, k * 2.6, k * 0.3, k * 0.5, (g) => {
+      const steel = g.createLinearGradient(0, 0, k * 2, 0);
+      steel.addColorStop(0, "#6d6460");
+      steel.addColorStop(0.35, "#d8cbbb");
+      steel.addColorStop(0.6, "#9a8f86");
+      steel.addColorStop(1, "#4e4643");
+      g.fillStyle = steel;
+      g.beginPath();
+      g.moveTo(0, 0);
+      g.lineTo(k * 0.55, -k * 0.2);
+      g.lineTo(k * 1.95, -k * 0.2);
+      g.lineTo(k * 2.1, k * 1.6);
+      g.lineTo(k * 0.55, k * 1.6);
+      g.lineTo(k * 0.4, k * 0.45);
+      g.closePath();
+      g.fill();
+      g.strokeStyle = "#7d736c";
+      g.lineWidth = k * 0.16;
+      g.beginPath();
+      g.ellipse(k * 2.2, k * 0.65, k * 0.3, k * 0.5, 0, -Math.PI * 0.55, Math.PI * 0.55);
+      g.stroke();
+      g.fillStyle = "rgba(255,246,228,0.35)";
+      g.fillRect(k * 0.85, -k * 0.1, k * 0.14, k * 1.6);
+    });
+  }
+
+  // The room, baked per tier: the wall, the window frame, a shelf of jars, the counter
+  function room(g, tier) {
+    const [top, low] = WALLS[(tier - 1) % 4];
+    const lin = g.createLinearGradient(0, 0, 0, H);
+    lin.addColorStop(0, top);
+    lin.addColorStop(1, low);
+    g.fillStyle = lin;
+    g.fillRect(0, 0, W, H);
+    const w = L.win;
+    S.nightWindow(g, w.x, w.y, w.w, w.h, 7);
+    // frame and mullions
+    g.strokeStyle = "#3b2a22";
+    g.lineWidth = 8;
+    g.strokeRect(w.x - 4, w.y - 4, w.w + 8, w.h + 8);
+    g.lineWidth = 4;
+    g.beginPath();
+    g.moveTo(w.x + w.w / 2, w.y);
+    g.lineTo(w.x + w.w / 2, w.y + w.h);
+    g.moveTo(w.x, w.y + w.h * 0.45);
+    g.lineTo(w.x + w.w, w.y + w.h * 0.45);
+    g.stroke();
+    S.wood(g, w.x - 14, w.y + w.h + 2, w.w + 28, 12, 9);
+    // a shelf with jars and a little plant, on the right
+    const sx = w.x + w.w + 26, sy = H * 0.3, sw = W - sx - 10;
+    if (sw > 60) {
+      S.wood(g, sx, sy, sw, 7, 13);
+      const r = S.rng(3);
+      let x = sx + 8;
+      while (x < sx + sw - 24) {
+        const jw = 16 + r() * 14, jh = 22 + r() * 22;
+        const c = ["#8fa3b5", "#d9a093", "#e8cf8f", "#a3b596"][Math.floor(r() * 4)];
+        g.fillStyle = S.mixA(c, "#140e10", 0.45, 0.85);
+        g.fillRect(x, sy - jh, jw, jh);
+        g.fillStyle = S.mixA(c, "#fff6e4", 0.2, 0.35);
+        g.fillRect(x + 3, sy - jh + 4, 3, jh - 8);
+        g.fillStyle = "#3b2a22";
+        g.fillRect(x - 1, sy - jh - 4, jw + 2, 5);
+        x += jw + 6 + r() * 8;
+      }
+    }
+    // wainscot below the window
+    g.fillStyle = "rgba(0,0,0,0.18)";
+    g.fillRect(0, L.counter - H * 0.12, W, H * 0.12);
+    // the counter: a top lit by the lamp and a dark front
+    const top0 = L.counter - H * 0.045;
+    S.wood(g, 0, top0, W, L.counter - top0 + 2, 21, "#6a4632");
+    S.wood(g, 0, L.counter, W, H - L.counter, 33, "#3a281f");
+    g.fillStyle = "rgba(0,0,0,0.35)";
+    g.fillRect(0, L.counter, W, 3);
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function fill(api, c, art, ghost) {
+    c.state = "art";
+    c.art = art;
+    c.litAt = api.eng.beatPos();
+    pour = { t0: clock, c };
+    pops.push({ c, t: 0, big: art === "rosetta" });
+    for (let i = 0; i < (art === "rosetta" ? 6 : 3) && sparks.length < 60; i++) sparks.push({ c, dx: (Math.random() - 0.5) * L.rx * 2, dy: -Math.random() * L.rx, t: -i * 0.06, color: i % 2 ? "#ffe2b0" : MILK });
+    if (art === "rosetta" && !ghost) {
+      api.ring(cupX(c, c.litAt), L.cupY, api.color(), L.rx * 2.2);
+      catEar = 1;
+    }
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1-4. The shell's tracker brings a cup to the spout on a whole beat, `lead` beats out and at
+  // least two after the last, judges the tap, scores it and plays autopilot; this says what a cup is
+  function setup(api) {
+    track = api.track({
+      ahead: () => L.lead, // a wider counter sends cups out sooner
+      perfect: PERFECT,
+      keep: 8,
+      cue: false, // drawn in the scene's perspective, below
+      spawn() {
+        const prev = track.list[track.list.length - 1];
+        let kind = Math.floor(Math.random() * CUPS.length);
+        if (prev && kind === prev.kind) kind = (kind + 1) % CUPS.length;
+        return { kind, art: null, litAt: -99, seed: Math.random() * 10 };
+      },
+      note: (c) => c.kind / CUPS.length,
+      // A tap: the pitcher tips over the cup passing under it. Autopilot and Fidget pour freehand.
+      hit(c, { perfect, ghost }) {
+        fill(api, c, ghost ? (Math.random() < 0.6 ? "heart" : "tulip") : perfect ? "rosetta" : "heart", ghost);
+        if (!ghost && ++hits === 16) api.hint("flourish", 'hold <span class="pb-kbd">Space</span>, let go: a flourish');
+        return { x: cupX(c, api.eng.beatPos()), y: L.cupY };
+      },
+      // A cup you miss goes on as a plain black coffee
+      miss(c) {
+        c.art = "plain";
+        api.hint("under", "tap as the cup passes under the pitcher");
+      },
+      empty: () => (pour = { t0: clock, c: null, dry: api.style !== "fidget" })
+    });
+  }
+
+  // A hold then release: the pitcher twirls; a full charge pours a swan of steam over every cup
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    flourish = { t0: clock, full: c >= 1, k: c };
+    if (c >= 1) {
+      catWake = 2.5;
+      api.callout("a little swan", W / 2, H * 0.3, "#ffe2b0", 1.1);
+      api.eng.chime();
+    }
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.7) pops.splice(i, 1);
+    for (let i = sparks.length - 1; i >= 0; i--) if ((sparks[i].t += dt) > 0.9) sparks.splice(i, 1);
+    if (pour && clock - pour.t0 > 0.5) pour = null;
+    if (flourish && clock - flourish.t0 > 1.4) flourish = null;
+    catWake = Math.max(0, catWake - dt);
+    catEar = Math.max(0, catEar - dt * 3);
+    life.update(dt);
+    // Biscuit stirs: an ear flicks, or an eye opens at a car going by or a far-off flash
+    if ((stir -= dt) <= 0) {
+      stir = 5 + Math.random() * 10;
+      if (Math.random() < 0.6) catEar = 1;
+      else catWake = Math.max(catWake, 1.2);
+    }
+    if (life.flash > 0.95) catWake = Math.max(catWake, 1.5);
+    moth.wait -= dt;
+    if (moth.wait <= 0 && !moth.on) moth.on = clock;
+    if (moth.on && clock - moth.on > 9) moth = { on: 0, wait: 25 + Math.random() * 25 };
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  function drawCup(ctx, c, now, api) {
+    const x = cupX(c, now);
+    if (x < -L.rx * 3 || x > W + L.rx * 3) return;
+    const y = L.cupY;
+    S.draw(ctx, cupSprite(ctx, c.kind), x, y);
+    if (c.state === "wait") {
+      // an empty cup, a shot of espresso waiting for milk; a ring closes on it as it nears the spout
+      ctx.save();
+      ctx.translate(x, y + L.rx * 0.03);
+      ctx.scale(1, 0.34);
+      S.draw(ctx, surfaceSprite(ctx, "plain"), 0, 0);
+      ctx.restore();
+      const left = c.at - now;
+      if (left < 2 && left > -c.window && c === track.next() && api.style !== "fidget") S.cue(ctx, x, y, L.rx * 0.9 + Math.max(0, left) * L.rx * 1.2, left, PERFECT, api.color(), 0.34, 2.4);
+      return;
+    }
+    const since = (now - c.litAt) * api.eng.beatSec;
+    const grow = c.art === "plain" ? 1 : ease(since / 0.45);
+    ctx.save();
+    ctx.translate(x, y + L.rx * 0.03);
+    ctx.scale(1, 0.34);
+    S.draw(ctx, surfaceSprite(ctx, "plain"), 0, 0);
+    if (c.art !== "plain") {
+      ctx.globalAlpha = Math.min(1, since * 4);
+      S.draw(ctx, surfaceSprite(ctx, c.art), 0, 0, 0.6 + 0.4 * grow);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "pour" + tier, W, H, (g) => room(g, tier));
+    ctx.globalAlpha = 1;
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const w = L.win;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(w.x, w.y, w.w, w.h);
+    ctx.clip();
+    life.draw(ctx, w.x, w.y, w.w, w.h, 0.2);
+    S.rain(ctx, w.x, w.y, w.w, w.h, clock, 0.9 * life.rain);
+    S.beads(ctx, w.x, w.y, w.w, w.h, clock, Math.round(10 + 6 * life.rain));
+    ctx.restore();
+    // Biscuit asleep on the sill
+    S.cat(ctx, w.x + w.w * 0.22, w.y + w.h + 2, Math.min(42, L.rx * 1.1), { pose: "loaf", eyes: catWake > 0 ? "open" : "closed", look: catWake > 0 && life.watch() !== null ? life.watch() * 2 - 1 : 0, breath: clock * 1.6, tail: clock * 0.7, ear: catEar });
+    // the hanging lamp over the counter
+    const lx = W * 0.78, ly = H * 0.2;
+    ctx.fillStyle = "#120c0c";
+    ctx.fillRect(lx - 0.75, 0, 1.5, ly - 10);
+    ctx.fillStyle = "#3a2b24";
+    ctx.beginPath();
+    ctx.moveTo(lx - 26, ly + 8);
+    ctx.lineTo(lx - 9, ly - 12);
+    ctx.lineTo(lx + 9, ly - 12);
+    ctx.lineTo(lx + 26, ly + 8);
+    ctx.closePath();
+    ctx.fill();
+    S.lamp(ctx, lx, ly + 10, Math.max(W, H) * 0.45, 0.85 + 0.05 * pulse);
+    S.glow(ctx, lx, ly + 9, 26, "#fff0d0", 0.9);
+    if (moth.on) S.moth(ctx, lx, ly + 18, 30, clock, Math.min(1, (clock - moth.on) / 1.5, (9 - (clock - moth.on)) / 1.5));
+    S.lamp(ctx, L.spout, L.counter - L.rx, L.rx * 5, 0.35);
+
+    for (const c of track.list) drawCup(ctx, c, now, api);
+    // steam off the cups that have milk in them, fading as they leave
+    for (const c of track.list) {
+      if (c.state === "wait") continue;
+      const x = cupX(c, now);
+      if (x < -L.rx || x > W + L.rx) continue;
+      const k = clamp(1 - (now - c.litAt) / 10, 0.25, 1);
+      S.steam(ctx, x, L.cupY - L.rx * 0.2, L.rx * 0.7, clock + c.seed, (c.art === "plain" ? 0.4 : 0.8) * k * (flourish && flourish.full ? 1.6 : 1));
+    }
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.6), x = cupX(p.c, now);
+      ctx.save();
+      ctx.translate(x, L.cupY);
+      ctx.scale(1, 0.34);
+      S.softRing(ctx, 0, 0, L.rx * (0.9 + (p.big ? 1.4 : 0.8) * ease(e)), "#ffe2b0", (1 - e) * 0.8, 2);
+      ctx.restore();
+    }
+    for (const s of sparks) if (s.t > 0) S.twinkle(ctx, cupX(s.c, now) + s.dx, L.cupY + s.dy - s.t * 30, 10, s.color, 1 - s.t / 0.9);
+
+    // The pitcher over the spout, tipping to pour; the stream of milk while it does
+    let tilt = -0.15 + Math.sin(clock * 1.2) * 0.02;
+    let sx = L.spout, sy = L.spoutY;
+    const near = track.list.find((c) => c.state === "wait" && c.at - now < 1 && c.at - now > -0.3);
+    if (near) tilt -= 0.25 * ease(1 - (near.at - now));
+    if (pour) {
+      const u = (clock - pour.t0) / 0.5;
+      tilt -= Math.sin(Math.min(1, u) * Math.PI) * (pour.dry ? 0.25 : 0.6);
+      if (pour.c && u < 0.85) {
+        const tx = cupX(pour.c, now), ty = L.cupY;
+        ctx.strokeStyle = MILK;
+        ctx.lineCap = "round";
+        ctx.globalAlpha = 0.9 * Math.sin(Math.min(1, u / 0.85) * Math.PI);
+        ctx.lineWidth = L.rx * 0.16;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy + 2);
+        ctx.quadraticCurveTo(sx + (tx - sx) * 0.2, (sy + ty) / 2, tx, ty);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.lineCap = "butt";
+      }
+    }
+    let spin = 0;
+    if (flourish) {
+      const u = (clock - flourish.t0) / 1.4;
+      spin = Math.sin(u * TAU * (flourish.full ? 2 : 1)) * 0.35 * (1 - u) * (0.5 + flourish.k);
+      sy -= Math.sin(u * Math.PI) * L.rx * flourish.k;
+    }
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(tilt + spin);
+    S.draw(ctx, pitcherSprite(ctx), 0, 0);
+    ctx.restore();
+    // a drop of milk gathering at the lip as a cup comes in
+    if (near && !pour) S.glow(ctx, sx, sy + 3, 6 + 4 * ease(1 - (near.at - now)), MILK, 0.6);
+    // the hold's charge: an arc closing round, cream when full
+    api.drawCharge(sx + L.rx * 0.9, sy + L.rx * 0.6, L.rx * 1.5, null, "#ffe2b0");
+    S.motes(ctx, W, H, clock, ["#ffe2b0", "#f3e6cf"], { n: 10, size: 5, rise: 4, sway: 20, alpha: 0.25, seed: 9 });
+  }
+
+  SpaceShell.mount({
+    key: "cafePour",
+    title: "Pour",
+    hint: "Tap as each cup passes under the pitcher",
+    skin: S,
+    marquee: S.marquee,
+    engine: { track: "RAIN ON GLASS", voice: "LO-FI RHODES", lofi: true, minBpm: 72, startBpm: 80 },
+    tierNames: ["Warming up", "Warm hands", "Second cup", "Last orders"],
+    fidgetPoint: () => ({ x: L.spout, y: L.cupY }),
+    resize: layout,
+    setup,
+    onFire: () => track.fire(),
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

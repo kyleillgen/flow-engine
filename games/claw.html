@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Mitt the claw slides over a pile of plushies. Tap as Mitt reaches the plushie that's wiggling and Mitt drops, grabs it and tosses it down the chute. A rhythm micro-game that finds your tempo.">
+<title>Claw</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/arcade/arcade-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Claw: a claw crane on one button. Mitt the claw slides along the rail over a pile of plushies,
+// Bun, Tako, Pom and Bao, who wiggle and wave when Mitt comes their way. Mitt stops over each
+// wiggling plushie on a whole beat; tap then and Mitt drops, grabs it and tosses it down the
+// prize chute. Miss and Mitt still drops a moment later, but the plushie slips out and plops
+// back with a giggle. A phrase of eight is the jackpot: the chute lights up and a giant Bun
+// pops up over the machine to wave.
+//
+// Each stop comes from api.track, on a whole beat, at least two apart. The carriage's position
+// is a function of the beat position: it glides to the next stop over the beat before it; the
+// drop and grab ride the beat too, from the moment of the tap. Clean is ±0.3 beat (wider with
+// assist, for stops not yet scheduled), perfect ±0.1.
+// Fidget (F): every press drops Mitt on the spot and it always comes up with something. Hold
+// then let go to shake the machine; a full charge rains plushies. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = ArcadeSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const SLOTS = 5;
+  const GRAB = 0.7; // beats: drop, close, lift
+  const INK = "#1a0b2e";
+
+  // ---- Pixel art: four plushies with stitched faces, three moods each ----------------------
+  const PLUSH = [
+    {
+      name: "Bun",
+      pal: { b: "#ffb0d8", h: "#ffe4f2", d: "#c0608c", i: "#ff6fa8", e: INK, m: INK, c: "#ff6fa8", w: "#ffffff" },
+      calm: ["..bb....bb..", ".bib....bib.", ".bib....bib.", ".bhb....bhb.", "..bbbbbbbb..", ".bhbbbbbbbb.", "bhbebbbbebbd", "bbbbbbbbbbbd", "bcbbbmmbbcbd", ".bbbbbbbbbd.", "..dddddddd.."],
+      wiggle: ["..bb....bb..", ".bib....bib.", ".bib....bib.", ".bhb....bhb.", "..bbbbbbbb..", ".bhbbbbbbbb.", "bhbwebbwebbd", "bbbeebbeebbd", "bcbbbmmbbcbd", ".bbbbmmbbbd.", "..dddddddd.."],
+      happy: ["..bb....bb..", ".bib....bib.", ".bib....bib.", ".bhb....bhb.", "..bbbbbbbb..", ".bhbbbbbbbb.", "bhbebbbbebbd", "bbebebbebebd", "bcbbmmmmbcbd", ".bbbbmmbbbd.", "..dddddddd.."]
+    },
+    {
+      name: "Tako",
+      pal: { b: "#ff7a5a", h: "#ffc8b0", d: "#b03a2a", e: INK, m: INK, c: "#ffb0d8", w: "#ffffff", s: "#ffd8c8" },
+      calm: ["...bbbbbb...", "..bhhbbbbb..", ".bhbbbbbbbb.", ".bhbsbbsbbb.", ".bbbbbbbbbd.", ".bbebbbbebd.", ".bcbbmmbbcd.", "..bbbbbbbd..", ".b.b.bb.b.b.", "b.b..bb..b.b", ".b..b..b..b."],
+      wiggle: ["...bbbbbb...", "..bhhbbbbb..", ".bhbbbbbbbb.", ".bhbsbbsbbb.", ".bwebbbbwebd.", ".beebbbbeebd", ".bcbbmmbbcd.", "..bbbmmbbd..", "b.b.bbbb.b.b", ".b..b..b..b.", "b..b....b..b"],
+      happy: ["...bbbbbb...", "..bhhbbbbb..", ".bhbbbbbbbb.", ".bhbsbbsbbb.", ".bbebbbbebd.", ".bebebbebebd", ".bcbmmmmbcd.", "..bbbmmbbd..", "b.b.bbbb.b.b", ".b..b..b..b.", "b..b....b..b"]
+    },
+    {
+      name: "Pom",
+      pal: { b: "#fff0a0", h: "#fffbe0", d: "#c0a040", e: INK, m: INK, c: "#ffb0a0", g: "#7dff5a", G: "#2a9a3a", w: "#ffffff" },
+      calm: [".....gg.....", "....gGg.....", "...bbGbbb...", ".bbhhbbbbbb.", "bbhbbbbbbbbd", "bhbebbbbebbd", "bbbbbbbbbbbd", "bcbbbmmbbcbd", "bbbbbbbbbbbd", ".bbbbbbbbbd.", "..dddddddd.."],
+      wiggle: [".....gg.....", "....gGg.....", "...bbGbbb...", ".bbhhbbbbbb.", "bbhwebbwebbd", "bhbeebbeebbd", "bbbbbbbbbbbd", "bcbbbmmbbcbd", "bbbbbmmbbbbd", ".bbbbbbbbbd.", "..dddddddd.."],
+      happy: [".....gg.....", "....gGg.....", "...bbGbbb...", ".bbhhbbbbbb.", "bbhebbbbebbd", "bhebebbebebd", "bbbbbbbbbbbd", "bcbbmmmmbcbd", "bbbbbmmbbbbd", ".bbbbbbbbbd.", "..dddddddd.."]
+    },
+    {
+      name: "Bao",
+      pal: { b: "#b08a6a", h: "#e0c4a8", d: "#5a3a2a", e: INK, m: INK, c: "#ff9a9a", s: "#f0dcc8", w: "#ffffff" },
+      calm: [".bb......bb.", "bdbb....bbdb", ".bbbbbbbbbb.", "bhbbbbbbbbbd", "bhbebbbbebbd", "bbbbbbbbbbbd", "bcbbssssbcbd", "bbbbsmmsbbbd", "bbbbbssbbbbd", ".bbbbbbbbbd.", "..dddddddd.."],
+      wiggle: [".bb......bb.", "bdbb....bbdb", ".bbbbbbbbbb.", "bhbwebbwebbd", "bhbeebbeebbd", "bbbbbbbbbbbd", "bcbbssssbcbd", "bbbbsmmsbbbd", "bbbbsmmsbbbd", ".bbbbbbbbbd.", "..dddddddd.."],
+      happy: [".bb......bb.", "bdbb....bbdb", ".bbbbbbbbbb.", "bhbbbbbbbbbd", "bhbebbbbebbd", "bbebebbebebd", "bcbbssssbcbd", "bbbsmmmmsbbd", "bbbbsmmsbbbd", ".bbbbbbbbbd.", "..dddddddd.."]
+    }
+  ];
+  // Mitt's carriage: a little hub with LED eyes
+  const MITT = { open: ["..mmmmmmmm..", ".mhhhhhhhhmd", "mhmwemmwemmd", "mmmeemmeemmd", "mmmmmmmmmmmd", ".dddddddddd."], blink: ["..mmmmmmmm..", ".mhhhhhhhhmd", "mhmmmmmmmmmd", "mmmeemmeemmd", "mmmmmmmmmmmd", ".dddddddddd."], oops: ["..mmmmmmmm..", ".mhhhhhhhhmd", "mhmemmmmemmd", "mmmmemmemmmd", "mmmmmmmmmmmd", ".dddddddddd."] };
+  const MITT_PAL = { m: "#9fe8ff", h: "#e0fbff", d: "#2a6a8a", w: "#ffffff", e: INK };
+
+  let W = 0, H = 0, F = null, L = {};
+  let stops = null; // api.track: { at, slot, state, window } in stops.list
+  let slots = []; // { kind, pop (clock when it last popped in) }
+  let grab = null; // { at (beat), slot, kind, good, perfect, x }
+  let tossed = [], shards = [], confetti = [], rain = [];
+  let lastSlot = 2, clock = 0, hits = 0, frameDt = 1 / 60, prizes = 0;
+  let jackpot = -9, shake = null, plate = null;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const frac = (v) => v - Math.floor(v);
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    F = S.field(W, H);
+    // The pixel size from the width and the height, so a short frame (the pocket) keeps Mitt's
+    // drop; there the front panel and the top strip shrink to make room
+    const short = F.h < 400;
+    const k = clamp(Math.min(Math.floor(F.w / 95), Math.floor(F.h / 80)), 2, 6);
+    const chute = F.w * 0.2;
+    plate = null;
+    L = { k, chute, short, lightsY: F.y + (short ? 10 : 18), prizesY: F.y + (short ? 22 : 40), railY: F.y + (short ? 34 : 62), floorY: F.bottom - k * (short ? 8 : 20), left: F.x + chute + k * 4, right: F.x + F.w - k * 6 };
+    L.slotW = (L.right - L.left) / SLOTS;
+    L.plushY = L.floorY - k * 6;
+    L.clawY = L.railY + k * (short ? 12 : 22);
+    L.pile = short ? 12 : 24;
+    // The cue ring fits round a plushie (the tracker reads cueSize from its options)
+    if (stops) stops.o.cueSize = (k + 1) / 3;
+    if (!slots.length) for (let i = 0; i < SLOTS; i++) slots.push({ kind: i % PLUSH.length, pop: -9 });
+  }
+  const slotX = (i) => L.left + L.slotW * (i + 0.5);
+
+  // The carriage at beat position now: parked over the last stop, gliding to the next over the
+  // beat before it
+  function carriageX(now) {
+    let a = null, b = null;
+    for (const s of stops.list) {
+      if (s.at <= now) a = s;
+      else if (!b) b = s;
+    }
+    const xa = a ? slotX(a.slot) : slotX(lastSlotParked);
+    if (!b) return xa + Math.sin(now * Math.PI * 0.5) * L.k * 0.8;
+    const t0 = b.at - Math.min(1, b.at - (a ? a.at : -9));
+    if (now < t0) return xa + Math.sin(now * Math.PI * 0.5) * L.k * 0.8 * 0;
+    return xa + (slotX(b.slot) - xa) * smooth((now - t0) / (b.at - t0));
+  }
+  let lastSlotParked = 2;
+  // The claw: how far down (0 up, 1 at the plushies) and how closed (0 open, 1 shut)
+  function clawState(now) {
+    if (!grab) return { down: 0, shut: 0.15 };
+    const u = (now - grab.at) / GRAB;
+    if (u < 0 || u >= 1) return { down: 0, shut: 0.15 };
+    if (u < 0.4) return { down: ease(u / 0.4), shut: 0 };
+    if (u < 0.55) return { down: 1, shut: (u - 0.4) / 0.15 };
+    const lift = smooth((u - 0.55) / 0.45);
+    return { down: 1 - lift, shut: 1, lift };
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  function setup(api) {
+    // A stop every beat or two; the tracker spawns, judges, misses and autopilots them
+    stops = api.track({
+      spawn: () => {
+        let slot = Math.floor(Math.random() * SLOTS);
+        if (slot === lastSlot) slot = (slot + 1 + Math.floor(Math.random() * (SLOTS - 1))) % SLOTS;
+        lastSlot = slot;
+        return { slot };
+      },
+      note: (s) => (api.style === "fidget" ? 0.3 + Math.random() * 0.4 : 0.2 + s.slot * 0.14),
+      // Fidget takes a stop only once Mitt is over it; before that a press drops on the spot
+      ready: (s, now) => now >= s.at - s.window,
+      hit: (s, { perfect, ghost }) => {
+        if (!ghost && ++hits === 16) api.hint("shake", 'Hold <span class="pb-kbd">Space</span>, let go: shake the machine');
+        return drop(api, s, true, perfect, ghost);
+      },
+      miss: (s, counted) => {
+        drop(api, s, false, false, true);
+        if (counted) api.hint("stop", "Tap as Mitt stops over the wiggling plushie");
+      },
+      empty: () => {
+        if (api.style !== "fidget") return;
+        // Fidget: Mitt drops on the spot and always comes up with someone
+        const now = api.eng.beatPos();
+        if (grab && now - grab.at <= GRAB * 0.9) return;
+        const x = carriageX(now);
+        const slot = clamp(Math.round((x - L.left) / L.slotW - 0.5), 0, SLOTS - 1);
+        grab = { at: now, slot, kind: slots[slot].kind, good: true, perfect: false, x, ghost: true, tossed: false, quick: true };
+      },
+      perfect: PERFECT,
+      // The gold cue closes on the wiggling plushie Mitt is stopping over
+      cueAt: (s) => ({ x: slotX(s.slot), y: L.plushY }),
+      cueSize: (L.k + 1) / 3,
+      // The carriage glides from the last stop it reached, so that one stays until the next is reached
+      keep: (s, now) => now - s.at < 6 || !stops.list.some((o) => o.at > s.at && o.at <= now)
+    });
+  }
+
+  function drop(api, s, good, perfect, ghost) {
+    const now = api.eng.beatPos();
+    grab = { at: now, slot: s.slot, kind: slots[s.slot].kind, good, perfect, x: slotX(s.slot), ghost, tossed: false };
+    if (perfect && !ghost) api.ring(slotX(s.slot), L.plushY, api.color(), L.k * 10);
+    // Where the tracker pops the points
+    return { x: slotX(s.slot), y: L.plushY };
+  }
+
+  function onFire(api) {
+    stops.fire();
+  }
+
+  // A hold then release: shake the machine; a full charge rains plushies from the top
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    shake = { t0: clock, amp: L.k * (1 + c * 2) };
+    if (c >= 1) {
+      for (let i = 0; i < 10; i++) rain.push({ x: L.left + Math.random() * (L.right - L.left), t: -i * 0.07, kind: i % PLUSH.length, spin: (Math.random() - 0.5) * 6 });
+      api.callout("Plush rain", W / 2, H * 0.32, "#ff4f9a", 1.1);
+      api.eng.chime();
+    }
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    frameDt = dt;
+    // In fidget the world bends: Mitt takes every stop by itself as it gets there
+    if (api.style === "fidget")
+      for (const s of stops.list)
+        if (s.state === "wait" && now >= s.at) {
+          s.state = "hit";
+          drop(api, s, true, false, true);
+        }
+    // At the top of the lift, a good grab is tossed down the chute; a slip drops back
+    if (grab && !grab.tossed) {
+      const u = (now - grab.at) / GRAB;
+      if (grab.good && u >= 0.98) {
+        grab.tossed = true;
+        tossed.push({ x0: grab.x, y0: L.clawY + L.k * 8, kind: grab.kind, t: 0 });
+        slots[grab.slot] = { kind: (grab.kind + 1 + Math.floor(Math.random() * 3)) % PLUSH.length, pop: clock };
+      } else if (!grab.good && u >= 0.62) {
+        grab.tossed = true;
+        slots[grab.slot].pop = clock;
+        S.shards(shards, grab.x, L.plushY, 6, ["#ffffff", "#ffd23d"], 90, 60);
+      }
+    }
+    for (let i = tossed.length - 1; i >= 0; i--) {
+      const t = tossed[i];
+      if ((t.t += dt) > 0.75) {
+        tossed.splice(i, 1);
+        prizes++;
+        S.shards(shards, F.x + L.chute / 2, L.floorY - L.k * 4, 10, ["#ffd23d", PLUSH[t.kind].pal.b, "#ffffff"], 160, 120);
+      }
+    }
+    for (let i = rain.length - 1; i >= 0; i--) if ((rain[i].t += dt) > 1.2) rain.splice(i, 1);
+    machine.update(dt);
+    if (shake && clock - shake.t0 > 0.6) shake = null;
+    for (let i = confetti.length - 1; i >= 0; i--) {
+      const c = confetti[i];
+      c.y += c.vy * dt;
+      c.x += Math.sin(clock * 3 + c.p) * 20 * dt;
+      if (c.y > F.bottom) confetti.splice(i, 1);
+    }
+  }
+
+  // ---- The look ---------------------------------------------------------------------------
+  function backdrop(ctx, api) {
+    const hue = api.color();
+    S.layer(ctx, "claw" + api.tier, W, H, (g) => {
+      g.fillStyle = "#08050f";
+      g.fillRect(0, 0, W, H);
+      // The machine's back wall: a deep gradient with a quilted pattern
+      const lin = g.createLinearGradient(0, F.y, 0, F.bottom);
+      lin.addColorStop(0, "#1a0d2e");
+      lin.addColorStop(1, S.mix("#2a1440", hue, 0.12));
+      g.fillStyle = lin;
+      g.fillRect(F.x, F.y, F.w, F.h);
+      g.fillStyle = "rgba(255,255,255,0.03)";
+      const q = L.k * 8;
+      for (let y = F.y; y < F.bottom; y += q) for (let x = F.x + ((y - F.y) / q % 2) * q / 2; x < F.x + F.w; x += q) g.fillRect(x, y, 2, 2);
+      // The pile: dim plush shapes heaped behind the front row
+      const r = S.rng(31);
+      const cols = ["#ffb0d8", "#ff7a5a", "#fff0a0", "#b08a6a", "#9fe8ff", "#b0a0ff"];
+      for (let i = 0; i < 64; i++) {
+        const x = L.left - L.k * 4 + r() * (L.right - L.left + L.k * 8), rr = L.k * (4 + r() * 4);
+        const y = L.floorY - L.k * 6 - r() * L.k * L.pile * (1 - Math.abs((x - (L.left + L.right) / 2) / (L.right - L.left)));
+        g.fillStyle = S.mix(cols[i % cols.length], "#1a0d2e", 0.55);
+        for (let py = -rr; py < rr; py += L.k) for (let px = -rr; px < rr; px += L.k) if (px * px + py * py < rr * rr) g.fillRect(Math.round(x + px), Math.round(y + py), L.k, L.k);
+        g.fillStyle = "rgba(10,4,20,0.6)";
+        g.fillRect(Math.round(x - L.k * 2), Math.round(y - L.k), L.k, L.k);
+        g.fillRect(Math.round(x + L.k), Math.round(y - L.k), L.k, L.k);
+      }
+      // The floor and the chute's glass divider
+      g.fillStyle = "#120a1e";
+      g.fillRect(F.x, L.floorY, F.w, F.bottom - L.floorY);
+      g.fillStyle = "#3a2a58";
+      g.fillRect(F.x, L.floorY, F.w, L.k);
+      // The chute: a dark hole with a chevron frame
+      const cx = F.x + L.chute / 2, cw = L.chute - L.k * 4;
+      g.fillStyle = "#040208";
+      g.fillRect(cx - cw / 2, L.floorY - L.k * 2, cw, F.bottom - L.floorY + L.k * 2);
+      S.haloed(g, "#ffd23d", (g, c, core) => {
+        g.strokeStyle = c;
+        g.lineWidth = core ? 1 : 2.5;
+        g.strokeRect(cx - cw / 2, L.floorY - L.k * 2, cw, F.bottom - L.floorY + L.k * 2);
+      });
+      g.fillStyle = "rgba(255,255,255,0.08)";
+      g.fillRect(F.x + L.chute, L.railY + L.k * 4, L.k, L.floorY - L.railY - L.k * 4);
+      // The front panel under the glass: a printed nameplate
+      if (F.bottom - L.floorY > L.k * 12) {
+        const ny = (L.floorY + F.bottom) / 2 + L.k;
+        const px = Math.max(2, Math.floor(L.k / 2));
+        g.fillStyle = "#1d1233";
+        g.fillRect(F.x + L.chute + L.k * 3, ny - px * 7, F.w - L.chute - L.k * 6, px * 14);
+        g.fillStyle = "#3a2560";
+        g.fillRect(F.x + L.chute + L.k * 3, ny - px * 7, F.w - L.chute - L.k * 6, 1);
+        plate = { x: F.x + L.chute + (F.w - L.chute) / 2, y: ny, px };
+      }
+      // The rail, a chrome bar across the top
+      const rl = g.createLinearGradient(0, L.railY - L.k * 2, 0, L.railY + L.k * 2);
+      rl.addColorStop(0, "#6a5a8a");
+      rl.addColorStop(0.5, "#e0d8f0");
+      rl.addColorStop(1, "#4a3a6a");
+      g.fillStyle = rl;
+      g.fillRect(F.x + L.k * 3, L.railY - L.k, F.w - L.k * 6, L.k * 2);
+      // Glass: two long reflections
+      g.fillStyle = "rgba(255,255,255,0.035)";
+      g.beginPath();
+      g.moveTo(F.x + F.w * 0.62, F.y);
+      g.lineTo(F.x + F.w * 0.72, F.y);
+      g.lineTo(F.x + F.w * 0.42, F.bottom);
+      g.lineTo(F.x + F.w * 0.32, F.bottom);
+      g.fill();
+      g.fillRect(F.x + F.w * 0.8, F.y, F.w * 0.025, F.h);
+      S.mask(g, F, "#ffffff", 0.025);
+      S.sides(g, W, H, F, ["#ff4f9a", "#ffd23d", "#3df5ff"]);
+    });
+  }
+
+  // Now and then, in the machine: a plushie in the pile peeks up and waves, a glint runs across
+  // the glass, the top lights chase the other way, someone in the pile blows a sleepy bubble
+  const machine = S.happenings([
+    {
+      dur: 2.4,
+      draw(ctx, e, u) {
+        const x = L.left + (L.right - L.left) * (0.15 + e.seed * 0.7);
+        const up = Math.sin(u * Math.PI);
+        ctx.beginPath();
+        ctx.rect(F.x, F.y, F.w, L.plushY - L.k * 4 - F.y);
+        ctx.clip();
+        ctx.globalAlpha = 0.55;
+        ctx.translate(x, L.plushY - L.k * 4 + (1 - up) * L.k * 12);
+        ctx.rotate(Math.sin(u * 20) * 0.12 * up);
+        S.draw(ctx, plushSprite(ctx, Math.floor(e.seed * PLUSH.length), "happy", 0.75), 0, 0);
+      }
+    },
+    {
+      dur: 1.1,
+      draw(ctx, e, u) {
+        const x = F.x + F.w * (e.side > 0 ? u : 1 - u) * 1.3 - F.w * 0.15;
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = "rgba(255,255,255,0.06)";
+        ctx.beginPath();
+        ctx.moveTo(x, F.y);
+        ctx.lineTo(x + 18, F.y);
+        ctx.lineTo(x - 22, F.bottom);
+        ctx.lineTo(x - 40, F.bottom);
+        ctx.fill();
+      }
+    },
+    {
+      dur: 1.6,
+      draw(ctx, e, u) {
+        const i = Math.floor(u * 14);
+        const x = F.x + F.w * (((e.side > 0 ? i : 13 - i) + 0.5) / 14);
+        S.glow(ctx, x, L.lightsY, L.k * 4, "#ffffff", 0.6);
+      }
+    },
+    {
+      dur: 3,
+      draw(ctx, e, u) {
+        const x = L.left + (L.right - L.left) * (0.1 + e.seed * 0.8), y = L.plushY - L.k * (L.pile * 0.5 + 6);
+        const r = L.k * (0.5 + 2.5 * Math.min(1, u * 1.5));
+        ctx.globalAlpha = u > 0.85 ? (1 - u) / 0.15 * 0.5 : 0.5;
+        ctx.strokeStyle = "#bff9ff";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(x, y - u * L.k * 3, r, 0, TAU);
+        ctx.stroke();
+        S.text(ctx, "z", x + L.k * 4, y - L.k * 4 - u * L.k * 6, 1.5, "#fff4e0", { alpha: 0.6 * (1 - u), chrome: false });
+      }
+    }
+  ]);
+
+  function plushSprite(ctx, kind, mood, scale = 1) {
+    const p = PLUSH[kind];
+    return S.pix(ctx, p.name + mood + scale, p[mood], p.pal, Math.round((L.k + 1) * scale), { glow: p.pal.b, bloom: 6 });
+  }
+
+  function drawClaw(ctx, x, y, shut, hold) {
+    // Three chunky prongs from the hub, closing round whatever is below
+    const k = L.k;
+    const spread = 1 - shut;
+    ctx.fillStyle = "#c9e8f8";
+    for (const s of [-1, 1]) {
+      ctx.save();
+      ctx.translate(x + s * k * 2, y + k * 2);
+      ctx.rotate(s * (0.15 + spread * 0.6));
+      ctx.fillRect(-k / 2, 0, k, k * 6);
+      ctx.translate(0, k * 6);
+      ctx.rotate(-s * (0.9 + spread * 0.2));
+      ctx.fillRect(-k / 2, 0, k, k * 4);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(-k / 2, k * 3, k, k);
+      ctx.fillStyle = "#c9e8f8";
+      ctx.restore();
+    }
+    ctx.fillStyle = "#7ab8d8";
+    ctx.fillRect(x - k / 2, y + k * 2, k, k * 6 * (0.6 + 0.4 * shut));
+    ctx.fillStyle = "#e0fbff";
+    ctx.fillRect(x - k * 3, y - k, k * 6, k * 3);
+    ctx.fillStyle = "#2a6a8a";
+    ctx.fillRect(x - k * 3, y + k, k * 6, k);
+    S.glow(ctx, x, y + k, k * 4, "#3df5ff", 0.5);
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const hue = api.color();
+    let ox = 0;
+    if (shake) ox = Math.sin((clock - shake.t0) * 60) * shake.amp * (1 - (clock - shake.t0) / 0.6);
+    ctx.save();
+    ctx.translate(ox, 0);
+    backdrop(ctx, api);
+
+    // The marquee strip across the top of the machine, lights chasing; the jackpot lights it all
+    const jack = clock - jackpot;
+    for (let i = 0; i < 14; i++) {
+      const x = F.x + F.w * ((i + 0.5) / 14);
+      const on = jack < 2.5 ? Math.floor(jack * 12 + i) % 2 === 0 : (Math.floor(now * 2) + i) % 4 === 0;
+      S.glow(ctx, x, L.lightsY, L.k * 3, ["#ff4f9a", "#ffd23d", "#3df5ff"][i % 3], on ? 0.95 : 0.25);
+    }
+    machine.draw(ctx);
+    if (plate) S.text(ctx, "Plush palace", plate.x, plate.y, plate.px, "#ff4f9a", { alpha: 0.9 });
+    S.text(ctx, "Prize", F.x + L.chute / 2, L.floorY + L.k * 5, Math.max(1.5, L.k * 0.4), "#ffd23d", { chrome: false, alpha: 0.8 });
+    S.text(ctx, "Prizes " + String(prizes).padStart(3, "0"), F.x + F.w - 12, L.prizesY, 1.5, "#ffd23d", { align: "right", chrome: false, alpha: 0.85 });
+
+    // The front row of plushies: calm, wiggling when Mitt is on the way, popping back in when new
+    const cx = carriageX(now);
+    let next = null;
+    for (const s of stops.list) if (s.state === "wait" && (!next || s.at < next.at)) next = s;
+    const cs = clawState(now);
+    for (let i = 0; i < SLOTS; i++) {
+      const sl = slots[i];
+      const held = grab && grab.slot === i && grab.good && cs.shut > 0.5 && !grab.tossed;
+      if (held) continue;
+      const coming = next && next.slot === i && next.at - now < 1.6;
+      const mood = coming ? "wiggle" : "calm";
+      const pop = clamp((clock - sl.pop) / 0.35, 0, 1);
+      const wig = coming ? Math.sin(clock * 16) * 0.12 : 0;
+      const hop = coming ? Math.abs(Math.sin(now * Math.PI)) * L.k * 1.5 : 0;
+      const x = slotX(i), y = L.plushY - hop + (1 - ease(pop)) * L.k * 8;
+      if (coming) S.glow(ctx, x, y, L.k * 14, PLUSH[sl.kind].pal.b, 0.3 + 0.3 * (1 - frac(now)));
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(wig);
+      ctx.scale(1, 0.85 + 0.15 * ease(pop));
+      S.draw(ctx, plushSprite(ctx, sl.kind, mood), 0, 0);
+      ctx.restore();
+    }
+    // The drop line: a pale beam under Mitt, gold as it reaches the stop
+    if (next && next.at - now < 1.4 && !(grab && now - grab.at < GRAB)) {
+      const left = next.at - now;
+      const a = clamp((1.4 - left) / 0.5, 0, 1);
+      const c = Math.abs(left) < PERFECT ? "#ffd23d" : hue;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = 0.18 * a;
+      ctx.fillStyle = c;
+      ctx.fillRect(cx - L.k * 3, L.clawY + L.k * 6, L.k * 6, L.plushY - L.clawY - L.k * 6);
+      ctx.globalAlpha = 0.5 * a;
+      for (let y = L.clawY + L.k * 8; y < L.plushY - L.k * 6; y += L.k * 4) ctx.fillRect(cx - L.k / 2, y + (frac(now * 2) * L.k * 4), L.k, L.k * 1.5);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    // Mitt: the carriage on the rail, the cable, and the claw
+    const mx = grab && now - grab.at < GRAB ? grab.x : cx;
+    const clawY = L.clawY + cs.down * (L.plushY - L.k * 10 - L.clawY);
+    ctx.fillStyle = "#c9e8f8";
+    ctx.fillRect(mx - 1, L.railY + L.k * 3, 2, clawY - L.railY - L.k * 3);
+    const slip = grab && !grab.good && now - grab.at < GRAB + 0.6 && now - grab.at > GRAB * 0.55;
+    const mface = slip ? "oops" : frac(clock * 0.23) < 0.04 ? "blink" : "open";
+    S.draw(ctx, S.pix(ctx, "mitt" + mface, MITT[mface], MITT_PAL, L.k, { glow: "#3df5ff", bloom: 8 }), mx, L.railY);
+    const holding = grab && grab.good && cs.shut > 0.5 && !grab.tossed;
+    drawClaw(ctx, mx, clawY, cs.shut, holding);
+    if (holding) {
+      ctx.save();
+      ctx.translate(mx, clawY + L.k * 13);
+      ctx.rotate(Math.sin(clock * 10) * 0.1);
+      S.draw(ctx, plushSprite(ctx, grab.kind, "happy"), 0, 0);
+      ctx.restore();
+    }
+    if (grab && !grab.good && now - grab.at > GRAB * 0.55 && now - grab.at < GRAB + 0.8) {
+      const t = (now - grab.at - GRAB * 0.55) / 1.2;
+      S.text(ctx, "hehe", grab.x + L.k * 8, L.plushY - L.k * 12 - t * 20, L.k * 0.5, "#ffb0d8", { alpha: 1 - t, chrome: false });
+    }
+
+    // Tossed plushies arc into the chute, beaming
+    for (const t of tossed) {
+      const u = t.t / 0.75;
+      const tx = F.x + L.chute / 2, ty = L.floorY;
+      const x = t.x0 + (tx - t.x0) * u, y = t.y0 + (ty - t.y0) * u - Math.sin(u * Math.PI) * L.k * 24;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(u * TAU * 0.8);
+      S.draw(ctx, plushSprite(ctx, t.kind, "happy"), 0, 0);
+      ctx.restore();
+    }
+    // Plush rain
+    for (const r of rain) {
+      if (r.t < 0) continue;
+      const u = r.t / 1.2;
+      ctx.save();
+      ctx.translate(r.x, F.y + 40 + u * u * (L.plushY - F.y - 40));
+      ctx.rotate(r.spin * u);
+      ctx.globalAlpha = u > 0.85 ? (1 - u) / 0.15 : 1;
+      S.draw(ctx, plushSprite(ctx, r.kind, "happy", 0.75), 0, 0);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+    // The chute lights: a chaser round the frame, and the jackpot
+    const chx = F.x + L.chute / 2;
+    for (let i = 0; i < 5; i++) {
+      const on = jack < 2.5 ? true : (Math.floor(now * 2) + i) % 5 === 0;
+      S.glow(ctx, chx, L.floorY - L.k * 6 - i * L.k * 5, L.k * 2.5, "#ffd23d", on ? 0.9 : 0.2);
+    }
+    // The jackpot: a giant Bun pops up over the top of the machine and waves
+    if (jack < 3) {
+      const u = jack < 0.4 ? ease(jack / 0.4) : jack > 2.5 ? 1 - ease((jack - 2.5) / 0.5) : 1;
+      const big = Math.max(2, L.k * 2);
+      ctx.save();
+      ctx.translate(F.x + F.w / 2, F.y + 90 + (1 - u) * 160);
+      ctx.rotate(Math.sin(jack * 8) * 0.12);
+      S.draw(ctx, S.pix(ctx, "bigbun", PLUSH[0].happy, PLUSH[0].pal, big, { glow: "#ff4f9a", bloom: 16 }), 0, 0);
+      ctx.restore();
+      S.text(ctx, "Jackpot!", F.x + F.w / 2, F.y + 90 + 7 * big + (1 - u) * 160, Math.max(2, L.k * 0.8), "#ffd23d", { alpha: u });
+    }
+    for (const c of confetti) {
+      ctx.fillStyle = c.c;
+      ctx.fillRect(c.x, c.y, L.k, L.k * (0.5 + 0.5 * Math.abs(Math.sin(clock * 6 + c.p))));
+    }
+    // The charge: the machine's lights fill from the bottom of the chute frame
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const color = c >= 1 ? "#ffd23d" : "#3df5ff";
+      for (let i = 0; i < Math.floor(c * 10); i++) S.glow(ctx, F.x + F.w - L.k * 4, L.floorY - L.k * 3 - i * L.k * 4, L.k * 2.5, color, 1);
+    }
+    S.drawShards(ctx, shards, frameDt);
+    ctx.restore();
+  }
+
+  SpaceShell.mount({
+    key: "claw",
+    title: "Claw",
+    hint: "Tap as Mitt stops over the wiggling plushie",
+    skin: S,
+    marquee: S.attract,
+    setup,
+    engine: {},
+    tierNames: ["Finding your rhythm", "Grabby", "Prize streak", "Claw master"],
+    onPhrase: () => {
+      jackpot = clock;
+      for (let i = 0; i < 40; i++) confetti.push({ x: F.x + Math.random() * F.w, y: F.y + Math.random() * 40, vy: 60 + Math.random() * 90, c: ["#ff4f9a", "#ffd23d", "#3df5ff", "#7dff5a"][i % 4], p: Math.random() * 6 });
+    },
+    fidgetPoint: (api) => ({ x: carriageX(api.eng.beatPos()), y: L.railY }),
+    resize: layout,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

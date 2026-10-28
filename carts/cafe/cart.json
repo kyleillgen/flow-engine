@@ -1,0 +1,34 @@
+{
+  "id": "cafe",
+  "name": "Lo-fi Cafe",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "A café at night: rain on the window, a warm lamp, latte art, steam off the cups and Biscuit the sleepy cat.",
+  "colors": [
+    "#f2b56b",
+    "#d9a093"
+  ],
+  "files": [
+    "shell/space-shell.js",
+    "skins/cafe/cafe-skin.js",
+    "skins/pinball/fonts/oswald-latin.woff2",
+    "skins/pinball/fonts/inter-latin.woff2"
+  ],
+  "games": [
+    {
+      "file": "games/pour.html",
+      "label": "Pour",
+      "hint": "Tap as each cup passes under the pitcher"
+    },
+    {
+      "file": "games/rain.html",
+      "label": "Rain",
+      "hint": "Tap as each drop touches the sill"
+    },
+    {
+      "file": "games/paw.html",
+      "label": "Paw",
+      "hint": "Tap as the fish swings into Biscuit's paw"
+    }
+  ]
+}

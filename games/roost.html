@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="A wild turkey roosting in the old oaks plays peekaboo under a big moon. Its red wattle shows first; tap as it pops out and it fans its tail and flaps off across the moon. A rhythm micro-game that finds your tempo.">
+<title>Roost</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/hunt/hunt-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Roost: night in the old oaks, a big moon behind a row of thick trunks. A wild turkey up on its
+// roost plays peekaboo: a red wattle shows at the edge of a trunk, then on a whole beat it pops
+// out sideways. The sights glide to the spot by themselves; tap as it pops. A tagged turkey
+// blinks happy, fans its tail, gobbles and flaps off across the moon. One you miss just ducks
+// back behind its tree. Nothing is lost.
+//
+// The peek is a function of the beat position: the wattle from 1.5 beats before, out with a little
+// overshoot in the quarter beat before its beat, held, then back in by 0.9 beat after. Clean is
+// ±0.3 beat (wider with assist, for turkeys not yet spawned), perfect ±0.1.
+// Fidget (F): every press tags a turkey; if none is close, one pops out by the sights.
+// Hold then let go: a gobble call that rings out and shakes leaves down; a full charge also lights the
+// moon and sends a shooting star. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = HuntSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const SIGHT = "#ff8a3d";
+  const GOLD = "#ffd76a";
+  const WATTLE = "#ff5a4a";
+  // bronze, a sandy one with pale tail tips, and a dusky one; sheen is the feathers' copper glint
+  const TURKEYS = [
+    { body: "#8a5e38", dark: "#4a301c", sheen: "#e0a058", band: "#b0602a", tip: "#f0cc8a" },
+    { body: "#a07a50", dark: "#5a3e24", sheen: "#f0c27a", band: "#c07a3a", tip: "#fff0d0" },
+    { body: "#6a5a4e", dark: "#3a2e28", sheen: "#c8b088", band: "#8a5a3a", tip: "#e8dcc0" }
+  ];
+  const MOODS = [
+    { top: "#0a0c24", mid: "#1e2650", low: "#3a3a64", glow: "#d8dcff", orb: "#f6f0d8", orbX: 0.5, orbY: 0.3, orbR: 0.17, stars: 1.2, seed: 6, far: ["#1a2040", "#10142c"], trunk: "#120e18", ground: ["#16142a", "#08070e"] },
+    { top: "#0c0a26", mid: "#2a2256", low: "#4a3a6e", glow: "#e8d0ff", orb: "#fff0e0", orbX: 0.5, orbY: 0.3, orbR: 0.18, stars: 1.2, seed: 14, far: ["#221c44", "#140f2c"], trunk: "#140e1a", ground: ["#1a1430", "#09070f"] },
+    { top: "#071420", mid: "#123448", low: "#2a5060", glow: "#c8f0ff", orb: "#eef8ff", orbX: 0.5, orbY: 0.3, orbR: 0.19, stars: 1.4, seed: 22, far: ["#142a3a", "#0c1a26"], trunk: "#0c1218", ground: ["#10202a", "#05090e"] },
+    { top: "#120a14", mid: "#3a1e2a", low: "#6a3a3a", glow: "#ffd0a0", orb: "#ffe2b0", orbX: 0.5, orbY: 0.32, orbR: 0.21, stars: 1, seed: 30, far: ["#2e1a26", "#1c0f18"], trunk: "#160c12", ground: ["#22121a", "#0c060a"] }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let track = null; // api.track(): track.list holds { at, trunk, side, perch, look, window, state: "wait" | "tag" | "gone", tagAt }
+  let sparks = [], pops = [], leaves = [], gobbles = [], shooters = [];
+  let lastTrunk = -1;
+  let clock = 0, lastTier = 1, hits = 0, moonFlare = 0;
+  let sky = { from: 1, to: 1, t: 1 };
+  let prevSpot = null; // where the sights last settled: { x, y, at }
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+  const backOut = (u) => 1 + 2.4 * Math.pow(u - 1, 3) + 1.4 * Math.pow(u - 1, 2);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const o = clamp(Math.min(W, H) * 0.085, 28, 58);
+    const n = W > 700 ? 4 : 3;
+    const tw = clamp(W / (n * 4.2), 26, 70);
+    const trunks = [];
+    for (let i = 0; i < n; i++) trunks.push({ x: (W * (i + 0.5)) / n, w: tw * (0.9 + ((i * 7) % 3) * 0.1) });
+    L = { o, k: o / 40, n, trunks, floor: H * 0.88 };
+  }
+
+  // How far out a turkey is (0 hidden .. 1 out), at beat position `now`
+  function peekOf(m, now) {
+    const t = now - m.at;
+    if (m.state === "tag" && t > 0) return 1;
+    if (t < -0.25) return 0;
+    if (t < 0) return backOut((t + 0.25) / 0.25);
+    if (t < 0.6) return 1;
+    if (t < 0.9) return 1 - smooth((t - 0.6) / 0.3);
+    return 0;
+  }
+  const spotOf = (m) => {
+    const tr = L.trunks[m.trunk];
+    return { x: tr.x + m.side * (tr.w * 0.5 + L.o * 0.45), y: m.perch };
+  };
+  // A tagged turkey fans its tail, then flaps off over the moon after a beat
+  function turkeyAt(m, now) {
+    const tr = L.trunks[m.trunk];
+    const p = peekOf(m, now);
+    const edge = tr.x + m.side * tr.w * 0.5;
+    let x = edge + m.side * (p * L.o * 0.95 - L.o * 0.5), y = m.perch, fly = 0;
+    if (m.state === "tag") {
+      const t = now - m.tagAt - 0.6;
+      if (t > 0) {
+        fly = t;
+        const mx = W * 0.5, my = H * 0.3;
+        const u = Math.min(1, t / 3);
+        x = x + (mx + m.side * W * 0.7 - x) * u + Math.sin(t * 2) * L.o * 0.2;
+        y = y + (my - L.o * 2 - y) * Math.sin(u * Math.PI * 0.8) - u * u * H * 0.2;
+      }
+    }
+    return { x, y, peek: p, fly };
+  }
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  // An original wild turkey, facing us; face "open" | "happy" | "wide"; pose "in" (tail down),
+  // "fan" (tail fanned up behind) or "out" (wings out, flying)
+  function turkeySprite(ctx, look, face, pose, r) {
+    const T = TURKEYS[look];
+    r = Math.round(r);
+    return S.sprite(ctx, `turkey${look}${face}${pose}${r}`, r * 4.4, r * 3.6, r * 2.2, r * 2, (g) => {
+      g.scale(r, r);
+      g.lineCap = g.lineJoin = "round";
+      if (pose === "fan") {
+        // the tail fanned behind: dark feathers, a rufous band, pale tips
+        const n = 11;
+        for (let i = 0; i < n; i++) {
+          const a0 = Math.PI * (1.08 + (0.84 * i) / n), a1 = a0 + (Math.PI * 0.84) / n;
+          for (const [rad, c] of [[1.75, T.tip], [1.6, T.band], [1.4, i % 2 ? T.dark : T.body]]) {
+            g.fillStyle = c;
+            g.beginPath();
+            g.moveTo(0, 0.45);
+            g.arc(0, 0.45, rad, a0, a1);
+            g.closePath();
+            g.fill();
+          }
+        }
+        g.strokeStyle = "rgba(220,230,255,0.35)";
+        g.lineWidth = 0.04;
+        g.beginPath();
+        g.arc(0, 0.45, 1.75, Math.PI * 1.08, Math.PI * 1.92);
+        g.stroke();
+      }
+      if (pose === "out") {
+        g.fillStyle = T.dark;
+        for (const k of [-1, 1]) {
+          g.beginPath();
+          g.moveTo(k * 0.55, 0);
+          g.quadraticCurveTo(k * 1.5, -0.8, k * 2.1, -0.1);
+          g.quadraticCurveTo(k * 1.8, 0.05, k * 1.85, 0.3);
+          g.quadraticCurveTo(k * 1.4, 0.2, k * 1.35, 0.5);
+          g.quadraticCurveTo(k * 0.95, 0.35, k * 0.55, 0.55);
+          g.closePath();
+          g.fill();
+          // pale bars across the flight feathers
+          g.strokeStyle = S.rgba(T.tip, 0.6);
+          g.lineWidth = 0.05;
+          for (const u of [0.45, 0.65, 0.85]) {
+            g.beginPath();
+            g.moveTo(k * (0.6 + u * 1.3), -0.5 * u + 0.1);
+            g.lineTo(k * (0.55 + u * 1.15), 0.35);
+            g.stroke();
+          }
+        }
+      }
+      // the body: round and bronze, a coppery sheen up top
+      const body = g.createRadialGradient(-0.25, 0.1, 0.1, 0, 0.45, 1.05);
+      body.addColorStop(0, T.sheen);
+      body.addColorStop(0.55, T.body);
+      body.addColorStop(1, T.dark);
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, 0.45, 0.85, 0.9, 0, 0, TAU);
+      g.fill();
+      // breast feathers: rows of little scallops with light edges
+      g.strokeStyle = S.rgba(T.tip, 0.45);
+      g.lineWidth = 0.045;
+      for (let row = 0; row < 4; row++) {
+        const y = 0.25 + row * 0.22, n = 4 - (row === 3 ? 1 : 0);
+        for (let i = 0; i < n; i++) {
+          const x = (i - (n - 1) / 2) * 0.32 + (row % 2) * 0.08;
+          g.beginPath();
+          g.arc(x, y, 0.12, Math.PI * 0.15, Math.PI * 0.85);
+          g.stroke();
+        }
+      }
+      if (pose !== "out") {
+        g.fillStyle = T.dark;
+        for (const k of [-1, 1]) {
+          g.beginPath();
+          g.ellipse(k * 0.7, 0.55, 0.2, 0.5, k * 0.2, 0, TAU);
+          g.fill();
+        }
+      }
+      // the beard, a little dark tuft
+      g.strokeStyle = "#1a120c";
+      g.lineWidth = 0.06;
+      for (const dx of [-0.04, 0, 0.04]) {
+        g.beginPath();
+        g.moveTo(dx, 0.2);
+        g.lineTo(dx * 1.5, 0.62);
+        g.stroke();
+      }
+      // a slim neck up to a big round head: pale blue on top, red below
+      g.fillStyle = "#c86a5e";
+      g.beginPath();
+      g.moveTo(-0.16, -0.05);
+      g.quadraticCurveTo(-0.2, -0.4, -0.14, -0.55);
+      g.lineTo(0.14, -0.55);
+      g.quadraticCurveTo(0.2, -0.4, 0.16, -0.05);
+      g.closePath();
+      g.fill();
+      const head = g.createLinearGradient(0, -1.15, 0, -0.45);
+      head.addColorStop(0, "#c8dcf0");
+      head.addColorStop(0.55, "#a8c4e4");
+      head.addColorStop(0.75, "#e87a6a");
+      head.addColorStop(1, "#d8584a");
+      g.fillStyle = head;
+      g.beginPath();
+      g.ellipse(0, -0.8, 0.36, 0.38, 0, 0, TAU);
+      g.fill();
+      // wattle down the throat, and the snood drooping over the beak
+      g.fillStyle = WATTLE;
+      g.beginPath();
+      g.ellipse(0.06, -0.42, 0.14, 0.2, 0.2, 0, TAU);
+      g.fill();
+      g.fillStyle = "#e8b04a";
+      g.beginPath();
+      g.moveTo(-0.08, -0.72);
+      g.lineTo(0.08, -0.72);
+      g.lineTo(0, -0.56);
+      g.closePath();
+      g.fill();
+      g.strokeStyle = WATTLE;
+      g.lineWidth = 0.09;
+      g.beginPath();
+      g.moveTo(0, -0.88);
+      g.quadraticCurveTo(-0.1, -0.7, -0.08, -0.5);
+      g.stroke();
+      for (const k of [-1, 1]) {
+        const ex = k * 0.17, ey = -0.86;
+        if (face === "happy") {
+          g.strokeStyle = "#1a100a";
+          g.lineWidth = 0.06;
+          g.beginPath();
+          g.arc(ex, ey + 0.06, 0.1, Math.PI * 1.15, Math.PI * 1.85);
+          g.stroke();
+          g.fillStyle = "rgba(255,120,120,0.55)";
+          g.beginPath();
+          g.ellipse(ex + k * 0.08, ey + 0.17, 0.07, 0.045, 0, 0, TAU);
+          g.fill();
+        } else {
+          const er = face === "wide" ? 0.12 : 0.095;
+          g.fillStyle = "#1a100a";
+          g.beginPath();
+          g.arc(ex, ey, er, 0, TAU);
+          g.fill();
+          g.fillStyle = "#ffffff";
+          g.beginPath();
+          g.arc(ex - er * 0.3, ey - er * 0.35, er * 0.35, 0, TAU);
+          g.fill();
+        }
+      }
+      // moonlight on the crown and shoulders
+      g.strokeStyle = "rgba(220,230,255,0.5)";
+      g.lineWidth = 0.04;
+      g.beginPath();
+      g.ellipse(0, -0.8, 0.36, 0.38, 0, Math.PI * 1.15, Math.PI * 1.85);
+      g.stroke();
+      g.beginPath();
+      g.ellipse(0, 0.45, 0.85, 0.9, 0, Math.PI * 1.2, Math.PI * 1.8);
+      g.stroke();
+    });
+  }
+  // A thick old trunk with a branch or two and a knothole, baked per size and mood
+  function bigTrunk(ctx, i, mood, tier) {
+    const tr = L.trunks[i];
+    const w = Math.round(tr.w), h = Math.round(L.floor + 10);
+    return S.sprite(ctx, `oak${i}_${w}x${h}_${tier}`, w * 5, h + 20, w * 2.5, h, (g) => {
+      const r = S.rng(i * 31 + 7);
+      g.fillStyle = mood.trunk;
+      // a branch reaching out each side, high up
+      for (const s of [-1, 1]) {
+        const by = -h * (0.7 + r() * 0.2);
+        g.beginPath();
+        g.moveTo(s * w * 0.3, by + w * 0.25);
+        g.quadraticCurveTo(s * w * 1.4, by - w * 0.2, s * w * 2.4, by - w * 0.6);
+        g.lineTo(s * w * 2.4, by - w * 0.48);
+        g.quadraticCurveTo(s * w * 1.3, by + w * 0.05, s * w * 0.3, by + w * 0.55);
+        g.closePath();
+        g.fill();
+      }
+      g.beginPath();
+      g.moveTo(-w * 0.45, -h);
+      g.bezierCurveTo(-w * 0.55, -h * 0.5, -w * 0.48, -w * 0.8, -w * 0.9, 0);
+      g.lineTo(w * 0.9, 0);
+      g.bezierCurveTo(w * 0.48, -w * 0.8, w * 0.55, -h * 0.5, w * 0.45, -h);
+      g.closePath();
+      g.fill();
+      // moonlit edges facing the moon
+      const toward = tr.x < W / 2 ? 1 : -1;
+      g.strokeStyle = S.rgba(mood.glow, 0.5);
+      g.lineWidth = 1.5;
+      g.beginPath();
+      g.moveTo(toward * w * 0.45, -h);
+      g.bezierCurveTo(toward * w * 0.55, -h * 0.5, toward * w * 0.48, -w * 0.8, toward * w * 0.9, 0);
+      g.stroke();
+      g.strokeStyle = "rgba(0,0,0,0.3)";
+      g.lineWidth = 1;
+      for (let j = 0; j < 12; j++) {
+        const bx = (r() - 0.5) * w * 0.7, by = -h * r();
+        g.beginPath();
+        g.moveTo(bx, by);
+        g.lineTo(bx + (r() - 0.5) * 4, by + 20 + r() * 50);
+        g.stroke();
+      }
+      // a knothole
+      g.fillStyle = "#050307";
+      g.beginPath();
+      g.ellipse(0, -h * (0.25 + r() * 0.15), w * 0.16, w * 0.24, 0, 0, TAU);
+      g.fill();
+    });
+  }
+  function leafSprite(ctx) {
+    return S.sprite(ctx, "leaf", 16, 16, 8, 8, (g) => {
+      g.fillStyle = "#c87a3a";
+      g.beginPath();
+      g.ellipse(0, 0, 6, 3, 0.4, 0, TAU);
+      g.fill();
+    });
+  }
+
+  function skyLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "roost" + tier, W, H, (g) => {
+      S.duskSky(g, W, H, m);
+      const lin = g.createLinearGradient(0, L.floor - H * 0.06, 0, H);
+      lin.addColorStop(0, m.ground[0]);
+      lin.addColorStop(1, m.ground[1]);
+      g.fillStyle = lin;
+      g.beginPath();
+      g.moveTo(0, L.floor - H * 0.02);
+      for (let x = 0; x <= W; x += 20) g.lineTo(x, L.floor - H * 0.02 - Math.sin(x * 0.013 + m.seed) * H * 0.012);
+      g.lineTo(W, H);
+      g.lineTo(0, H);
+      g.closePath();
+      g.fill();
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  const settle = (m) => {
+    const p = spotOf(m);
+    if (!prevSpot || m.at >= prevSpot.at) prevSpot = { x: p.x, y: p.y, at: m.at };
+  };
+
+  // ---- Now and then, behind the play -----------------------------------------------------------
+  // One small thing at a time, every few seconds, a different one each time; none of it is a
+  // target and none of it crosses where the sights go
+  const across = (u, e, pad) => (e.dir > 0 ? -pad + u * (W + 2 * pad) : W + pad - u * (W + 2 * pad));
+  const moodNow = () => MOODS[(lastTier - 1) % 4];
+  const amb = S.ambience([
+    // bats flitting across the moon
+    { dur: 5, layer: "sky", draw: (ctx, u, e) => {
+      for (let i = 0; i < 2; i++) S.critter(ctx, "bat", across(u, e, 40) - e.dir * i * 36 * L.k, H * (0.22 + e.r * 0.14) + Math.sin(u * 22 + i * 2) * 12 * L.k, 9 * L.k, u * 5 + i, "#0a0810", e.dir);
+    } },
+    // a cloud drifting over the moon
+    { dur: 12, layer: "sky", draw: (ctx, u, e) => {
+      const c = Math.min(W, H) * 0.12, x = across(u, e, c * 2.5), y = H * (0.26 + e.r * 0.08);
+      ctx.globalAlpha = 0.6 * Math.sin(u * Math.PI);
+      ctx.fillStyle = moodNow().far[0];
+      for (const [dx, dy, r] of [[-1.1, 0.15, 0.7], [0, 0, 1], [1.1, 0.2, 0.65], [0.5, 0.35, 0.6]]) {
+        ctx.beginPath();
+        ctx.ellipse(x + dx * c, y + dy * c, r * c * 1.3, r * c * 0.5, 0, 0, TAU);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    } },
+    // a shooting star
+    { dur: 1.5, layer: "sky", draw: (ctx, u, e) => {
+      if (e.fired) return;
+      e.fired = true;
+      shooters.push({ x: W * (0.6 + e.r * 0.4), y: H * 0.06, t: 0 });
+    } },
+    // a deer walking through the far woods
+    { dur: 12, draw: (ctx, u, e) => S.critter(ctx, "deer", across(u, e, 60), L.floor - H * 0.05, L.o * 0.32, u * 12, S.mix(moodNow().far[1], "#000000", 0.3), e.dir) },
+    // a fox trotting along the ground
+    { dur: 7, layer: "front", draw: (ctx, u, e) => S.critter(ctx, "fox", across(u, e, 40), L.floor + H * 0.035, L.o * 0.3, u * 7, moodNow().trunk, e.dir) },
+    // a squirrel scurrying between the oaks
+    { dur: 4, layer: "front", draw: (ctx, u, e) => S.critter(ctx, "squirrel", across(u, e, 30), L.floor + H * 0.04, L.o * 0.22, u * 4, moodNow().trunk, e.dir) }
+  ]);
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function tag(api, m, perfect, ghost) {
+    const now = api.eng.beatPos();
+    m.state = "tag";
+    settle(m);
+    m.tagAt = now;
+    const p = spotOf(m);
+    pops.push({ x: p.x, y: p.y, t: 0, size: L.o * (perfect ? 2.4 : 1.8), color: perfect ? GOLD : "#f4f0ff" });
+    for (let i = 0; i < (perfect ? 12 : 8) && sparks.length < 160; i++) {
+      const a = Math.random() * TAU, v = 50 + Math.random() * 110, life = 0.5 + Math.random() * 0.5;
+      sparks.push({ x: p.x, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life, max: life, color: i % 3 ? GOLD : "#f4f0ff", star: i % 3 === 0 });
+    }
+    gobbles.push({ x: p.x, y: p.y - L.o, t: 0 });
+    if (perfect && !ghost) api.ring(p.x, p.y, GOLD, L.o * 2.4);
+    return { x: p.x, y: m.perch }; // where the shell pops the points
+  }
+  function shake(x, y, n) {
+    for (let i = 0; i < n && leaves.length < 60; i++) leaves.push({ x: x + (Math.random() - 0.5) * W * 0.3, y: y - Math.random() * H * 0.2, vy: 30 + Math.random() * 40, seed: Math.random() * TAU, life: 4 });
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: a turkey that pops out `ahead` beats from now, two or more after the last
+  function spawn() {
+    let trunk = Math.floor(Math.random() * L.n);
+    if (trunk === lastTrunk) trunk = (trunk + 1) % L.n;
+    lastTrunk = trunk;
+    const side = trunk === 0 ? 1 : trunk === L.n - 1 ? -1 : Math.random() < 0.5 ? 1 : -1;
+    return { trunk, side, perch: H * (0.42 + Math.random() * 0.26), look: Math.floor(Math.random() * TURKEYS.length), tagAt: -99 };
+  }
+
+  // 3. A tap: the tracker tags whatever is in reach. In Fidget, with nothing within 1 beat,
+  // one springs up right in the sights instead (from the tracker's empty())
+  function springUp(api) {
+    if (track.list.length >= 10) return;
+    const now = api.eng.beatPos();
+    const sp = sights(now);
+    let trunk = 0;
+    L.trunks.forEach((t, i) => Math.abs(t.x - sp.x) < Math.abs(L.trunks[trunk].x - sp.x) && (trunk = i));
+    const side = sp.x >= L.trunks[trunk].x ? 1 : -1;
+    const m = { at: now, trunk, side, perch: clamp(sp.y, H * 0.4, H * 0.7), look: Math.floor(Math.random() * TURKEYS.length), state: "wait", tagAt: -99, window: 0 };
+    track.list.push(m);
+    tag(api, m, false, true);
+  }
+
+  // The arrive-on-the-beat loop is the shell's: it spawns, judges, scores, misses and plays
+  // autopilot, and the game says what arrives and how a tag looks
+  function setup(api) {
+    track = api.track({
+      spawn,
+      ready: (m, now) => Math.abs(m.at - now) < 1,
+      note: (m) => (m.perch - H * 0.4) / (H * 0.3),
+      hit: (m, { perfect, ghost }) => {
+        const at = tag(api, m, perfect, ghost);
+        if (!ghost && ++hits === 16) api.hint("gobble", 'Hold <span class="pb-kbd">Space</span>, let go: a gobble call');
+        return at;
+      },
+      miss: (m, counted) => {
+        m.state = "gone";
+        settle(m);
+        if (counted) api.hint("pop", "Tap as the turkey pops out");
+      },
+      empty: () => {
+        if (api.style === "fidget") return springUp(api);
+        const sp = sights(api.eng.beatPos());
+        pops.push({ x: sp.x, y: sp.y, t: 0, size: L.o, color: SIGHT });
+      },
+      perfect: PERFECT,
+      cue: false, // the sights carry the timing ring, gold on the perfect beat (see draw)
+      keep: (m, now) => (m.state === "tag" ? now - m.tagAt < 4.5 : now < m.at + 1.2) // a tagged turkey until it has flown off
+    });
+  }
+
+  // A hold then release: a gobble call rings out and shakes leaves down; full, the moon lights up too
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const sp = sights(api.eng.beatPos());
+    for (let i = 0; i < 1 + Math.round(c * 2); i++) gobbles.push({ x: sp.x, y: sp.y, t: -i * 0.18, big: true });
+    shake(sp.x, sp.y, Math.round(6 + c * 14));
+    if (c >= 1) {
+      moonFlare = 1;
+      shooters.push({ x: W * (0.7 + Math.random() * 0.3), y: H * 0.06, t: 0 });
+      api.callout("Moonglow", W / 2, H * 0.3 + L.o * 3, GOLD, 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // The sights glide from the last peek to the next and settle a moment before it
+  function sights(now) {
+    let next = null;
+    for (const m of track.list) if (m.state === "wait" && now < m.at + m.window && (!next || m.at < next.at)) next = m;
+    const from = prevSpot || { x: W * 0.5, y: H * 0.55 };
+    if (!next) return { x: from.x, y: from.y, lock: 0, next: null };
+    const to = spotOf(next);
+    const start = Math.max(prevSpot ? prevSpot.at : -1e9, next.at - 1.8), end = next.at - 0.35;
+    const u = end > start ? smooth(clamp((now - start) / (end - start), 0, 1)) : 1;
+    return { x: from.x + (to.x - from.x) * u, y: from.y + (to.y - from.y) * u, lock: clamp(1 - Math.abs(next.at - now) / 1.2, 0, 1), next };
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    amb.update(dt);
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 30 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    for (let i = leaves.length - 1; i >= 0; i--) {
+      const f = leaves[i];
+      f.y += f.vy * dt;
+      f.x += Math.sin(clock * 2 + f.seed) * 30 * dt;
+      if ((f.life -= dt) <= 0 || f.y > L.floor) leaves.splice(i, 1);
+    }
+    for (let i = gobbles.length - 1; i >= 0; i--) if ((gobbles[i].t += dt) > 1.2) gobbles.splice(i, 1);
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    for (let i = shooters.length - 1; i >= 0; i--) if ((shooters[i].t += dt) > 1.4) shooters.splice(i, 1);
+    moonFlare = Math.max(0, moonFlare - dt * 0.4);
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  function drawTurkey(ctx, m, now) {
+    const p = turkeyAt(m, now);
+    if (p.peek <= 0 && !p.fly) {
+      // the red wattle bobbing at the trunk's edge before it pops out
+      const left = m.at - now;
+      if (m.state === "wait" && left < 1.5 && left > 0) {
+        const tr = L.trunks[m.trunk];
+        const a = clamp((1.5 - left) / 0.6, 0, 1);
+        const bob = Math.abs(Math.sin(now * Math.PI * 2)) * L.o * 0.08;
+        const ex = tr.x + m.side * (tr.w * 0.5 + L.o * 0.04 * a), ey = m.perch - L.o * 0.3 + bob;
+        S.glow(ctx, ex, ey, L.o * 0.2, WATTLE, a * 0.45);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = WATTLE;
+        ctx.beginPath();
+        ctx.ellipse(ex, ey, L.o * 0.07, L.o * 0.1, 0, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      return;
+    }
+    const tagged = m.state === "tag";
+    const since = now - m.tagAt;
+    const face = tagged ? (since < 0.25 ? "wide" : "happy") : "open";
+    const pose = p.fly > 0 ? "out" : tagged ? "fan" : "in";
+    const flap = p.fly > 0 ? 1 + Math.sin(p.fly * 14) * 0.25 : 1;
+    const puff = tagged && since < 0.4 ? 1 + Math.sin((since / 0.4) * Math.PI) * 0.15 : 1;
+    const shrink = p.fly > 0 ? Math.max(0.4, 1 - p.fly * 0.2) : 1;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.fly > 0 ? 0 : m.side * (1 - p.peek) * 0.6 + m.side * 0.15);
+    ctx.scale(puff * shrink, puff * shrink * (p.fly > 0 ? 1 / flap : 1));
+    S.draw(ctx, turkeySprite(ctx, m.look, face, pose, L.o * 0.62), 0, 0);
+    ctx.restore();
+    if (p.fly > 0) for (let i = 0; i < 2; i++) S.twinkle(ctx, p.x + (Math.random() - 0.5) * L.o, p.y + L.o * 0.6, L.o * 0.25, GOLD, 0.5);
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const mood = MOODS[(api.tier - 1) % 4];
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    if (moonFlare > 0) S.glow(ctx, W * 0.5, H * 0.3, Math.min(W, H) * 0.6, mood.glow, moonFlare * 0.5);
+    S.glow(ctx, W * 0.5, H * 0.3, Math.min(W, H) * 0.3, mood.orb, 0.1 + 0.05 * Math.sin(now * Math.PI));
+    for (const s of shooters) {
+      const trail = [];
+      for (let j = 0; j < 8; j++) trail.push([s.x - (s.t - j * 0.03) * W * 0.7, s.y + (s.t - j * 0.03) * H * 0.25]);
+      S.streak(ctx, trail, 3, "#f4f0ff");
+    }
+    amb.draw(ctx, "sky");
+    S.pines(ctx, "ht" + api.tier, W, L.floor - H * 0.04, H * 0.2, 0, mood.far, mood.glow, 12, 14);
+    amb.draw(ctx);
+    // turkeys flying off pass in front of the far woods; peeking ones sit behind their trunks
+    for (const m of track.list) if (turkeyAt(m, now).fly <= 0) drawTurkey(ctx, m, now);
+    for (let i = 0; i < L.n; i++) S.draw(ctx, bigTrunk(ctx, i, mood, api.tier), L.trunks[i].x, L.floor + 10);
+    amb.draw(ctx, "front");
+    for (const m of track.list) if (turkeyAt(m, now).fly > 0) drawTurkey(ctx, m, now);
+    for (const f of leaves) {
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(Math.sin(clock * 3 + f.seed) * 1.2);
+      ctx.globalAlpha = Math.min(1, f.life);
+      S.draw(ctx, leafSprite(ctx), 0, 0, L.k);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+    S.motes(ctx, W, H, clock, ["#d8e4ff", "#ffe8c0"], { n: 10, size: 5, rise: 4, sway: 20, par: 0, alpha: 0.3, seed: 17 });
+
+    // The sights
+    const sp = sights(now);
+    const perfectNow = sp.next && Math.abs(sp.next.at - now) < PERFECT;
+    S.reticle(ctx, sp.x, sp.y, L.o * 1.1, perfectNow ? GOLD : SIGHT, sp.lock, api.started ? 1 : 0.8);
+    if (sp.next) {
+      const left = sp.next.at - now;
+      if (left < 1.5 && left > -sp.next.window) S.softRing(ctx, sp.x, sp.y, L.o * 0.5 + Math.max(0, left) * L.o * 2, perfectNow ? GOLD : SIGHT, Math.min(1, (1.5 - left) / 0.5) * 0.8, 1.2);
+    }
+    api.drawCharge(sp.x, sp.y, L.o * 1.6, SIGHT, GOLD);
+    // the gobble: soft rings of sound, and a "gobble" drifting up
+    for (const h of gobbles) {
+      if (h.t < 0) continue;
+      const e = ease(h.t / 1.2);
+      S.softRing(ctx, h.x, h.y, L.o * (0.6 + e * (h.big ? 4 : 2)), "#e8e0ff", (1 - e) * 0.6, 1);
+      if (!h.big) {
+        ctx.globalAlpha = (1 - e) * 0.85;
+        ctx.fillStyle = "#f4f0ff";
+        ctx.font = `600 ${Math.round(12 + 6 * L.k)}px Oswald, Impact, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.fillText("gobble", h.x + L.o * 0.8, h.y - e * L.o * 1.5);
+        ctx.globalAlpha = 1;
+      }
+    }
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.5);
+      S.glow(ctx, p.x, p.y, p.size * (0.6 + e), p.color, (1 - e) * 0.8);
+      S.softRing(ctx, p.x, p.y, p.size * 0.3 + p.size * 0.6 * ease(e), p.color, (1 - e) * 0.8, 1.4);
+    }
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, p.color, a);
+      else S.glow(ctx, p.x, p.y, 5 * L.k, p.color, a);
+    }
+  }
+
+  SpaceShell.mount({
+    skin: S,
+    key: "roost",
+    title: "Roost",
+    hint: "Tap as the turkey pops out",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Moonlight", "Night watch", "Harvest moon"],
+    fidgetPoint: (api) => {
+      const sp = sights(api.eng.beatPos());
+      return { x: sp.x, y: sp.y };
+    },
+    resize: layout,
+    setup,
+    onFire: () => track.fire(),
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

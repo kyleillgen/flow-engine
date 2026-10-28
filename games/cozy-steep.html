@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Oolong the sleepy teapot pours for little cups sliding along a moonlit garden table. Tap as a cup passes under the spout and its tea blooms into a glowing flower. A rhythm micro-game that finds your tempo.">
+<title>Steep</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/cozy/cozy-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Steep: a tea garden at night. Oolong, a round sleepy teapot with a leaf sprouting from her lid,
+// floats over a long low table under paper lanterns. Little cups slide along the table, each one
+// passing under her spout exactly on a beat; tap as it does and she tips and pours, and the tea
+// leaves in the cup unfurl into a glowing blooming-tea flower, its steam curling up in a spiral of
+// light. The cups are little sleepy characters: they wake as they near the spout, and hop and
+// beam when they're filled. A cup you miss slides on by empty, with a little yawn; nothing is lost.
+//
+// The five questions:
+// 1. On the beat: a cup sets off from beyond the right edge, due under the spout four or more
+//    beats later, always on a whole beat and at least two beats after the last.
+// 2. Movement: every cup slides left at one steady speed; its x is a function of the beat position.
+// 3. The player pours. Every press is a note (api.eng.tap) and a tip of the pot.
+// 4. Clean within ±0.3 beat of a cup's beat (wider with assist, for cups not yet set off), perfect
+//    within ±0.1.
+// 5. The look: a baked night garden with a moon and rim-lit hills, a string of paper lanterns
+//    swaying on the beat, the table with a runner, fireflies, and the flowers' steam spirals.
+//    Now and then something happens in the garden: a shooting star, a moth visiting a lantern,
+//    a kite, a light running along the lanterns, a snail on the lawn, fireflies in a spiral.
+//    The timing cue is a ring of little lights closing on the cup under the spout, gold on the beat.
+// Fidget (F): every press pours into the nearest empty cup, wherever it is, and the stream reaches
+// it. Hold then let go for a steam ring; a full charge sends a petal breeze. Neither scores.
+(() => {
+  "use strict";
+
+  const S = CozySkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const TEA = "#ffc983";
+  // Cup glazes, each with its own flower: rose, jasmine, chrysanthemum, lavender, osmanthus
+  const KINDS = [
+    { glaze: "#ffb3cf", deep: "#c46a94", petal: "#ff9fc0", heart: "#fff0b0", n: 8, len: 1, wid: 0.5 },
+    { glaze: "#9cf0d0", deep: "#3f9c88", petal: "#fff6ea", heart: "#ffd58a", n: 5, len: 1.05, wid: 0.62 },
+    { glaze: "#ffd58a", deep: "#b88a3c", petal: "#ffcf7a", heart: "#ff9f6a", n: 14, len: 0.95, wid: 0.28 },
+    { glaze: "#c8b4ff", deep: "#7a62c4", petal: "#c8b4ff", heart: "#fff2e2", n: 6, len: 1.1, wid: 0.45 },
+    { glaze: "#8fd8e8", deep: "#3c8ea4", petal: "#ffbf9e", heart: "#fff6c8", n: 10, len: 0.8, wid: 0.42 }
+  ];
+  const MOODS = [
+    { top: "#140a28", mid: "#2e1b48", low: "#6a3a68", clouds: ["#ff9fc0", "#c8b4ff", "#ffbf9e", "#ff9fc0", "#8fd8e8"], band: "#ffd9e8", seed: 7, hill: ["#3a2350", "#24143a"], rim: "#ffb3cf" },
+    { top: "#0c1428", mid: "#183650", low: "#3a6a6a", clouds: ["#9cf0d0", "#8fd8e8", "#c8b4ff", "#9cf0d0", "#ffd58a"], band: "#d8fff0", seed: 19, hill: ["#1e3446", "#12202e"], rim: "#9cf0d0" },
+    { top: "#170c30", mid: "#36205e", low: "#6a4890", clouds: ["#c8b4ff", "#ff9fc0", "#8fd8e8", "#c8b4ff", "#ffbf9e"], band: "#e8dcff", seed: 31, hill: ["#2e2250", "#1c1438"], rim: "#c8b4ff" },
+    { top: "#1a0e24", mid: "#4a2a40", low: "#9a5a4a", clouds: ["#ffd58a", "#ffbf9e", "#ff9fc0", "#ffd58a", "#c8b4ff"], band: "#fff0d0", seed: 43, hill: ["#43283c", "#2a1828"], rim: "#ffd58a" }
+  ];
+  const LANTERNS = ["#ffd58a", "#ffb3cf", "#ffbf9e", "#c8b4ff", "#ffd58a", "#9cf0d0"];
+
+  let W = 0, H = 0, L = {};
+  let cupT = null; // the tracker; cupT.list is { kind, at, window, state: "wait" | "poured" | "missed", pourAt, seed }
+  let petals = [], puffs = [], sparks = [], splash = [];
+  let bg = null, chaseAt = -99; // the background happenings, and a light running along the lanterns
+  let lastKind = 0;
+  let clock = 0, lastTier = 1, flare = 0, pourAt = -99, pourCup = null, missAt = -99, hits = 0;
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const back = (u) => ((u = clamp(u, 0, 1)), 1 + 2.4 * Math.pow(u - 1, 3) + 1.4 * Math.pow(u - 1, 2));
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    // smaller on short screens (the pocket's frames), so everyone fits under the bar
+    const k = H < 520 ? clamp(H / 420, 0.55, 0.9) : clamp(Math.min(W / 360, H / 640), 0.9, 1.9);
+    const table = Math.round(H * (H > W ? 0.66 : 0.64));
+    const spoutX = W * (H > W ? 0.5 : 0.5);
+    // A cup is due under the spout four beats after it sets off from beyond the right edge
+    L = { k, table, top: 52 * k, cupY: table + 30 * k, spoutX, speed: (W - spoutX + 60 * k) / 4, pot: 54 * k, cw: 30 * k };
+    L.potX = spoutX - L.pot * 1.25;
+    L.potY = L.cupY - L.pot * 3;
+  }
+
+  const cupX = (c, now) => L.spoutX + (c.at - now) * L.speed;
+  const mouthY = () => L.cupY - L.cw * 0.95;
+  // Oolong's spout tip, tipping with her
+  function spoutTip(tilt) {
+    const dx = L.pot * 1.18, dy = -L.pot * 0.42;
+    const c = Math.cos(tilt), s = Math.sin(tilt);
+    return [L.potX + dx * c - dy * s, L.potY + dx * s + dy * c];
+  }
+
+  // ---- Sprites ------------------------------------------------------------------------------
+  function skyLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "steep" + tier, W, H, (g) => {
+      S.dreamSky(g, W, H, m);
+      // the moon, big and soft, high on the right
+      const mx = W * 0.8, my = H * 0.2, mr = 30 * L.k;
+      g.globalCompositeOperation = "lighter";
+      for (const [r, a] of [[mr * 5, 0.08], [mr * 2.4, 0.14]]) {
+        const gr = g.createRadialGradient(mx, my, 0, mx, my, r);
+        gr.addColorStop(0, S.rgba("#fff2e2", a));
+        gr.addColorStop(1, S.rgba("#fff2e2", 0));
+        g.fillStyle = gr;
+        g.fillRect(mx - r, my - r, r * 2, r * 2);
+      }
+      g.globalCompositeOperation = "source-over";
+      const body = g.createRadialGradient(mx - mr * 0.3, my - mr * 0.3, mr * 0.1, mx, my, mr);
+      body.addColorStop(0, "#fffaf2");
+      body.addColorStop(1, S.mix("#ffe6d0", m.rim, 0.25));
+      g.fillStyle = body;
+      g.beginPath();
+      g.arc(mx, my, mr, 0, TAU);
+      g.fill();
+      g.fillStyle = S.mixA("#e8c8c8", m.rim, 0.3, 0.35);
+      for (const [x, y, s] of [[-0.3, 0.2, 0.22], [0.35, -0.2, 0.15], [0.1, 0.5, 0.12]]) {
+        g.beginPath();
+        g.arc(mx + x * mr, my + y * mr, s * mr, 0, TAU);
+        g.fill();
+      }
+      garden(g, m);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // The garden behind the table: a far hill, round-crowned trees and shrubs lit from the moon's
+  // side, and little lamps along the path
+  function garden(g, m) {
+    const r = S.rng(m.seed * 7 + 3), k = L.k, base = L.table + 2;
+    const far = S.mix(m.hill[0], m.low, 0.45), mid = m.hill[0], near = m.hill[1];
+    const rimA = (a) => S.rgba(m.rim, a);
+    // the far hill
+    g.fillStyle = far;
+    g.beginPath();
+    g.moveTo(0, base);
+    for (let x = 0; x <= W + 6; x += 6) g.lineTo(x, base - 54 * k - Math.sin(x / W * 3.1 + m.seed) * 18 * k - Math.sin(x / W * 7.3) * 6 * k);
+    g.lineTo(W, base);
+    g.fill();
+    g.strokeStyle = rimA(0.25);
+    g.lineWidth = 1;
+    g.stroke();
+    // a round tree: a trunk and a crown of soft circles, rim-lit on the right (the moon's side)
+    const tree = (x, h, rad, fill) => {
+      g.fillStyle = fill;
+      g.fillRect(x - 2 * k, base - h, 4 * k, h);
+      const blobs = [[0, 0, 1], [-0.6, 0.25, 0.7], [0.6, 0.2, 0.75], [0.1, -0.45, 0.7]];
+      g.beginPath();
+      for (const [dx, dy, s] of blobs) {
+        g.moveTo(x + dx * rad + s * rad, base - h + dy * rad);
+        g.arc(x + dx * rad, base - h + dy * rad, s * rad, 0, TAU);
+      }
+      g.fill();
+      g.strokeStyle = rimA(0.35);
+      g.lineWidth = 1.4;
+      for (const [dx, dy, s] of blobs) {
+        g.beginPath();
+        g.arc(x + dx * rad, base - h + dy * rad, s * rad - 0.7, -Math.PI * 0.55, Math.PI * 0.05);
+        g.stroke();
+      }
+    };
+    const n = Math.max(3, Math.round(W / 170));
+    for (let i = 0; i < n; i++) tree(W * ((i + 0.2 + r() * 0.6) / n), (70 + r() * 50) * k, (22 + r() * 14) * k, mid);
+    // shrubs along the back of the table
+    g.fillStyle = near;
+    g.beginPath();
+    for (let x = -10; x < W + 20; x += (16 + r() * 14) * k) {
+      const s = (12 + r() * 12) * k;
+      g.moveTo(x + s, base);
+      g.arc(x, base, s, Math.PI, TAU);
+    }
+    g.fill();
+    // path lamps
+    for (let i = 0; i < n + 1; i++) {
+      const x = W * ((i + 0.5) / (n + 1)) + (r() - 0.5) * 30, y = base - (16 + r() * 8) * k;
+      g.fillStyle = near;
+      g.fillRect(x - 1.2, y, 2.4, base - y);
+      g.globalCompositeOperation = "lighter";
+      const gr = g.createRadialGradient(x, y, 0, x, y, 16 * k);
+      gr.addColorStop(0, "rgba(255,213,138,0.55)");
+      gr.addColorStop(1, "rgba(255,213,138,0)");
+      g.fillStyle = gr;
+      g.fillRect(x - 16 * k, y - 16 * k, 32 * k, 32 * k);
+      g.fillStyle = "#fff0c8";
+      g.beginPath();
+      g.arc(x, y, 2.2 * k, 0, TAU);
+      g.fill();
+      g.globalCompositeOperation = "source-over";
+    }
+  }
+
+  function tableSprite(ctx) {
+    const h = H - L.table;
+    return S.sprite(ctx, "table" + W + "x" + h, W, h, 0, 0, (g) => {
+      const top = L.top;
+      let lin = g.createLinearGradient(0, 0, 0, top);
+      lin.addColorStop(0, "#6a4462");
+      lin.addColorStop(1, "#4e2f4c");
+      g.fillStyle = lin;
+      g.fillRect(0, 0, W, top);
+      // wood grain, very faint
+      const r = S.rng(11);
+      g.strokeStyle = "rgba(255,220,230,0.05)";
+      for (let i = 0; i < 9; i++) {
+        const y = r() * top;
+        g.lineWidth = 0.6 + r();
+        g.beginPath();
+        g.moveTo(0, y);
+        g.bezierCurveTo(W * 0.3, y + (r() - 0.5) * 6, W * 0.7, y + (r() - 0.5) * 6, W, y);
+        g.stroke();
+      }
+      // the runner: a soft rose cloth along the table, dotted with tiny stitched stars
+      const ry = top * 0.28, rh = top * 0.5;
+      lin = g.createLinearGradient(0, ry, 0, ry + rh);
+      lin.addColorStop(0, "#a66a8e");
+      lin.addColorStop(1, "#8a5278");
+      g.fillStyle = lin;
+      g.fillRect(0, ry, W, rh);
+      g.fillStyle = "rgba(255,226,236,0.28)";
+      g.fillRect(0, ry, W, 1);
+      g.fillRect(0, ry + rh - 1, W, 1);
+      for (let x = 10; x < W; x += 22) {
+        g.fillStyle = "rgba(255,240,220,0.32)";
+        g.beginPath();
+        g.arc(x, ry + rh / 2 + (x % 44 ? -3 : 3), 1.1, 0, TAU);
+        g.fill();
+      }
+      // the warm edge catching the lantern light, and the front of the table falling into shadow
+      g.fillStyle = "rgba(255,213,138,0.4)";
+      g.fillRect(0, 0, W, 1.2);
+      // the lawn in front, with little glowing flowers in the grass
+      const k = L.k, drop = top + 44 * k;
+      lin = g.createLinearGradient(0, top, 0, h);
+      lin.addColorStop(0, "#26173a");
+      lin.addColorStop(1, "#120a1e");
+      g.fillStyle = lin;
+      g.fillRect(0, top, W, h - top);
+      const fr = S.rng(23);
+      const nf = Math.round((W * (h - drop)) / (1500 * k * k));
+      for (let i = 0; i < nf; i++) {
+        const x = fr() * W, y = drop + 14 * k + fr() * (h - drop - 30 * k), c = LANTERNS[i % LANTERNS.length];
+        const s = (1.2 + fr() * 1.6) * k * (0.6 + (y - drop) / (h - drop));
+        g.strokeStyle = "rgba(120,170,130,0.35)";
+        g.lineWidth = 0.8;
+        g.beginPath();
+        g.moveTo(x, y);
+        g.quadraticCurveTo(x - 2, y + 6 * k, x - 1, y + 12 * k);
+        g.stroke();
+        g.globalCompositeOperation = "lighter";
+        const gr = g.createRadialGradient(x, y, 0, x, y, s * 6);
+        gr.addColorStop(0, S.rgba(c, 0.25));
+        gr.addColorStop(1, S.rgba(c, 0));
+        g.fillStyle = gr;
+        g.fillRect(x - s * 6, y - s * 6, s * 12, s * 12);
+        g.globalCompositeOperation = "source-over";
+        g.fillStyle = S.mix(c, "#ffffff", 0.4);
+        for (let p = 0; p < 5; p++) {
+          const a = (p / 5) * TAU;
+          g.beginPath();
+          g.arc(x + Math.cos(a) * s, y + Math.sin(a) * s, s * 0.75, 0, TAU);
+          g.fill();
+        }
+      }
+      // the tablecloth falling over the front, scalloped, with a row of lace dots
+      lin = g.createLinearGradient(0, top, 0, drop);
+      lin.addColorStop(0, "#c27aa0");
+      lin.addColorStop(1, "#8a4e7a");
+      g.fillStyle = lin;
+      const sc = 22 * k;
+      g.beginPath();
+      g.moveTo(0, top);
+      g.lineTo(W, top);
+      g.lineTo(W, drop - sc * 0.4);
+      for (let x = W; x > -sc; x -= sc) g.arc(x - sc / 2, drop - sc * 0.4, sc / 2, 0, Math.PI);
+      g.lineTo(0, top);
+      g.fill();
+      g.fillStyle = "rgba(255,226,236,0.45)";
+      g.fillRect(0, top, W, 1.5);
+      g.fillStyle = "rgba(255,240,226,0.5)";
+      for (let x = W - sc / 2; x > -sc; x -= sc) {
+        g.beginPath();
+        g.arc(x, drop - sc * 0.15, 1.6 * k, 0, TAU);
+        g.fill();
+        g.beginPath();
+        g.arc(x, top + 12 * k, 1.1 * k, 0, TAU);
+        g.fill();
+      }
+      g.strokeStyle = "rgba(255,226,236,0.25)";
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(0, top + 18 * k);
+      g.lineTo(W, top + 18 * k);
+      g.stroke();
+    });
+  }
+
+  function lanternSprite(ctx, color) {
+    const R = Math.round(13 * L.k);
+    return S.sprite(ctx, "lantern" + color + R, R * 5, R * 5, R * 2.5, R * 2.5, (g) => {
+      S.blurred(g, color, 18, (g) => {
+        g.fillStyle = S.rgba(color, 0.55);
+        g.beginPath();
+        g.ellipse(0, 0, R * 1.05, R * 0.95, 0, 0, TAU);
+        g.fill();
+      });
+      const body = g.createRadialGradient(-R * 0.2, -R * 0.2, R * 0.1, 0, 0, R * 1.1);
+      body.addColorStop(0, "#fffaf0");
+      body.addColorStop(0.5, S.mix(color, "#ffffff", 0.35));
+      body.addColorStop(1, S.mix(color, "#8a3a5a", 0.35));
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, 0, R * 1.05, R * 0.95, 0, 0, TAU);
+      g.fill();
+      // paper ribs
+      g.strokeStyle = S.mixA(color, "#6a2a4a", 0.5, 0.35);
+      g.lineWidth = 0.8;
+      for (const f of [-0.6, -0.2, 0.2, 0.6]) {
+        g.beginPath();
+        g.ellipse(0, 0, Math.abs(f) * R * 1.05 + 0.5, R * 0.95, 0, 0, TAU);
+        g.stroke();
+      }
+      g.fillStyle = "#5a3048";
+      g.fillRect(-R * 0.4, -R * 1.1, R * 0.8, R * 0.22);
+      g.fillRect(-R * 0.4, R * 0.9, R * 0.8, R * 0.2);
+      g.strokeStyle = S.rgba(color, 0.8);
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(0, R * 1.1);
+      g.lineTo(0, R * 1.6);
+      g.stroke();
+    });
+  }
+
+  // Oolong's porcelain body, lid and handle; the spout, face and leaf are live
+  function potSprite(ctx) {
+    const R = Math.round(L.pot);
+    return S.sprite(ctx, "oolong" + R, R * 4.4, R * 3.6, R * 2, R * 1.9, (g) => {
+      const glaze = "#e6f6ee";
+      S.blurred(g, "#9cf0d0", 22, (g) => {
+        g.fillStyle = "rgba(156,240,208,0.35)";
+        g.beginPath();
+        g.ellipse(0, 0, R * 1.05, R * 0.88, 0, 0, TAU);
+        g.fill();
+      });
+      // the spout, curving up and out to the right
+      g.fillStyle = "#cfeee0";
+      g.beginPath();
+      g.moveTo(R * 0.7, R * 0.05);
+      g.quadraticCurveTo(R * 1.05, R * 0.05, R * 1.22, -R * 0.42);
+      g.lineTo(R * 1.12, -R * 0.48);
+      g.quadraticCurveTo(R * 0.95, -R * 0.2, R * 0.72, -R * 0.32);
+      g.closePath();
+      g.fill();
+      // the handle, a loop on the left
+      g.strokeStyle = "#cfeee0";
+      g.lineWidth = R * 0.16;
+      g.lineCap = "round";
+      g.beginPath();
+      g.ellipse(-R * 1.02, -R * 0.05, R * 0.3, R * 0.4, 0, Math.PI * 0.45, Math.PI * 1.55);
+      g.stroke();
+      // the body, a squat glazed round
+      const body = g.createRadialGradient(-R * 0.35, -R * 0.4, R * 0.1, 0, 0, R * 1.1);
+      body.addColorStop(0, "#ffffff");
+      body.addColorStop(0.45, glaze);
+      body.addColorStop(1, "#8cc8b4");
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, 0, R * 1.02, R * 0.86, 0, 0, TAU);
+      g.fill();
+      // a painted band of tiny blossoms round her middle
+      g.save();
+      g.beginPath();
+      g.ellipse(0, 0, R * 1.02, R * 0.86, 0, 0, TAU);
+      g.clip();
+      g.fillStyle = "rgba(255,159,192,0.35)";
+      g.fillRect(-R * 1.1, R * 0.38, R * 2.2, R * 0.16);
+      for (let i = -4; i <= 4; i++) {
+        const x = i * R * 0.24, y = R * 0.46;
+        g.fillStyle = i % 2 ? "#ff9fc0" : "#c8b4ff";
+        for (let p = 0; p < 5; p++) {
+          const a = (p / 5) * TAU;
+          g.beginPath();
+          g.arc(x + Math.cos(a) * R * 0.045, y + Math.sin(a) * R * 0.045, R * 0.035, 0, TAU);
+          g.fill();
+        }
+      }
+      g.restore();
+      // the lid and its knob
+      g.fillStyle = "#d8f2e6";
+      g.beginPath();
+      g.ellipse(0, -R * 0.78, R * 0.52, R * 0.16, 0, Math.PI, TAU);
+      g.fill();
+      g.fillStyle = "#bfe6d6";
+      g.beginPath();
+      g.ellipse(0, -R * 0.78, R * 0.55, R * 0.08, 0, 0, TAU);
+      g.fill();
+      g.fillStyle = "#e6f6ee";
+      g.beginPath();
+      g.arc(0, -R * 0.96, R * 0.1, 0, TAU);
+      g.fill();
+      // a glint of glaze
+      g.fillStyle = "rgba(255,255,255,0.75)";
+      g.beginPath();
+      g.ellipse(-R * 0.5, -R * 0.42, R * 0.18, R * 0.08, -0.6, 0, TAU);
+      g.fill();
+    });
+  }
+
+  function cupSprite(ctx, kind) {
+    const K = KINDS[kind], R = Math.round(L.cw);
+    return S.sprite(ctx, "cup" + kind + R, R * 3.2, R * 2.6, R * 1.6, R * 1.25, (g) => {
+      // a little round tea bowl: rim at y = -0.95R, foot at y = 0.6R (origin is the bowl's middle)
+      const rim = -R * 0.55;
+      const lin = g.createLinearGradient(-R, 0, R, 0);
+      lin.addColorStop(0, S.mix(K.glaze, K.deep, 0.45));
+      lin.addColorStop(0.35, S.mix(K.glaze, "#ffffff", 0.35));
+      lin.addColorStop(1, S.mix(K.glaze, K.deep, 0.6));
+      g.fillStyle = lin;
+      g.beginPath();
+      g.moveTo(-R, rim);
+      g.bezierCurveTo(-R, R * 0.35, -R * 0.55, R * 0.62, 0, R * 0.62);
+      g.bezierCurveTo(R * 0.55, R * 0.62, R, R * 0.35, R, rim);
+      g.closePath();
+      g.fill();
+      g.fillStyle = S.mix(K.deep, "#3a1f3f", 0.3);
+      g.fillRect(-R * 0.34, R * 0.58, R * 0.68, R * 0.14);
+      // a band near the rim, and a gloss
+      g.strokeStyle = S.mixA(K.deep, "#ffffff", 0.2, 0.5);
+      g.lineWidth = 1.2;
+      g.beginPath();
+      g.ellipse(0, rim + R * 0.22, R * 0.98, R * 0.16, 0, 0.1, Math.PI - 0.1);
+      g.stroke();
+      g.fillStyle = "rgba(255,255,255,0.55)";
+      g.beginPath();
+      g.ellipse(-R * 0.55, -R * 0.05, R * 0.1, R * 0.28, 0.2, 0, TAU);
+      g.fill();
+      // the mouth, dark inside
+      g.fillStyle = S.mix(K.glaze, "#ffffff", 0.5);
+      g.beginPath();
+      g.ellipse(0, rim, R, R * 0.28, 0, 0, TAU);
+      g.fill();
+      g.fillStyle = "#4a2a44";
+      g.beginPath();
+      g.ellipse(0, rim + 0.6, R * 0.88, R * 0.22, 0, 0, TAU);
+      g.fill();
+    });
+  }
+
+  function petalSprite(ctx, kind) {
+    const K = KINDS[kind];
+    const len = Math.round(24 * L.k * K.len), wid = 24 * L.k * K.wid;
+    return S.sprite(ctx, "petal" + kind + len, wid * 2 + 20, len + 20, wid + 10, len + 10, (g) => {
+      S.blurred(g, K.petal, 6, (g) => {
+        const lin = g.createLinearGradient(0, 0, 0, -len);
+        lin.addColorStop(0, S.mix(K.petal, K.deep, 0.55));
+        lin.addColorStop(0.55, K.petal);
+        lin.addColorStop(1, S.mix(K.petal, "#ffffff", 0.45));
+        g.fillStyle = lin;
+        S.petal(g, len, wid);
+        g.fill();
+      });
+      g.strokeStyle = S.mixA(K.petal, K.deep, 0.5, 0.55);
+      g.lineWidth = 0.9;
+      S.petal(g, len, wid);
+      g.stroke();
+      g.strokeStyle = S.rgba("#ffffff", 0.4);
+      g.lineWidth = 0.7;
+      g.beginPath();
+      g.moveTo(0, -len * 0.15);
+      g.lineTo(0, -len * 0.75);
+      g.stroke();
+    });
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function pour(api, c, perfect, ghost) {
+    c.state = "poured";
+    c.pourAt = api.eng.beatPos();
+    pourAt = clock;
+    pourCup = c;
+    flare = Math.max(flare, perfect ? 1 : 0.6);
+    const now = c.pourAt, x = cupX(c, now);
+    c.perfect = perfect;
+    for (let i = 0; i < (perfect ? 14 : 8) && sparks.length < 160; i++) {
+      const a = -Math.PI * (0.1 + Math.random() * 0.8), v = 40 + Math.random() * 80, life = 0.7 + Math.random() * 0.6;
+      sparks.push({ c, dx: 0, dy: 0, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? KINDS[c.kind].petal : "#fff2e2", star: i % 4 === 0 });
+    }
+    // a splash of tea: droplets that leap from the cup and fall back in
+    for (let i = 0; i < (perfect ? 9 : 6) && splash.length < 60; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.4, v = (90 + Math.random() * 70) * L.k;
+      splash.push({ c, dx: (Math.random() - 0.5) * L.cw, dy: 0, vx: Math.cos(a) * v * 0.6, vy: Math.sin(a) * v, t: 0 });
+    }
+    if (perfect && !ghost) api.ring(x, mouthY(), api.color(), L.cw * 2.6);
+  }
+  // ---- The five questions ---------------------------------------------------------------------
+  // The shell's tracker spawns, judges, scores and plays autopilot; Steep says what a cup is
+  function setup(api) {
+    cupT = api.track({
+      spawn(at) {
+        if (!W) return null;
+        let kind = Math.floor(Math.random() * KINDS.length);
+        if (kind === lastKind) kind = (kind + 1) % KINDS.length;
+        lastKind = kind;
+        return { kind, pourAt: -99, seed: Math.random() * TAU };
+      },
+      note: (c) => c.kind / KINDS.length,
+      hit(c, { perfect, ghost }) {
+        pour(api, c, perfect, ghost);
+        if (!ghost && ++hits === 16) api.hint("breeze", 'Hold <span class="pb-kbd">Space</span>, let go: a steam ring');
+        return { x: cupX(c, c.pourAt), y: mouthY() }; // the points pop at the cup
+      },
+      miss() {
+        missAt = clock;
+        api.hint("pour", "Tap as a cup passes under Oolong's spout");
+      },
+      empty: () => puff(api.style === "fidget" ? 0.4 : 0.25), // a little sigh of steam from the lid
+      // Fidget pours into the next cup once it's on the table; before that, a sigh of steam
+      ready: (c, now) => cupX(c, now) <= W + L.cw,
+      cue: false, // drawn in the garden's look, below
+      perfect: PERFECT
+    });
+    bg = S.happenings(HAPPENINGS);
+  }
+
+  function onFire() {
+    cupT.fire();
+  }
+
+  function puff(size) {
+    if (puffs.length < 8) puffs.push({ t: 0, size });
+  }
+
+  // A hold then release: Oolong blows a ring of steam; a full charge sends a breeze of petals
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    puff(0.6 + c);
+    if (c >= 1) {
+      for (let i = 0; i < 26; i++) {
+        petals.push({ kind: i % KINDS.length, x: -40 - Math.random() * W * 0.6, y: H * (0.15 + Math.random() * 0.6), v: 0.6 + Math.random() * 0.6, spin: Math.random() * TAU, t: 0, wob: Math.random() * TAU });
+      }
+      api.callout("Petal breeze", W / 2, H * 0.3, "#ffb3cf", 1.2);
+      api.eng.chime();
+    }
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 14 * dt;
+      p.dx += p.vx * dt;
+      p.dy += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    for (let i = puffs.length - 1; i >= 0; i--) if ((puffs[i].t += dt) > 1.6) puffs.splice(i, 1);
+    for (let i = splash.length - 1; i >= 0; i--) {
+      const p = splash[i];
+      p.t += dt;
+      p.vy += 520 * L.k * dt;
+      p.dx += p.vx * dt;
+      p.dy += p.vy * dt;
+      if (p.dy > 0 && p.vy > 0) splash.splice(i, 1);
+    }
+    if (bg) bg.update(dt);
+    for (let i = petals.length - 1; i >= 0; i--) {
+      const p = petals[i];
+      p.t += dt;
+      p.x += (W * 0.35 * p.v) * dt;
+      p.y += Math.sin(p.t * 2 + p.wob) * 20 * dt + 8 * dt;
+      if (p.x > W + 40) petals.splice(i, 1);
+    }
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    flare = Math.max(0, flare - dt * 1.2);
+  }
+
+  // ---- The look ---------------------------------------------------------------------------------
+  function drawLanterns(ctx, now) {
+    const y0 = 66 * Math.max(1, L.k * 0.9), n = Math.max(4, Math.round(W / 120));
+    const sagAt = (u) => y0 + Math.sin(u * Math.PI) * 26 * L.k;
+    ctx.strokeStyle = "rgba(255,226,236,0.25)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= 24; i++) {
+      const u = i / 24;
+      if (i) ctx.lineTo(u * W, sagAt(u));
+      else ctx.moveTo(0, sagAt(0));
+    }
+    ctx.stroke();
+    for (let i = 0; i < n; i++) {
+      const u = (i + 0.5) / n, x = u * W, y = sagAt(u);
+      const sw = Math.sin(now * Math.PI * 0.5 + i * 1.3) * 0.09;
+      const color = LANTERNS[i % LANTERNS.length];
+      const beat = 1 - frac(now + i * 0.25);
+      const chase = Math.max(0, 1 - Math.abs((clock - chaseAt) * 3 - i) / 1.2);
+      S.glow(ctx, x, y + 22 * L.k, 40 * L.k * (1 + chase * 0.5), color, 0.12 + 0.12 * beat * beat + flare * 0.25 + chase * 0.5);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(sw);
+      ctx.strokeStyle = "rgba(255,226,236,0.3)";
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, 10 * L.k);
+      ctx.stroke();
+      S.draw(ctx, lanternSprite(ctx, color), 0, 22 * L.k);
+      ctx.restore();
+    }
+  }
+
+  // The bloom: tea leaves unfurling into a flower that rises from the cup, a back row of petals
+  // fanning wide and a front row fanning less, swaying a little on the beat
+  function drawFlower(ctx, c, x, y, now) {
+    const K = KINDS[c.kind];
+    const since = now - c.pourAt;
+    const open = back((since - 0.05) / 0.8);
+    if (open <= 0) return;
+    const sp = petalSprite(ctx, c.kind);
+    const pulse = 1 - frac(now);
+    const lift = 4 * L.k * Math.min(1, open);
+    const len = 24 * L.k * K.len;
+    S.glow(ctx, x, y - len * 0.45, len * (2 + 0.3 * pulse) * Math.min(1, open), K.petal, 0.22 + 0.12 * pulse);
+    const sway = Math.sin(now * Math.PI * 0.5 + c.seed) * 0.06;
+    const rows = [[Math.max(3, Math.round(K.n * 0.6)), 1.35, 0.82], [Math.max(3, Math.round(K.n * 0.5)), 0.8, 1]];
+    for (const [n, spread, k] of rows) {
+      for (let i = 0; i < n; i++) {
+        const u = n === 1 ? 0 : i / (n - 1) - 0.5;
+        ctx.save();
+        ctx.translate(x, y - lift);
+        ctx.rotate(u * 2 * spread * open + sway);
+        ctx.scale(k * Math.min(1, 0.4 + open * 0.6), k * Math.min(1.05, 0.3 + open * 0.7));
+        S.draw(ctx, sp, 0, 0);
+        ctx.restore();
+      }
+    }
+    S.glow(ctx, x, y - lift - 5 * L.k, 12 * L.k * open, K.heart, 0.9);
+    S.twinkle(ctx, x, y - lift - 5 * L.k, 10 * L.k * open * (0.7 + 0.3 * pulse), "#fff6e0", 0.7);
+  }
+
+  // The signature: steam curling up from a bloomed cup in a slow helix of colour-shifting light,
+  // a ribbon with beads of light along it
+  const STEAM = ["#ffb3cf", "#ffd58a", "#9cf0d0", "#c8b4ff", "#8fd8e8"];
+  function drawSteam(ctx, c, x, y, now) {
+    const since = now - c.pourAt;
+    const grow = clamp((since - 0.5) / 1.4, 0, 1);
+    if (grow <= 0) return;
+    const n = 18, pts = [];
+    for (let j = 0; j <= n; j++) {
+      const h = (j / n) * grow;
+      const a = clock * 2.2 - h * 8 + c.seed;
+      pts.push([x + Math.sin(a) * (4 + h * 26) * L.k, y - 26 * L.k - h * 160 * L.k, h, Math.cos(a)]);
+    }
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    for (let j = 1; j <= n; j++) {
+      const [x0, y0] = pts[j - 1], [x1, y1, h, z] = pts[j];
+      const col = STEAM[(Math.floor(j / 4) + c.kind) % STEAM.length];
+      const a = (1 - h) * (z > 0 ? 1 : 0.5);
+      ctx.strokeStyle = col;
+      for (const [w, al] of [[10, 0.07], [3.5, 0.22], [1.2, 0.6]]) {
+        ctx.globalAlpha = a * al;
+        ctx.lineWidth = w * L.k;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineCap = "butt";
+    ctx.globalCompositeOperation = "source-over";
+    // beads of light riding up the ribbon
+    for (let b = 0; b < 3; b++) {
+      const h = frac(clock * 0.4 + b / 3 + c.seed) * grow;
+      const a = clock * 2.2 - h * 8 + c.seed;
+      const px = x + Math.sin(a) * (4 + h * 26) * L.k, py = y - 26 * L.k - h * 160 * L.k;
+      S.twinkle(ctx, px, py, 8 * L.k, STEAM[(b + c.kind) % STEAM.length], (1 - h) * 0.9);
+    }
+  }
+
+  function drawPot(ctx, now) {
+    // tilt: up quickly as she pours, a moment held, then easing back
+    const since = clock - pourAt;
+    const beat = Math.max(0.25, ctxBeat);
+    const tip = since < 0.12 ? ease(since / 0.12) : 1 - ease((since - 0.12 - beat * 0.35) / (beat * 0.6));
+    const tilt = 0.38 * clamp(tip, 0, 1);
+    const bob = Math.sin(now * Math.PI) * 3 * L.k;
+    const px = L.potX, py = L.potY + bob;
+    S.glow(ctx, px, py, L.pot * 2.6, "#9cf0d0", 0.12 + 0.08 * (1 - frac(now)));
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(tilt);
+    S.draw(ctx, potSprite(ctx), 0, 0);
+    // the leaf sprouting from her lid, swaying on the beat
+    const R = L.pot;
+    ctx.save();
+    ctx.translate(0, -R * 1.02);
+    ctx.rotate(-0.3 + Math.sin(now * Math.PI * 0.5) * 0.25);
+    ctx.fillStyle = "#a8e0a0";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(R * 0.24, -R * 0.16, R * 0.1, -R * 0.42);
+    ctx.quadraticCurveTo(-R * 0.14, -R * 0.2, 0, 0);
+    ctx.fill();
+    ctx.strokeStyle = "#6aa070";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(R * 0.08, -R * 0.2, R * 0.1, -R * 0.38);
+    ctx.stroke();
+    ctx.restore();
+    // her face: dozing, then watching the next cup come, beaming as she pours
+    const c = cupT.list.find((x) => x.state === "wait");
+    const coming = c && c.at - now < 1.3 && c.at - now > -0.3;
+    const pouring = since < beat * 0.9;
+    const blink = frac(now / 4 + 0.13) < 0.04;
+    const mood = pouring ? "happy" : clock - missAt < 0.6 ? "o" : coming ? (blink ? "blink" : "idle") : "sleep";
+    const look = coming ? clamp((cupX(c, now) - px) / (W * 0.4), -1, 1) : 0.3;
+    S.face(ctx, R * 0.02, R * 0.05, R * 0.5, mood, look);
+    ctx.restore();
+    return tilt;
+  }
+  let ctxBeat = 0.5;
+
+  // A filled cup's hop: up and back down in about a third of a second, with a squash as it lands
+  // (a bigger one for a perfect pour). Returns its lift (negative y) and squash.
+  function hop(c, now) {
+    if (c.state !== "poured") return [0, 0];
+    const t = (now - c.pourAt) * ctxBeat, d = 0.36;
+    if (t < d) return [-Math.sin((t / d) * Math.PI) * L.cw * (c.perfect ? 0.75 : 0.5), -0.08 * Math.sin((t / d) * Math.PI)];
+    if (t < d + 0.18) return [0, 0.12 * Math.sin(((t - d) / 0.18) * Math.PI) * (c.perfect ? 1.2 : 1)];
+    return [0, 0];
+  }
+  // Each cup's little face: asleep as it slides in, waking as it nears the spout and looking up
+  // at Oolong, beaming once it's filled; a missed one gives a little yawn and dozes off again
+  function cupFace(ctx, c, x, y, now) {
+    const d = c.at - now;
+    let mood = "sleep", look = 0;
+    if (c.state === "poured") mood = c.perfect && now - c.pourAt < 3 ? "whee" : "happy";
+    else if (c.state === "missed") mood = now - c.at < 1.2 ? "o" : "sleep";
+    else if (d < 1.8) {
+      mood = frac(c.seed * 3 + now / 3) < 0.04 ? "blink" : "idle";
+      look = -0.6;
+    }
+    S.face(ctx, x + look * L.cw * 0.06, y + L.cw * 0.08, L.cw * 0.36, mood, look, KINDS[c.kind].deep);
+  }
+
+  // ---- Background happenings: occasional, varied, and clear of the cups and the spout ---------
+  const HAPPENINGS = [
+    // a shooting star high over the garden
+    { dur: 1.4, init: () => ({ x: W * (0.15 + Math.random() * 0.5), y: H * (0.05 + Math.random() * 0.12), dir: Math.random() < 0.5 ? -1 : 1 }),
+      draw: (ctx, u, p) => S.shootingStar(ctx, p.x, p.y, p.dir * W * 0.45, H * 0.12, u, 3 * L.k) },
+    // a moth comes to visit a lantern, circles it, and flutters off
+    { dur: 7, layer: 2, init: () => ({ i: Math.floor(Math.random() * Math.max(4, Math.round(W / 120))), side: Math.random() < 0.5 ? -1 : 1 }),
+      draw(ctx, u, p, t) {
+        const n = Math.max(4, Math.round(W / 120)), lx = ((p.i + 0.5) / n) * W;
+        const ly = 66 * Math.max(1, L.k * 0.9) + Math.sin(((p.i + 0.5) / n) * Math.PI) * 26 * L.k + 22 * L.k;
+        const inn = ease(u / 0.25), out = ease((u - 0.75) / 0.25);
+        const a = t * 3.2, r = 24 * L.k;
+        const x = lx + Math.cos(a) * r + p.side * (1 - inn + out) * W * 0.6, y = ly + Math.sin(a) * r * 0.5 - out * H * 0.1;
+        moth(ctx, x, y, t, "#fff2e2");
+      } },
+    // a paper kite drifting across the sky behind the trees, its ribbon tail rippling
+    { dur: 16, init: () => ({ y: H * (0.2 + Math.random() * 0.1), dir: Math.random() < 0.5 ? -1 : 1, c: LANTERNS[Math.floor(Math.random() * LANTERNS.length)] }),
+      draw(ctx, u, p, t) {
+        const x = p.dir > 0 ? -40 + u * (W + 80) : W + 40 - u * (W + 80), y = p.y + Math.sin(t * 0.7) * 10 * L.k;
+        const s = 11 * L.k, tail = [];
+        for (let j = 0; j < 12; j++) tail.push([x - p.dir * j * 5 * L.k, y + s * 1.4 + j * 3 * L.k + Math.sin(t * 4 - j * 0.7) * 5 * L.k]);
+        ctx.globalAlpha = 0.75;
+        S.streak(ctx, tail.slice().reverse(), 1.4 * L.k, p.c);
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(Math.sin(t * 0.9) * 0.15);
+        ctx.fillStyle = S.mixA(p.c, "#2e1b48", 0.25, 0.85);
+        ctx.beginPath();
+        ctx.moveTo(0, -s * 1.3);
+        ctx.lineTo(s, 0);
+        ctx.lineTo(0, s * 1.4);
+        ctx.lineTo(-s, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = S.rgba("#fff2e2", 0.5);
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+        S.face(ctx, 0, -s * 0.1, s * 0.5, "happy", 0, "#ff9fc0");
+        ctx.restore();
+        S.glow(ctx, x, y, 26 * L.k, p.c, 0.18);
+      } },
+    // a light runs along the string of lanterns
+    { dur: 3, init: () => ((chaseAt = clock), {}), draw() {} },
+    // a snail with a glowing shell takes the long way across the lawn
+    { dur: 22, layer: 1, init: () => ({ dir: Math.random() < 0.5 ? -1 : 1, c: KINDS[Math.floor(Math.random() * KINDS.length)] }),
+      draw(ctx, u, p, t) {
+        const x = p.dir > 0 ? -30 + u * (W + 60) : W + 30 - u * (W + 60), y = H - 18 * L.k;
+        const s = 9 * L.k, inch = Math.max(0, Math.sin(t * 3)) * 0.12;
+        S.glow(ctx, x, y - s, s * 3.4, p.c.glaze, 0.3);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(p.dir, 1);
+        ctx.fillStyle = "#e8d0c8";
+        ctx.beginPath();
+        ctx.ellipse(s * 0.2, 0, s * (1.5 + inch), s * 0.38, 0, 0, TAU);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(s * 1.45, -s * 0.35, s * 0.42, 0, TAU);
+        ctx.fill();
+        ctx.strokeStyle = "#e8d0c8";
+        ctx.lineWidth = 1;
+        for (const e of [0.2, -0.2]) {
+          ctx.beginPath();
+          ctx.moveTo(s * 1.5, -s * 0.6);
+          ctx.lineTo(s * (1.8 + e), -s * 1.2);
+          ctx.stroke();
+          S.glow(ctx, s * (1.8 + e), -s * 1.2, 3 * L.k, "#ffd58a", 0.8);
+        }
+        const sh = ctx.createRadialGradient(-s * 0.3, -s * 1.1, 0, 0, -s * 0.8, s);
+        sh.addColorStop(0, "#fffaf0");
+        sh.addColorStop(1, p.c.glaze);
+        ctx.fillStyle = sh;
+        ctx.beginPath();
+        ctx.arc(0, -s * 0.8, s, 0, TAU);
+        ctx.fill();
+        ctx.strokeStyle = S.rgba(p.c.deep, 0.7);
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        for (let a = 0; a < 2.2 * TAU; a += 0.3) ctx.lineTo(Math.cos(a) * s * (0.1 + a / (2.2 * TAU)) * 0.85, -s * 0.8 + Math.sin(a) * s * (0.1 + a / (2.2 * TAU)) * 0.85);
+        ctx.stroke();
+        ctx.restore();
+        S.face(ctx, x + p.dir * s * 1.5, y - s * 0.35, s * 0.3, "sleep", 0, "#ff9fc0");
+      } },
+    // the fireflies on the lawn gather into a spiral, then scatter
+    { dur: 6, layer: 1, init: () => ({ x: W * (Math.random() < 0.5 ? 0.18 : 0.82), seed: Math.random() * TAU }),
+      draw(ctx, u, p, t) {
+        const y0 = L.table + L.top + 60 * L.k + (H - L.table - L.top - 80 * L.k) * 0.5, gather = Math.sin(u * Math.PI);
+        for (let j = 0; j < 9; j++) {
+          const a = t * 1.6 + (j / 9) * TAU + p.seed, r = (8 + j * 4) * L.k * (0.5 + gather) + (1 - gather) * 40 * L.k;
+          const x = p.x + Math.cos(a) * r, y = y0 + Math.sin(a) * r * 0.6 - gather * j * 3 * L.k;
+          S.glow(ctx, x, y, 11 * L.k, j % 2 ? "#ffd58a" : "#9cf0d0", Math.min(1, gather * 2));
+          S.twinkle(ctx, x, y, 6 * L.k, "#fff6e0", 0.6 * gather);
+        }
+      } }
+  ];
+  // A little night moth, wings flicking
+  function moth(ctx, x, y, t, color) {
+    const f = 0.35 + 0.65 * Math.abs(Math.sin(t * 14)), k = L.k * 1.7;
+    S.glow(ctx, x, y, 14 * k, color, 0.5);
+    ctx.fillStyle = S.rgba(color, 0.85);
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(x + s * 3.2 * k * f, y - 1 * k, 3.6 * k * f, 2.6 * k, s * 0.4, 0, TAU);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#fff6e0";
+    ctx.beginPath();
+    ctx.arc(x, y, 1.4 * k, 0, TAU);
+    ctx.fill();
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    ctxBeat = api.eng.beatSec;
+    const m = MOODS[(api.tier - 1) % 4];
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    S.motes(ctx, W, L.table, clock, ["#ffd58a", "#fff2c0", "#9cf0d0"], { n: 14, size: 6, rise: 6, sway: 24, alpha: 0.5, seed: 9 });
+    bg.draw(ctx, 0);
+    drawLanterns(ctx, now);
+    bg.draw(ctx, 2);
+    S.draw(ctx, tableSprite(ctx), 0, L.table);
+    bg.draw(ctx, 1);
+    ctx.save();
+    ctx.translate(0, L.table + L.top + 40 * L.k);
+    S.motes(ctx, W, H - L.table - L.top - 60 * L.k, clock, ["#ffd58a", "#fff2c0"], { n: 7, size: 6, rise: 3, sway: 30, alpha: 0.7, seed: 13 });
+    ctx.restore();
+
+    const tilt = drawPot(ctx, now);
+    // the stream, from the spout tip down into the cup she's pouring for
+    const since = clock - pourAt;
+    if (pourCup && since < ctxBeat * 0.75) {
+      const [sx, sy] = spoutTip(tilt);
+      const tx = cupX(pourCup, now), ty = mouthY();
+      const a = Math.min(1, since / 0.06) * (1 - clamp((since - ctxBeat * 0.5) / (ctxBeat * 0.25), 0, 1));
+      const trail = [];
+      for (let i = 0; i <= 10; i++) {
+        const u = i / 10;
+        trail.push([sx + (tx - sx) * u + Math.sin(u * Math.PI) * 10 * L.k, sy + (ty - sy) * u * u]);
+      }
+      trail.reverse();
+      ctx.globalAlpha = a;
+      S.streak(ctx, trail, 5 * L.k, TEA);
+      ctx.globalAlpha = 1;
+      S.glow(ctx, tx, ty, 16 * L.k, TEA, 0.6 * a);
+    }
+    // the spout's drop, swelling as the next cup comes
+    const next = cupT.list.find((c) => c.state === "wait" && c.at - now > -0.3);
+    if (next && next.at - now < 2) {
+      const [sx, sy] = spoutTip(tilt);
+      const u = clamp(1 - (next.at - now) / 2, 0, 1);
+      S.glow(ctx, sx, sy + 3 * L.k, (4 + 8 * u * u) * L.k, TEA, 0.4 + 0.6 * u);
+    }
+
+    for (const c of cupT.list) {
+      const x = cupX(c, now);
+      if (x < -L.cw * 3 || x > W + L.cw * 3) continue;
+      const [hy, sq] = hop(c, now);
+      const y = L.cupY + hy;
+      const poured = c.state === "poured";
+      const fill = poured ? clamp((now - c.pourAt) / 0.3, 0, 1) : 0;
+      if (poured) S.glow(ctx, x, L.cupY + L.cw * 0.7, L.cw * 2.2, KINDS[c.kind].petal, 0.22 * fill);
+      // a soft shadow that shrinks as the cup hops
+      ctx.fillStyle = "rgba(40,16,40,0.3)";
+      ctx.beginPath();
+      ctx.ellipse(x, L.cupY + L.cw * 0.68, L.cw * (0.75 + hy / (L.cw * 6)), L.cw * 0.14, 0, 0, TAU);
+      ctx.fill();
+      ctx.save();
+      ctx.translate(x, y + L.cw * 0.6);
+      ctx.scale(1 + sq, 1 - sq);
+      ctx.translate(-x, -(y + L.cw * 0.6));
+      S.draw(ctx, cupSprite(ctx, c.kind), x, y);
+      if (fill > 0) {
+        ctx.fillStyle = S.mixA(TEA, "#ff9f6a", 0.3, 0.85 * fill);
+        ctx.beginPath();
+        ctx.ellipse(x, y - L.cw * 0.53, L.cw * 0.86 * (0.6 + 0.4 * fill), L.cw * 0.2 * (0.6 + 0.4 * fill), 0, 0, TAU);
+        ctx.fill();
+        S.glow(ctx, x, y - L.cw * 0.55, L.cw * 1.2, TEA, 0.45 * fill);
+      }
+      cupFace(ctx, c, x, y, now);
+      ctx.restore();
+    }
+    // the timing cue: little lights closing on the cup under the spout, gold on the beat
+    if (next) S.cue(ctx, api, L.spoutX, L.cupY - L.cw * 0.05, next.at - now, { size: L.cw * 1.25, flat: 0.62, color: KINDS[next.kind].glaze, perfect: PERFECT });
+    for (const c of cupT.list) {
+      if (c.state !== "poured") continue;
+      const x = cupX(c, now);
+      if (x < -L.cw * 3 || x > W + L.cw * 3) continue;
+      const hy = hop(c, now)[0];
+      drawSteam(ctx, c, x, L.cupY + hy - L.cw * 0.55, now);
+      drawFlower(ctx, c, x, L.cupY + hy - L.cw * 0.55, now);
+    }
+    for (const p of splash) {
+      const x = cupX(p.c, now) + p.dx, y = mouthY() + p.dy;
+      S.glow(ctx, x, y, 6 * L.k, TEA, 0.9);
+      ctx.fillStyle = "#fff0d0";
+      ctx.beginPath();
+      ctx.arc(x, y, 1.6 * L.k, 0, TAU);
+      ctx.fill();
+    }
+
+    for (const p of puffs) {
+      const u = p.t / 1.6;
+      const R = L.pot;
+      const x = L.potX + Math.sin(u * 3) * R * 0.2, y = L.potY - R * 1.3 - ease(u) * R * 2.4 * p.size;
+      S.softRing(ctx, x, y, R * (0.25 + ease(u) * 0.7 * p.size), "#fff2e2", (1 - u) * 0.5, 2.2);
+      S.glow(ctx, x, y, R * (0.5 + u * p.size), "#fff2e2", (1 - u) * 0.18);
+    }
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      const x = cupX(p.c, now) + p.dx, y = mouthY() + p.dy;
+      if (p.star) S.twinkle(ctx, x, y, 7 * L.k, p.color, a);
+      else S.glow(ctx, x, y, 5 * L.k, p.color, a * 0.9);
+    }
+    for (const p of petals) {
+      const sp = petalSprite(ctx, p.kind);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.spin + p.t * 2);
+      ctx.scale(0.8, 0.8 * Math.cos(p.t * 3 + p.wob));
+      S.draw(ctx, sp, 0, 0);
+      ctx.restore();
+    }
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = c >= 1 ? "#ffd58a" : "#9cf0d0";
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(L.potX, L.potY, L.pot * 1.45, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+  }
+
+  SpaceShell.mount({
+    key: "cozy-steep",
+    title: "Steep",
+    hint: "Tap as a cup passes under the spout",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Steeping", "In bloom", "Moon tea"],
+    onPhrase: () => (flare = 1.4),
+    fidgetPoint: () => ({ x: L.spoutX, y: mouthY() }),
+    resize: layout,
+    skin: S,
+    setup,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

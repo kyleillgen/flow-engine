@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="A siphonophore grows down into the dark one bell at a time. A spark of light runs down its stem to each new bud on the beat; tap as it arrives and the bell blooms. A rhythm micro-game that finds your tempo.">
+<title>Chain</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/deepsea/deepsea-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Chain: Lio, a siphonophore, a colony of little bells strung on one long stem, grows down into
+// the abyss. On the beat a new bud forms at the tip; a spark of light leaves the bell above it and
+// runs down the stem, reaching the bud on a whole beat. Tap as it arrives and the bud blooms into a
+// lit bell with a few glowing lures trailing from it, and a wave of light runs back up the whole
+// chain. A bud you miss stays a pale, sleeping bell; the chain grows on anyway. The view sinks with
+// the tip, so the longer you play the deeper you are.
+//
+// The spark's path is a function of the beat position: it leaves the bell above two beats before
+// the bud is due. Clean is ±0.3 beat (wider with assist, for buds not yet spawned), perfect ±0.1.
+// Fidget (F): every press blooms the next bud at once.
+// Hold then let go: a ripple of colour runs the whole chain's length; a full charge coils it into
+// a spiral and back. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = DeepSeaSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const RUN = 2; // beats the spark takes from one bell to the next
+  const BELLS = ["#4fd8ff", "#5cffc8", "#a98cff", "#ff6f86", "#ffb35c", "#7fe9ff"];
+  const MOODS = [
+    { top: "#00030a", mid: "#010c18", low: "#000308", haze: ["#1c5a7a", "#1c3a6a", "#2a4a6a"], seed: 4 },
+    { top: "#00050a", mid: "#01141a", low: "#000608", haze: ["#1c7a6a", "#2a6a5a", "#1c5a5a"], seed: 12 },
+    { top: "#02030c", mid: "#0a0a22", low: "#03020a", haze: ["#4a3a8a", "#3a2a7a", "#5a3a7a"], seed: 23 },
+    { top: "#04030a", mid: "#140a18", low: "#07030a", haze: ["#7a3a5a", "#5a2a4a", "#6a4a2a"], seed: 37 }
+  ];
+  const KEEP = 70;
+  // The surroundings change as the colony sinks, a new place every ZONE bells: open water with the
+  // last light from above, a canyon of crinoids, a garden of glowing coral fans, the vent trench
+  const ZONE = 18;
+  const ZONES = [
+    { name: "open water", wall: 0, rock: "#04101a", rim: "#3a7a9a", life: null },
+    { name: "the canyon", wall: 0.15, rock: "#051019", rim: "#3ab8c8", life: "crinoid" },
+    { name: "coral garden", wall: 0.11, rock: "#0a0a18", rim: "#a98cff", life: "fan" },
+    { name: "the trench", wall: 0.2, rock: "#0d0707", rim: "#ff7a2a", life: "vent" }
+  ];
+
+  let W = 0, H = 0, L = {};
+  // The colony, oldest first. api.track judges the buds (state "wait", "hit" or "missed") but
+  // lets finished ones go after a few beats, so the chain keeps its own list.
+  let nodes = []; // { i, at, state, litAt, color, window, seed }
+  let track = null;
+  let waves = [], sparks = [];
+  let clock = 0, lastTier = 1, hits = 0;
+  let ripple = null; // { t0, full }
+  let sky = { from: 1, to: 1, t: 1 };
+  let zoneSeen = 0, zoneNote = -9, api0 = null;
+  // Far-off life, now and then, out in the water around the colony
+  const far = S.wonders({ kinds: ["leviathan", "school", "oarfish", "alarm", "eyes"], band: [0.15, 0.5], first: 8 });
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const m = Math.min(W, H);
+    L = { gap: clamp(H * 0.1, 46, 84), amp: clamp(W * 0.16, 50, 220), bell: clamp(m * 0.03, 11, 21), k: clamp(m / 500, 0.7, 1.6) };
+    if (!nodes.length) nodes.push({ i: 0, at: -1e6, state: "hit", litAt: -99, color: BELLS[0], window: 0, seed: 1 });
+  }
+
+  // The stem: s is the distance down it, in pixels. It hangs in a slow meander, and a lazy wave
+  // runs down it (and a coil, after a full-charge trick shot).
+  let coil = 0;
+  function stem(s) {
+    const t = clock * 0.6;
+    const x = W * 0.5 + Math.sin(s * 0.006 - t) * L.amp + Math.sin(s * 0.017 - t * 1.7) * L.amp * 0.18;
+    const cx = Math.cos(s * 0.05 - clock * 3) * coil * L.amp * 0.5, cy = Math.sin(s * 0.05 - clock * 3) * coil * L.gap * 0.6;
+    return [x + cx, s + cy];
+  }
+  const sOf = (n) => n.i * L.gap;
+
+  // How far down the stem the light has reached at beat position `now`: the spark, between the
+  // last bell it left and the bud it's running to
+  function reach(now) {
+    let a = nodes[0], b = null;
+    for (const n of nodes) {
+      if (n.at <= now) a = n;
+      else {
+        b = n;
+        break;
+      }
+    }
+    if (!b) return { s: sOf(a), b: null, u: 1 };
+    const u = clamp((now - (b.at - RUN)) / RUN, 0, 1);
+    return { s: sOf(a) + (sOf(b) - sOf(a)) * u, b, u };
+  }
+  // The view sinks smoothly with the light
+  let camCache = { at: -1, y: 0 };
+  function camY(now) {
+    if (camCache.at !== now) camCache = { at: now, y: reach(now).s - H * 0.62 };
+    return camCache.y;
+  }
+  const nextWaiting = () => track.next();
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  // A bell: a translucent cup opening downward, lit from inside; dim when asleep
+  function bellSprite(ctx, color, r, lit) {
+    const R = Math.round(r);
+    return S.sprite(ctx, "bell" + color + R + (lit ? "L" : "D"), R * 4, R * 4, R * 2, R * 2, (g) => {
+      const c = lit ? color : "#3a5a6a";
+      const cup = () => {
+        g.beginPath();
+        g.moveTo(-R, R * 0.55);
+        g.bezierCurveTo(-R * 1.05, -R * 0.6, -R * 0.4, -R, 0, -R);
+        g.bezierCurveTo(R * 0.4, -R, R * 1.05, -R * 0.6, R, R * 0.55);
+        g.quadraticCurveTo(0, R * 0.3, -R, R * 0.55);
+        g.closePath();
+      };
+      if (lit)
+        S.blurred(g, color, R * 0.9, (g) => {
+          cup();
+          g.fillStyle = S.rgba(color, 0.35);
+          g.fill();
+        });
+      cup();
+      const gr = g.createRadialGradient(0, -R * 0.3, R * 0.05, 0, 0, R * 1.1);
+      gr.addColorStop(0, lit ? S.mixA(color, "#ffffff", 0.6, 0.9) : "rgba(70,110,130,0.35)");
+      gr.addColorStop(0.6, S.rgba(lit ? color : "#2a4a5a", lit ? 0.45 : 0.22));
+      gr.addColorStop(1, S.rgba(lit ? color : "#2a4a5a", 0.08));
+      g.fillStyle = gr;
+      g.fill();
+      g.strokeStyle = lit ? S.mixA(color, "#ffffff", 0.5, 0.9) : "rgba(140,190,210,0.5)";
+      g.lineWidth = Math.max(1, R * 0.09);
+      g.stroke();
+      // ribs of the bell
+      g.strokeStyle = S.rgba(c, lit ? 0.5 : 0.25);
+      g.lineWidth = Math.max(0.6, R * 0.05);
+      for (const k of [-0.5, 0, 0.5]) {
+        g.beginPath();
+        g.moveTo(k * R * 0.5, -R * 0.9);
+        g.quadraticCurveTo(k * R * 1.3, -R * 0.1, k * R * 1.4, R * 0.45);
+        g.stroke();
+      }
+    });
+  }
+  // Wall life, baked once: a crinoid (a feather star on a stalk) and a coral fan, both facing +x
+  function crinoidSprite(ctx, R) {
+    return S.sprite(ctx, "crinoid" + R, R * 3, R * 3, R * 0.3, R * 1.5, (g) => {
+      g.strokeStyle = "#1c4a5a";
+      g.lineWidth = Math.max(1, R * 0.06);
+      g.beginPath();
+      g.moveTo(0, 0);
+      g.quadraticCurveTo(R * 0.6, -R * 0.1, R * 1.1, -R * 0.35);
+      g.stroke();
+      S.blurred(g, "#5cffc8", R * 0.4, (g) => {
+        g.strokeStyle = "rgba(92,255,200,0.8)";
+        g.lineWidth = Math.max(0.8, R * 0.04);
+        for (let i = 0; i < 9; i++) {
+          const a = -Math.PI * 0.55 + (i / 8) * Math.PI * 1.1;
+          g.beginPath();
+          g.moveTo(R * 1.1, -R * 0.35);
+          g.quadraticCurveTo(R * 1.1 + Math.cos(a) * R * 0.6, -R * 0.35 + Math.sin(a) * R * 0.3, R * 1.1 + Math.cos(a) * R * 1.1, -R * 0.35 + Math.sin(a) * R * 1.1);
+          g.stroke();
+        }
+      });
+    });
+  }
+  function fanSprite(ctx, R) {
+    return S.sprite(ctx, "fan" + R, R * 3, R * 3, R * 0.2, R * 2.2, (g) => {
+      const r = S.rng(R + 3);
+      const branch = (x, y, a, len, depth) => {
+        const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len;
+        g.beginPath();
+        g.moveTo(x, y);
+        g.lineTo(x2, y2);
+        g.stroke();
+        if (depth > 0) for (const d of [-0.45, 0.4]) branch(x2, y2, a + d + (r() - 0.5) * 0.3, len * 0.72, depth - 1);
+      };
+      S.blurred(g, "#a98cff", R * 0.3, (g) => {
+        g.strokeStyle = "rgba(190,160,255,0.75)";
+        g.lineWidth = Math.max(0.8, R * 0.05);
+        branch(0, 0, -Math.PI * 0.32, R * 0.7, 4);
+      });
+      g.fillStyle = "#ffd8f0";
+      for (let i = 0; i < 10; i++) g.fillRect(R * (0.4 + r() * 1.4), -R * (0.4 + r() * 1.6), 1.2, 1.2);
+    });
+  }
+
+  // The float at the top of the colony: a little glowing gas bladder with a red tip
+  function floatSprite(ctx) {
+    const R = Math.round(L.bell * 1.3);
+    return S.sprite(ctx, "float" + R, R * 4, R * 4, R * 2, R * 2, (g) => {
+      S.blurred(g, "#ff6f86", R, (g) => {
+        g.fillStyle = "rgba(255,111,134,0.5)";
+        g.beginPath();
+        g.ellipse(0, -R * 0.2, R * 0.55, R * 0.9, 0, 0, TAU);
+        g.fill();
+      });
+      const gr = g.createLinearGradient(0, -R, 0, R);
+      gr.addColorStop(0, "#ffc0c8");
+      gr.addColorStop(0.4, "#ff6f86");
+      gr.addColorStop(1, "rgba(79,216,255,0.4)");
+      g.fillStyle = gr;
+      g.beginPath();
+      g.ellipse(0, -R * 0.2, R * 0.5, R * 0.85, 0, 0, TAU);
+      g.fill();
+    });
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "siphon" + tier, W, H, (g) => S.abyss(g, W, H, MOODS[(tier - 1) % 4]));
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function bloom(api, n, perfect, ghost) {
+    n.litAt = api.eng.beatPos();
+    waves.push({ t0: clock, from: n.i, color: n.color });
+    if (waves.length > 6) waves.shift();
+    const now = api.eng.beatPos();
+    const [x, y] = stem(sOf(n));
+    const cy = y - camY(now);
+    for (let i = 0; i < (perfect ? 16 : 9) && sparks.length < 160; i++) {
+      const a = (i / 16) * TAU + Math.random() * 0.4, v = 40 + Math.random() * 80, life = 0.7 + Math.random() * 0.6;
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? n.color : "#ffffff" });
+    }
+    if (perfect && !ghost) api.ring(x, cy, api.color(), L.bell * 3.5);
+    // where the shell pops the points
+    n.x = x;
+    n.y = cy;
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. api.track spawns, judges, scores, misses and flies autopilot; this grows a new bud at the
+  // tip, due on beat `at` (three beats ahead, at least RUN after the last)
+  function spawn(at, n, api) {
+    if (!W) return null;
+    const prev = nodes[nodes.length - 1];
+    let c = Math.floor(Math.random() * BELLS.length);
+    if (BELLS[c] === prev.color) c = (c + 1) % BELLS.length;
+    const bud = { i: prev.i + 1, litAt: -99, color: BELLS[c], seed: Math.random() * 100 };
+    nodes.push(bud);
+    if (nodes.length > KEEP) nodes.shift();
+    return bud;
+  }
+
+  function setup(api) {
+    track = api.track({
+      spawn: (at, n) => spawn(at, n, api),
+      note: (n) => BELLS.indexOf(n.color) / BELLS.length,
+      hit(n, { perfect, ghost }) {
+        bloom(api, n, perfect, ghost);
+        if (!ghost && ++hits === 14) api.hint("ripple", 'Hold <span class="pb-kbd">Space</span>, let go: a ripple of colour');
+      },
+      miss: (n, counted) => counted && api.hint("bud", "Tap as the light reaches the new bud"),
+      empty() {
+        if (api.style === "fidget") return;
+        const [x, y] = stem(reach(api.eng.beatPos()).s);
+        sparks.push({ x, y, vx: 0, vy: -20, life: 0.5, max: 0.5, color: "#9fc8d8" });
+      },
+      ahead: 3,
+      gap: RUN,
+      perfect: PERFECT,
+      // the gold cue closes on the bud (its place this frame, kept by draw)
+      cueAt: (n) => (n.cx === undefined ? null : { x: n.cx, y: n.cy }),
+      cueSize: L.bell / 11
+    });
+  }
+
+  // 3. A tap: the bud the spark is reaching blooms
+  function onFire(api) {
+    track.fire();
+  }
+
+  // A hold then release: colour ripples the whole chain; a full charge coils it into a spiral
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    ripple = { t0: clock, full: c >= 1 };
+    if (c >= 1) {
+      api.callout("Spiral", W / 2, H * 0.24, "#ffb35c", 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 8 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    waves = waves.filter((w) => clock - w.t0 < 4);
+    if (ripple && clock - ripple.t0 > 3.5) ripple = null;
+    const want = ripple && ripple.full ? Math.sin(clamp((clock - ripple.t0) / 3.5, 0, 1) * Math.PI) : 0;
+    coil += (want - coil) * Math.min(1, dt * 4);
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  // Where the colony is, by depth in bells: which place, and how far into it (the first bells of
+  // a new place fade it in over the last)
+  function zoneAt(depth) {
+    const z = Math.floor(depth / ZONE), into = depth - z * ZONE;
+    return { z, cur: ZONES[z % ZONES.length], prev: ZONES[(z + ZONES.length - 1) % ZONES.length], t: z === 0 ? 1 : smooth(clamp(into / 4, 0, 1)) };
+  }
+  // A wall of rock down one side, scrolled a little slower than the colony (it's further off),
+  // and the life growing on it
+  function wall(ctx, side, z, a, cam, now) {
+    if (!z.wall || a <= 0.01) return;
+    const par = 0.7, seed = side > 0 ? 11 : 4;
+    const edge = (q) => W * z.wall * (0.55 + 0.9 * S.noise(q / 150, seed));
+    ctx.globalAlpha = a;
+    ctx.beginPath();
+    const x0 = side < 0 ? 0 : W;
+    ctx.moveTo(x0, -20);
+    for (let y = -20; y <= H + 20; y += 14) {
+      const e = edge(y + cam * par);
+      ctx.lineTo(side < 0 ? e : W - e, y);
+    }
+    ctx.lineTo(x0, H + 20);
+    ctx.closePath();
+    ctx.fillStyle = z.rock;
+    ctx.fill();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = S.rgba(z.rim, 0.22);
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.globalCompositeOperation = "source-over";
+    // life every so often along the wall, breathing a little on the beat
+    const step = 95, R = Math.round(L.bell * 1.8);
+    for (let k = Math.floor((cam * par - 40) / step); k * step - cam * par < H + 40; k++) {
+      if (S.noise(k * 3.7, seed + 7) < 0.42) continue;
+      const q = k * step + 30, y = q - cam * par, e = edge(q), x = side < 0 ? e : W - e;
+      const beat = 0.75 + 0.25 * Math.max(0, Math.sin(now * Math.PI + k));
+      ctx.save();
+      ctx.translate(x, y);
+      if (side > 0) ctx.scale(-1, 1);
+      if (z.life === "crinoid") {
+        ctx.rotate(Math.sin(clock * 0.8 + k) * 0.08);
+        S.add(ctx, crinoidSprite(ctx, R), 0, 0, 1, a * beat * 0.8);
+      } else if (z.life === "fan") {
+        S.add(ctx, fanSprite(ctx, R), 0, 0, 1, a * beat * 0.75);
+      } else if (z.life === "vent") {
+        ctx.globalAlpha = a;
+        ctx.fillStyle = "#140a08";
+        ctx.fillRect(-2, -R * 0.9, R * 0.55, R * 0.9);
+        S.glow(ctx, R * 0.27, -R * 0.9, R * 1.4, "#ff7a2a", a * (0.35 + 0.2 * Math.sin(clock * 3 + k)));
+        for (let i = 0; i < 4; i++) {
+          const v = (clock * 0.5 + i / 4 + k * 0.3) % 1;
+          S.glow(ctx, R * 0.27 + Math.sin(v * 6 + i) * 4 + v * R * 1.2, -R * 0.9 - v * R * 2.2, 3 + v * 6, "#ffb35c", a * (1 - v) * 0.35);
+        }
+      }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+  function surroundings(ctx, now, cam, r) {
+    const z = zoneAt(r.s / L.gap);
+    // open water: the very last of the daylight, slanting down from far above
+    const shafts = (z.cur.life === null ? z.t : 0) + (z.prev.life === null && z.z > 0 ? 1 - z.t : 0);
+    if (shafts > 0.01) for (let i = 0; i < 3; i++) S.cone(ctx, W * (0.2 + i * 0.3) + Math.sin(clock * 0.15 + i) * 30, -20, Math.PI * (0.5 + 0.06 * (i - 1)), H * 1.2, 0.09, "#4fd8ff", shafts * 0.22);
+    for (const side of [-1, 1]) {
+      wall(ctx, side, z.prev, z.z > 0 ? 1 - z.t : 0, cam, now);
+      wall(ctx, side, z.cur, z.t, cam, now);
+    }
+    // a word as the colony enters a new place
+    if (z.z !== zoneSeen && api0 && api0.started) {
+      zoneSeen = z.z;
+      zoneNote = clock;
+    }
+    const k = clock - zoneNote;
+    if (k < 3.5) {
+      ctx.globalAlpha = Math.min(1, k * 2, (3.5 - k) / 1.2) * 0.6;
+      ctx.fillStyle = z.cur.rim;
+      ctx.font = "500 13px Oswald, Impact, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(z.cur.name.toUpperCase().split("").join(" "), W / 2, H * 0.16);
+      ctx.textAlign = "start";
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function draw(ctx, api) {
+    api0 = api;
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const cam = camY(now);
+    const r = reach(now);
+    const tierC = api.color();
+    // far off, the dim glow of other colonies, sliding past slower than the chain
+    for (let i = 0; i < 4; i++) {
+      const span = H * 2.2;
+      const y = ((((i * 0.31 + 0.1) * span - cam * 0.25) % span) + span) % span - H * 0.6;
+      S.glow(ctx, W * (0.15 + 0.23 * i) + Math.sin(clock * 0.1 + i) * 30, y, L.amp * (0.8 + (i % 2) * 0.6), BELLS[(i * 2 + api.tier) % BELLS.length], 0.1);
+    }
+    S.snow(ctx, W, H, clock + cam * 0.06, { n: 55, fall: 8, alpha: 0.45 });
+    far.draw(ctx, W, H, now);
+    surroundings(ctx, now, cam, r);
+
+    // The stem: a fine thread from above the screen down to the tip, brighter where lit
+    const tip = nodes[nodes.length - 1];
+    const s0 = Math.max(0, cam - 20), s1 = Math.min(sOf(tip), cam + H + 20);
+    if (s1 > s0) {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.lineCap = "round";
+      for (const [w, a] of [[5 * L.k, 0.07], [1.6 * L.k, 0.4]]) {
+        ctx.strokeStyle = S.rgba("#7fc8e0", a);
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        for (let s = s0; s <= s1; s += 6) {
+          const [x, y] = stem(s);
+          if (s === s0) ctx.moveTo(x, y - cam);
+          else ctx.lineTo(x, y - cam);
+        }
+        ctx.stroke();
+      }
+      // the stretch the light has already run down glows warmer
+      ctx.strokeStyle = S.rgba(tierC, 0.35);
+      ctx.lineWidth = 2.2 * L.k;
+      ctx.beginPath();
+      const lit1 = Math.min(r.s, s1);
+      for (let s = s0; s <= lit1; s += 6) {
+        const [x, y] = stem(s);
+        if (s === s0) ctx.moveTo(x, y - cam);
+        else ctx.lineTo(x, y - cam);
+      }
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.lineCap = "butt";
+    }
+
+    // The bells, top to bottom
+    for (const n of nodes) {
+      const s = sOf(n);
+      if (s < cam - L.gap * 2 || s > cam + H + L.gap) continue;
+      const [px, wy] = stem(s);
+      const py = wy - cam;
+      // bells grow off the stem in pairs, one to each side, tilted away from it
+      const [ax, ay] = stem(s - 3), [bx2, by2] = stem(s + 3);
+      const tl = Math.hypot(bx2 - ax, by2 - ay) || 1, tx = (bx2 - ax) / tl, ty = (by2 - ay) / tl;
+      const side = n.i % 2 ? 1 : -1;
+      const x = n.i === 0 ? px : px - ty * side * L.bell * 0.95, y = n.i === 0 ? py : py + tx * side * L.bell * 0.95;
+      const tilt = Math.atan2(ty, tx) - Math.PI / 2 - side * 0.75;
+      n.cx = x;
+      n.cy = y;
+      if (n.i === 0) {
+        S.glow(ctx, x, y, L.bell * 4, "#ff6f86", 0.3);
+        S.draw(ctx, floatSprite(ctx), x, y - L.bell * 0.6);
+        continue;
+      }
+      // how bright: lit bells breathe; a wave passing up the chain lights them up in turn
+      let boost = 0;
+      for (const w of waves) {
+        const front = (clock - w.t0) * 7; // bells a second
+        const d = w.from - n.i - front;
+        if (d < 1.5 && d > -3) boost = Math.max(boost, Math.exp(-d * d) * (1 - (clock - w.t0) / 4));
+      }
+      if (ripple) {
+        const front = (clock - ripple.t0) * 14;
+        const d = tip.i - n.i - front;
+        boost = Math.max(boost, Math.exp(-d * d * 0.2) * 0.9);
+      }
+      const lit = n.state === "hit";
+      const since = now - n.litAt;
+      const grow = n.state === "wait" ? clamp(1 - (n.at - now) / (RUN + 1), 0.35, 1) : 1;
+      const open = lit && since < 0.4 ? 1 + Math.sin((since / 0.4) * Math.PI) * 0.25 : 1;
+      const sway = tilt + Math.sin(clock * 1.2 + n.seed) * 0.12;
+      // trailing lures: a few threads hanging from each bell, a bead of light at each end
+      if (lit || n.state === "missed") {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.strokeStyle = S.rgba(lit ? n.color : "#4a6a7a", lit ? 0.35 : 0.2);
+        ctx.lineWidth = 1;
+        for (let j = 0; j < 3; j++) {
+          // the lures hang from the stem itself, between the bells
+          const len = L.bell * (1.4 + j * 0.9), off = (j - 1) * L.bell * 0.35 - side * L.bell * 0.4;
+          const ex = px + off + Math.sin(clock * 1.5 + n.seed + j) * L.bell * 0.6, ey = py + L.bell * 0.3 + len;
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.quadraticCurveTo(px + off, py + len * 0.6, ex, ey);
+          ctx.stroke();
+          if (lit) S.glow(ctx, ex, ey, 4 * L.k + boost * 6, n.color, 0.8);
+        }
+        ctx.globalCompositeOperation = "source-over";
+      }
+      if (lit) S.glow(ctx, x, y, L.bell * (3 + boost * 3), n.color, 0.22 + boost * 0.4 + 0.08 * Math.sin(clock * 2 + n.seed));
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(sway);
+      ctx.scale(grow * open, grow / open);
+      if (lit) S.add(ctx, bellSprite(ctx, n.color, L.bell, true), 0, 0, 1, 0.85 + boost * 0.15);
+      else S.draw(ctx, bellSprite(ctx, n.color, L.bell, false), 0, 0);
+      ctx.restore();
+      if (boost > 0.05 && lit) S.twinkle(ctx, x, y - L.bell * 0.2, L.bell * boost, "#ffffff", boost * 0.6);
+    }
+
+    // The spark running down the stem
+    if (r.b) {
+      const [x, y] = stem(r.s);
+      const trail = [];
+      for (let i = 0; i < 8; i++) {
+        const [tx, ty] = stem(Math.max(0, r.s - i * 5));
+        trail.push([tx, ty - cam]);
+      }
+      S.streak(ctx, trail, 4 * L.k, r.b.color);
+      S.glow(ctx, x, y - cam, 16 * L.k, r.b.color, 0.9);
+      S.glow(ctx, x, y - cam, 6 * L.k, "#ffffff", 1);
+    }
+    for (const p of sparks) S.glow(ctx, p.x, p.y - cam, 4 * L.k + 2, p.color, (p.life / p.max) * 0.9);
+
+    // the hold: an arc closing round the tip
+    const [cx, cy] = stem(sOf(tip));
+    api.drawCharge(cx, cy - cam, L.bell * 2.4, undefined, "#ffb35c");
+    // depth: the colony's length, in the corner, like a sounding
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = "#8fd8e8";
+    ctx.font = "500 11px Oswald, Impact, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(tip.i + " bells · " + zoneAt(r.s / L.gap).cur.name, W - 14, H - 26);
+    ctx.textAlign = "start";
+    ctx.globalAlpha = 1;
+  }
+
+  SpaceShell.mount({
+    key: "deep-chain",
+    title: "Chain",
+    hint: "Tap as the light reaches the new bell",
+    skin: S,
+    words: { fire: "Bloom", charge: "Ripple" },
+    engine: {},
+    tierNames: ["Finding your rhythm", "Budding", "Colony", "Living light"],
+    onPhrase: () => waves.push({ t0: clock, from: nodes[nodes.length - 1].i, color: "#ffffff" }),
+    fidgetPoint: (api) => {
+      const now = api.eng.beatPos();
+      const [x, y] = stem(reach(now).s);
+      return { x, y: y - camY(now) };
+    },
+    resize: layout,
+    setup,
+    onBeat: (n) => far.beat(n),
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

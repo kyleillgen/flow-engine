@@ -1,0 +1,20 @@
+{
+  "id": "deepsea",
+  "name": "Deep Sea",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "A bioluminescent abyss: an anglerfish's lantern, a siphonophore's chain of light, a little submersible's headlamp and a squid that talks in flashes.",
+  "colors": ["#3ee8d0", "#ffb35c"],
+  "files": [
+    "shell/space-shell.js",
+    "skins/deepsea/deepsea-skin.js",
+    "skins/pinball/fonts/oswald-latin.woff2",
+    "skins/pinball/fonts/inter-latin.woff2"
+  ],
+  "games": [
+    { "file": "games/deep-lantern.html", "label": "Lure", "hint": "Glow as each little one touches the lantern" },
+    { "file": "games/deep-siphon.html", "label": "Chain", "hint": "Tap as the light reaches the new bell" },
+    { "file": "games/deep-bathy.html", "label": "Lamp", "hint": "Snap as the headlamp finds each creature" },
+    { "file": "games/deep-glimmer.html", "label": "Echo", "hint": "Flash back as the far squid's light reaches you" }
+  ]
+}

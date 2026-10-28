@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Sela, a glowing squid, talks in flashes. A far squid calls; its light crosses the dark and reaches her on the beat. Flash back as it arrives and the pod grows. A rhythm micro-game that finds your tempo.">
+<title>Echo</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/deepsea/deepsea-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Echo: Sela, a small squid whose skin is all little lights, hangs in the open dark. Far away
+// another squid flashes a colour; the light of it crosses the water as a widening ripple and
+// reaches Sela on a whole beat. Flash back as it arrives: a wave of that colour runs over her
+// skin and her answer ripples back. Every few answers another squid comes out of the dark to
+// join the conversation, so the calls start to come from more places. A call you miss just passes
+// her by and the far squid goes quiet for a moment.
+//
+// A call's ripple is a function of the beat position: the far squid flashes three beats before
+// it's due, and the ripple's edge reaches Sela on the beat, at least two after the last. Clean
+// is ±0.3 beat (wider with assist), perfect ±0.1.
+// Fidget (F): every press answers the next call at once, wherever its light is.
+// Hold then let go: Sela glimmers through every colour; a full charge and the whole pod answers
+// in a chorus. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = DeepSeaSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const CALL = 3; // beats from the far flash to the ripple reaching her
+  const HUES = ["#4fd8ff", "#5cffc8", "#a98cff", "#ff6f86", "#ffb35c"];
+  const SKIN = "#3e5c8c";
+  const MOODS = [
+    { top: "#00020a", mid: "#020818", low: "#01040c", haze: ["#1c3a7a", "#2a2a6a", "#1c4a6a"], seed: 6 },
+    { top: "#00040a", mid: "#011218", low: "#01080a", haze: ["#1c6a6a", "#1c5a7a", "#2a6a5a"], seed: 16 },
+    { top: "#02020c", mid: "#0a0820", low: "#05030e", haze: ["#4a2a8a", "#3a2a7a", "#5a3a8a"], seed: 26 },
+    { top: "#04020a", mid: "#140816", low: "#0a040a", haze: ["#7a2a4a", "#6a3a2a", "#5a2a5a"], seed: 36 }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let pod = []; // far squids: { x, y, s (scale, 0..1 depth), hue, flash, joined }
+  let track = null; // api.track: its list holds the calls { from (pod index), hue, at, state, t }
+  let answers = [], sparks = [];
+  let clock = 0, lastTier = 1, hits = 0, echoes = 0;
+  let skinWave = { t0: -9, hue: HUES[0] };
+  let glimmer = null; // { t0, full }
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  // Where the pod can be: across the far dark, away from Sela
+  const SLOTS_WIDE = [[0.78, 0.3, 0.7], [0.88, 0.55, 0.5], [0.62, 0.18, 0.45], [0.7, 0.72, 0.6], [0.5, 0.12, 0.35], [0.94, 0.2, 0.4]];
+  const SLOTS_TALL = [[0.7, 0.24, 0.7], [0.25, 0.2, 0.55], [0.5, 0.13, 0.45], [0.88, 0.4, 0.5], [0.12, 0.42, 0.45], [0.42, 0.33, 0.35]];
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const m = Math.min(W, H);
+    const tall = H > W * 1.1;
+    L = { r: clamp(m * 0.07, 24, 52), k: clamp(m / 500, 0.7, 1.6), x: tall ? W * 0.5 : W * 0.3, y: tall ? H * 0.66 : H * 0.55, slots: tall ? SLOTS_TALL : SLOTS_WIDE, far: clamp(m * 0.035, 12, 26) };
+    if (!pod.length) join(0);
+    for (const p of pod) place(p);
+  }
+  function place(p) {
+    const [x, y, s] = L.slots[p.slot];
+    p.x = x * W;
+    p.y = y * H;
+    p.s = s;
+  }
+  function join(slot) {
+    const p = { slot, hue: HUES[slot % HUES.length], flash: -9, quiet: -9, joined: clock, seed: Math.random() * 100 };
+    place(p);
+    pod.push(p);
+    return p;
+  }
+  // Sela, bobbing slowly, rising a little on each beat like a squid's pulse of a swim
+  const sela = (now) => [L.x + Math.sin(clock * 0.4) * L.r * 0.4, L.y - Math.sin(frac(now) * Math.PI) * L.r * 0.08 + Math.sin(clock * 0.3) * L.r * 0.2];
+  const podXY = (p) => [p.x + Math.sin(clock * 0.35 + p.seed) * 14, p.y + Math.sin(clock * 0.5 + p.seed) * 9];
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  // A squid, mantle up and arms hanging below. Baked dark;
+  // the lights on its skin are stamped on top, live.
+  function squidSprite(ctx, r, key, color) {
+    const R = Math.round(r);
+    return S.sprite(ctx, "squid" + key + R, R * 3, R * 4.4, R * 1.5, R * 1.6, (g) => {
+      // fins at the top of the mantle
+      g.fillStyle = S.mix(color, "#000000", 0.45);
+      g.beginPath();
+      g.moveTo(0, -R * 1.45);
+      g.quadraticCurveTo(-R * 0.95, -R * 1.1, -R * 0.4, -R * 0.5);
+      g.lineTo(R * 0.4, -R * 0.5);
+      g.quadraticCurveTo(R * 0.95, -R * 1.1, 0, -R * 1.45);
+      g.fill();
+      // the mantle
+      const gr = g.createLinearGradient(-R * 0.5, 0, R * 0.5, 0);
+      gr.addColorStop(0, S.mix(color, "#000000", 0.55));
+      gr.addColorStop(0.45, S.mix(color, "#ffffff", 0.08));
+      gr.addColorStop(1, S.mix(color, "#000000", 0.6));
+      g.fillStyle = gr;
+      g.beginPath();
+      g.moveTo(0, -R * 1.5);
+      g.bezierCurveTo(R * 0.55, -R * 1.1, R * 0.5, R * 0.2, R * 0.38, R * 0.45);
+      g.lineTo(-R * 0.38, R * 0.45);
+      g.bezierCurveTo(-R * 0.5, R * 0.2, -R * 0.55, -R * 1.1, 0, -R * 1.5);
+      g.fill();
+      // the head, and two big eyes
+      g.fillStyle = S.mix(color, "#000000", 0.4);
+      g.beginPath();
+      g.ellipse(0, R * 0.6, R * 0.42, R * 0.3, 0, 0, TAU);
+      g.fill();
+      for (const s of [-1, 1]) {
+        g.fillStyle = "#e8f6ff";
+        g.beginPath();
+        g.arc(s * R * 0.24, R * 0.58, R * 0.15, 0, TAU);
+        g.fill();
+        g.fillStyle = "#0a0a1a";
+        g.beginPath();
+        g.arc(s * R * 0.24, R * 0.6, R * 0.09, 0, TAU);
+        g.fill();
+        g.fillStyle = "#ffffff";
+        g.beginPath();
+        g.arc(s * R * 0.24 - R * 0.04, R * 0.55, R * 0.035, 0, TAU);
+        g.fill();
+      }
+    });
+  }
+  // Where the lights sit on the mantle, in units of r
+  const SPOTS = [];
+  for (let i = 0; i < 16; i++) {
+    const row = Math.floor(i / 4), col = i % 4;
+    SPOTS.push([(col - 1.5) * 0.2 * (1 - row * 0.12), -1.15 + row * 0.38]);
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "echo" + tier, W, H, (g) => S.abyss(g, W, H, MOODS[(tier - 1) % 4]));
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function answer(api, c, perfect, ghost) {
+    c.t = api.eng.beatPos();
+    skinWave = { t0: clock, hue: c.hue };
+    const p = pod[c.from];
+    answers.push({ to: c.from, hue: c.hue, t0: clock });
+    const [x, y] = sela(c.t);
+    // where the shell pops the points
+    c.x = x;
+    c.y = y - L.r;
+    for (let i = 0; i < (perfect ? 14 : 8) && sparks.length < 150; i++) {
+      const a = (i / 14) * TAU + Math.random() * 0.4, v = 40 + Math.random() * 70, life = 0.7 + Math.random() * 0.6;
+      sparks.push({ x, y: y - L.r * 0.5, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? c.hue : "#ffffff" });
+    }
+    if (perfect && !ghost) api.ring(x, y - L.r * 0.4, api.color(), L.r * 2.4);
+    // every six answers, someone new comes out of the dark
+    if (++echoes % 6 === 0 && pod.length < L.slots.length) {
+      join(pod.length);
+      if (!ghost) api.callout("Someone new", W / 2, H * 0.26, HUES[(pod.length - 1) % HUES.length], 1);
+    }
+    if (p) p.flash = Math.max(p.flash, clock + 0.35); // they flash back, happy to be heard
+  }
+  const nextWaiting = () => track.next();
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. api.track spawns, judges, scores, misses and flies autopilot; this has someone in the pod
+  // call, its light due at Sela on beat `at`
+  function spawn(at) {
+    if (!W) return null;
+    const prev = track.list[track.list.length - 1];
+    let from = Math.floor(Math.random() * pod.length);
+    if (prev && pod.length > 1 && from === prev.from) from = (from + 1) % pod.length;
+    let hue = HUES[Math.floor(Math.random() * HUES.length)];
+    if (prev && hue === prev.hue) hue = HUES[(HUES.indexOf(hue) + 1) % HUES.length];
+    return { from, hue, t: 0 };
+  }
+
+  // Far-off life, now and then, deep behind the pod
+  const far = S.wonders({ kinds: ["leviathan", "school", "oarfish", "alarm"], band: [0.2, 0.55], first: 12 });
+
+  function setup(api) {
+    track = api.track({
+      spawn,
+      note: (c) => HUES.indexOf(c.hue) / HUES.length,
+      // Fidget answers the next call once its far squid has flashed
+      ready: (c, now) => now >= c.at - CALL,
+      hit(c, { perfect, ghost }) {
+        answer(api, c, perfect, ghost);
+        if (!ghost && ++hits === 14) api.hint("glimmer", 'Hold <span class="pb-kbd">Space</span>, let go: glimmer');
+      },
+      miss(c, counted) {
+        // the call just passes on into the dark
+        c.t = c.at;
+        if (pod[c.from]) pod[c.from].quiet = clock;
+        if (counted) api.hint("answer", "Flash back as the light reaches her");
+      },
+      empty() {
+        skinWave = { t0: clock, hue: api.style === "fidget" ? api.color() : "#6a8aa8" };
+      },
+      perfect: PERFECT,
+      keep: 2.5,
+      // the gold cue closes on Sela, where the call's light reaches her
+      cueAt: () => {
+        const [x, y] = sela(api.eng.beatPos());
+        return { x, y: y - L.r * 0.4 };
+      },
+      cueSize: L.r / 14
+    });
+  }
+
+  // 3. A press: Sela flashes; if a call's light is reaching her, it's an answer
+  function onFire(api) {
+    track.fire();
+  }
+
+  // A hold then release: every colour runs over her; at full charge the pod answers in chorus
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    glimmer = { t0: clock, full: c >= 1 };
+    if (c >= 1) {
+      pod.forEach((p, i) => (p.flash = clock + 0.4 + i * 0.18));
+      api.callout("Chorus", W / 2, H * 0.24, "#ffb35c", 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    answers = answers.filter((a) => clock - a.t0 < 2.5);
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 10 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    if (glimmer && clock - glimmer.t0 > 2.4) glimmer = null;
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  // A squid's arms: eight short ones and two long tentacles, swaying, drawn as soft lines
+  function arms(ctx, x, y, r, color, alpha, phase) {
+    ctx.strokeStyle = S.rgba(color, alpha);
+    ctx.lineCap = "round";
+    for (let i = 0; i < 10; i++) {
+      const long = i === 3 || i === 6;
+      const off = (i - 4.5) / 4.5;
+      const len = r * (long ? 2.4 : 1.25);
+      const sw = Math.sin(clock * 1.6 + phase + i * 0.7) * r * 0.25;
+      ctx.lineWidth = Math.max(1, r * (long ? 0.07 : 0.11));
+      ctx.beginPath();
+      ctx.moveTo(x + off * r * 0.3, y + r * 0.75);
+      ctx.quadraticCurveTo(x + off * r * 0.7 + sw, y + r * 0.75 + len * 0.55, x + off * r * (long ? 0.5 : 0.9) + sw * 1.6, y + r * 0.75 + len);
+      ctx.stroke();
+      if (long) S.glow(ctx, x + off * r * 0.5 + sw * 1.6, y + r * 0.75 + len, r * 0.22, color, alpha * 1.5);
+    }
+    ctx.lineCap = "butt";
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const tierC = api.color();
+    S.snow(ctx, W, H, clock, { n: 55, fall: 7, drift: 3, alpha: 0.4 });
+    far.draw(ctx, W, H, now);
+    const [sx, sy] = sela(now);
+
+    // The pod, far off and small
+    pod.forEach((p, i) => {
+      const [x, y] = podXY(p);
+      const r = L.far * (0.45 + p.s * 0.75);
+      const come = ease((clock - p.joined) / 3);
+      // its call: a bright flash of colour when it sends one
+      let flash = clamp(1 - Math.abs(clock - p.flash) / 0.35, 0, 1);
+      for (const c of track.list) {
+        if (c.from !== i) continue;
+        const since = now - (c.at - CALL);
+        if (since > -0.05 && since < 0.6) flash = Math.max(flash, 1 - since / 0.6);
+      }
+      const quiet = clamp((clock - p.quiet) / 2, 0, 1);
+      const hue = flash > 0 ? (track.list.find((c) => c.from === i && now - (c.at - CALL) < 0.6 && now >= c.at - CALL - 0.05) || p).hue : p.hue;
+      S.glow(ctx, x, y, r * 3.5, hue, (0.06 + flash * 0.45) * come * quiet);
+      if (flash > 0.02) S.softRing(ctx, x, y, r * (1.2 + (1 - flash) * 2.2), hue, flash * 0.8, 1.3);
+      ctx.globalAlpha = (0.35 + p.s * 0.4) * come;
+      S.draw(ctx, squidSprite(ctx, r, "far", "#3a4a6a"), x, y);
+      ctx.globalAlpha = 1;
+      arms(ctx, x, y, r, "#4a5a7a", 0.45 * come, p.seed);
+      // its skin lights, dim at rest and bright in a flash
+      for (let j = 0; j < SPOTS.length; j += 2) {
+        const [u, v] = SPOTS[j];
+        S.glow(ctx, x + u * r, y + v * r, r * 0.22, hue, (0.25 + flash * 0.75) * come * (0.4 + 0.6 * quiet));
+      }
+    });
+
+    // Calls on their way: a widening arc of light from the caller, its edge reaching Sela on the beat
+    for (const c of track.list) {
+      const p = pod[c.from];
+      if (!p) continue;
+      const [px, py] = podXY(p);
+      const t0 = c.at - CALL;
+      const u = (now - t0) / CALL;
+      if (u < 0) continue;
+      const dx = sx - px, dy = sy - L.r * 0.4 - py;
+      const d = Math.hypot(dx, dy);
+      const dir = Math.atan2(dy, dx);
+      const rad = d * u;
+      const fade = c.state === "wait" ? 1 : clamp(1 - (now - c.t) / 1, 0, 1);
+      if (fade <= 0) continue;
+      if (c.state === "wait") {
+        // the call's path, a dotted line of sight from the caller to her: lit behind the light, faint ahead of it
+        const n = Math.max(6, Math.round(d / (14 * L.k)));
+        for (let i = 1; i < n; i++) {
+          const k = i / n, behind = k < u;
+          S.glow(ctx, px + dx * k, py + dy * k, (behind ? 3.2 : 2.2) * L.k, c.hue, behind ? 0.45 : 0.12 + 0.1 * clamp(u * 3, 0, 1));
+        }
+      }
+      ctx.globalCompositeOperation = "lighter";
+      for (const [w, a] of [[10, 0.08], [3.5, 0.25], [1.2, 0.8]]) {
+        ctx.strokeStyle = S.rgba(c.hue, a * fade * (0.5 + 0.5 * clamp(u * 2, 0, 1)));
+        ctx.lineWidth = w * L.k;
+        ctx.beginPath();
+        ctx.arc(px, py, rad, dir - 0.55, dir + 0.55);
+        ctx.stroke();
+      }
+      ctx.globalCompositeOperation = "source-over";
+      // the bright point of it heading straight for her
+      const hx = px + Math.cos(dir) * rad, hy = py + Math.sin(dir) * rad;
+      if (c.state === "wait") {
+        S.glow(ctx, hx, hy, 14 * L.k, c.hue, 0.8);
+        S.glow(ctx, hx, hy, 5 * L.k, "#ffffff", 0.9);
+      }
+    }
+    // her answers, rippling back out to whoever called
+    for (const a of answers) {
+      const p = pod[a.to];
+      if (!p) continue;
+      const [px, py] = podXY(p);
+      const u = (clock - a.t0) / 1.4;
+      if (u > 1) continue;
+      const dx = px - sx, dy = py - (sy - L.r * 0.4);
+      const d = Math.hypot(dx, dy), dir = Math.atan2(dy, dx);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = S.rgba(a.hue, 0.5 * (1 - u));
+      ctx.lineWidth = 2.5 * L.k;
+      ctx.beginPath();
+      ctx.arc(sx, sy - L.r * 0.4, d * ease(u), dir - 0.45, dir + 0.45);
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    // Sela
+    const wave = clock - skinWave.t0;
+    const gl = glimmer ? (clock - glimmer.t0) / 2.4 : 1;
+    S.glow(ctx, sx, sy - L.r * 0.4, L.r * 3.4, skinWave.hue, 0.16 + clamp(1 - wave / 0.8, 0, 1) * 0.35);
+    S.glow(ctx, sx, sy - L.r * 0.5, L.r * 1.6, tierC, 0.12 + 0.06 * pulse);
+    arms(ctx, sx, sy, L.r, "#6a86b8", 0.55, 0);
+    S.draw(ctx, squidSprite(ctx, L.r, "sela", SKIN), sx, sy);
+    // her skin lights: resting in the tier's colour, a wave of the answer's colour running up her
+    for (let j = 0; j < SPOTS.length; j++) {
+      const [u, v] = SPOTS[j];
+      const row = (v + 1.15) / 0.38;
+      const k = clamp(1 - Math.abs(wave * 8 - (3 - row)) / 1.4, 0, 1) * clamp(1 - wave / 1.2, 0, 1);
+      let hue = k > 0.05 ? skinWave.hue : tierC;
+      let a = 0.35 + 0.15 * Math.sin(clock * 2 + j) + 0.12 * pulse + k * 0.65;
+      if (glimmer) {
+        hue = HUES[(j + Math.floor(clock * 10)) % HUES.length];
+        a = Math.max(a, 0.9 * (1 - gl));
+      }
+      S.glow(ctx, sx + u * L.r, sy + v * L.r, L.r * (0.26 + k * 0.16), hue, Math.min(1, a * 1.3));
+    }
+
+    for (const p of sparks) S.glow(ctx, p.x, p.y, 4 * L.k + 2, p.color, (p.life / p.max) * 0.9);
+
+    // how many are talking, in the corner
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = "#cfe4ff";
+    ctx.font = "500 11px Oswald, Impact, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(pod.length + 1 + " in the pod", W - 14, H - 26);
+    ctx.textAlign = "start";
+    ctx.globalAlpha = 1;
+
+    // the hold: an arc closing round her
+    api.drawCharge(sx, sy - L.r * 0.4, L.r * 1.7, undefined, "#ffb35c");
+  }
+
+  SpaceShell.mount({
+    key: "deep-echo",
+    title: "Echo",
+    hint: "Flash back as the far squid's light reaches you",
+    skin: S,
+    words: { fire: "Flash", charge: "Glimmer" },
+    engine: {},
+    tierNames: ["Finding your rhythm", "Hello", "Chatter", "Chorus"],
+    fidgetPoint: (api) => {
+      const [x, y] = sela(api.eng.beatPos());
+      return { x, y: y - L.r * 0.4 };
+    },
+    resize: layout,
+    setup,
+    onBeat: (n) => far.beat(n),
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

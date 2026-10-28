@@ -270,3 +270,93 @@ test("a hit counts as activity, so waiting in the right place never trips autopi
   }
   assert.equal(c.auto, false);
 });
+
+// ---- Play style: Flow or Fidget --------------------------------------------------------
+const { createStyle } = window.FlowEngine;
+const beatSec = 0.5; // 120 BPM
+
+test("Fidget holds autopilot off until left alone, and Flow puts it back", () => {
+  const c = createController({ idleSec: 2.5 });
+  const s = createStyle(c);
+  c.setAuto(true);
+  s.set("fidget");
+  assert.equal(c.auto, false);
+  assert.equal(c.o.idleSec, Infinity);
+  assert.equal(s.idle(1000, false), false, "pressed a moment ago");
+  s.touch(1000);
+  assert.equal(s.idle(4900, false), false);
+  assert.equal(s.idle(5100, false), true, "4 s untouched: the game may play itself");
+  assert.equal(s.idle(5100, true), false, "never while the button is held");
+  s.set("flow", true);
+  assert.equal(c.o.idleSec, 2.5);
+  assert.equal(s.idle(99999, false), false, "only Fidget fills in this way");
+});
+
+test("Fidget presses are an instrument: mashing climbs the scale and revs the meter", () => {
+  const s = createStyle(createController());
+  s.set("fidget");
+  const slow = s.press(1000, () => 0);
+  assert.ok(slow.sustain > 1, "a lone press rings long");
+  const heights = [];
+  let n;
+  for (let t = 1100; t < 2100; t += 100) heights.push((n = s.press(t, () => 0)).height);
+  assert.ok(s.rev > 0.85, `ten a second is nearly flat out (rev ${s.rev.toFixed(2)})`);
+  assert.ok(n.sustain < 0.4, "mashing is staccato");
+  assert.ok(heights[1] < heights[0] && heights[2] < heights[1], "quick runs climb the scale");
+  for (let i = 0; i < 60 * 3; i++) s.update(1 / 60, beatSec, true);
+  assert.ok(s.rev < 0.15, "the meter eases back");
+});
+
+test("Fidget climbs the tiers with presses, and slowly with time", () => {
+  const c = createController();
+  const s = createStyle(c);
+  s.set("fidget");
+  for (let i = 0; i < 8; i++) s.press(1000 + i * 500);
+  assert.equal(s.update(1 / 60, beatSec, true), 2, "eight presses reach the second tier");
+  assert.equal(c.tier, 2);
+  const s2 = createStyle(createController());
+  s2.set("fidget");
+  let climbed = 0;
+  for (let i = 0; i < 60 * 40 && !climbed; i++) climbed = s2.update(1 / 60, beatSec, true); // 80 beats
+  assert.equal(climbed, 2, "idle, a step every two bars: 64 beats to the second tier");
+  const s3 = createStyle(createController());
+  s3.set("fidget");
+  for (let i = 0; i < 60 * 40; i++) s3.update(1 / 60, beatSec, false);
+  assert.equal(s3.energy, 0, "nothing travels before the first input");
+});
+
+test("back to Flow is a handover: the tier settles a step every four bars, three misses forgiven", () => {
+  const c = createController();
+  const s = createStyle(c);
+  s.set("fidget");
+  for (let i = 0; i < 20; i++) s.press(1000 + i * 500);
+  s.update(1 / 60, beatSec, true);
+  assert.equal(c.tier, 3);
+  s.set("flow", true);
+  assert.equal(c.forgive, 3);
+  const tierAfter = (beats) => {
+    for (let i = 0; i < Math.round((beats * beatSec) * 60); i++) s.update(1 / 60, beatSec, true);
+    return c.tier;
+  };
+  assert.equal(tierAfter(15), 3, "held for four bars");
+  assert.equal(tierAfter(2), 2, "then one step down");
+  assert.equal(tierAfter(16), 1);
+  // A streak at or above the floor keeps its own tier
+  const c2 = createController();
+  const s4 = createStyle(c2);
+  c2.tier = 3;
+  s4.set("flow", true);
+  for (let i = 0; i < 25; i++) c2.score(1);
+  for (let i = 0; i < 60 * 30; i++) s4.update(1 / 60, beatSec, true);
+  assert.equal(c2.tier, 3, "the streak holds it up");
+});
+
+test("a lo-fi game can lower the tempo floor and settle at 76 BPM", () => {
+  // perBeat [1] so a slow tapper isn't folded up to double time
+  const { c, log } = run([{ every: 60000 / 76, secs: 20 }], { minBpm: 72, startBpm: 80, perBeat: [1] });
+  assert.ok(firstLock(log), "never locked");
+  assert.ok(Math.abs(c.bpm - 76) < 2, `settled at ${c.bpm.toFixed(1)}`);
+  // and the default floor still holds it up at the band's bottom
+  const d = run([{ every: 60000 / 76, secs: 20 }], { perBeat: [1] }).c;
+  assert.ok(d.bpm >= BAND_MIN - 0.01, `default floor: ${d.bpm.toFixed(1)}`);
+});

@@ -48,7 +48,6 @@
   @media (max-width: 520px) { .fs-voice, .pb-best { display: none; } .fs-controls { gap: 4px; } }
   .fs-over { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(20,15,12,.72); }
   .fs-over.show { display: flex; }
-  .fs-try { position: fixed; top: 64px; right: 10px; z-index: 12; font: 600 11px/1 Oswald, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: #11152a; background: #ffc400; padding: 5px 8px 4px; border-radius: 4px; text-decoration: none; opacity: .9; }
   .fs-hint { position: fixed; bottom: 26px; left: 0; right: 0; z-index: 10; text-align: center; pointer-events: none; transition: opacity .7s; }
   /* Attract mode: the game plays itself under a marquee until the first input */
   .fs-marquee { position: fixed; left: 0; right: 0; top: 34%; z-index: 15; text-align: center; pointer-events: none; transition: opacity .6s, transform .6s cubic-bezier(.34,1.56,.64,1); }
@@ -119,16 +118,6 @@
         <div class="pb-note">Stop for a few seconds and it plays itself, without scoring. Any input takes over again, and the next two misses are forgiven.</div>
       </div></div>`;
     document.body.appendChild(root);
-    // On the Try link (the site's /next/ copy), say so, and link to the live version
-    if (/\/next\//.test(location.pathname)) {
-      const tag = document.createElement("a");
-      tag.className = "fs-try";
-      tag.href = location.pathname.replace("/next/", "/") + location.search;
-      tag.textContent = "Try build";
-      tag.title = "Work in progress. Tap for the live version";
-      root.appendChild(tag);
-      document.title += " (Try build)";
-    }
     const q = (sel) => root.querySelector(sel);
 
     const eng = FlowEngine.create(Object.assign({ key: g.key }, g.engine || {}));
@@ -211,100 +200,39 @@
     }
     loadTargets();
 
-    // ---- Play style: Flow (the game, with score and stakes) or Fidget (a toy). Fidget turns the
-    // table around: the world bends to your hands instead of your hands fitting the world. Every
-    // press succeeds and moves the ball right away (games check api.style in onAction), so there's
-    // no "wrong time" and nothing to watch for. Press, mash and hold-then-let-go are all different
-    // gestures with their own sound. Nothing scores or counts against you, there are no timed
-    // modes, and the game plays itself only after you've left it alone for a few seconds.
-    let playStyle = store(g.key + ".style") === "fidget" ? "fidget" : "flow";
-    let lastInputAt = 0;
+    // ---- Play style: Flow (the game, with score and stakes) or Fidget (a toy). The rules live in
+    // the engine (eng.style, eng.press, eng.release, eng.fidgetIdle, eng.rev; see createStyle):
+    // every press works (games check api.style in onAction), nothing scores or misses, presses
+    // are an instrument, the tiers still climb, and going back to Flow is a gentle handover. The
+    // shell shows it: rings and sparks on each press, the insert lights as a rev meter, and the
+    // tier callouts.
     // Held longer than this, a press becomes a charge. A thumb on a space bar stays down far
     // longer than a finger on an arrow key (often 200-350 ms for an ordinary press), so this sits
     // above that: an ordinary press is always just a press.
     const HOLD_SEC = 0.45;
-    const FIDGET_IDLE_MS = 4000; // slow pressing (one every 2-3 s) stays yours; autopilot waits
-    const baseIdle = eng.ctrl.o.idleSec;
-    // Fidget still travels: the table climbs through the tiers (colours, backglass, music) with
-    // your presses and, more slowly, with time, and the game's own events still pop in. Going
-    // back to Flow is a handover, not a cut: the tier you reached settles back one step every
-    // four bars (unless your streak holds it up), and the first three misses are forgiven.
-    let fidgetEnergy = 0;
-    let tierFloor = 1;
-    let floorBeats = 0;
-    function applyStyle(switching) {
-      const fidget = playStyle === "fidget";
-      eng.ctrl.o.idleSec = fidget ? Infinity : baseIdle;
-      eng.quietLead = fidget; // Fidget plays its own immediate notes instead
-      eng.holdTempo = fidget; // and its presses don't count toward the player's tempo
-      if (fidget && eng.auto) eng.setAuto(false);
-      if (mode) endMode(false);
-      if (switching && !fidget) {
-        tierFloor = eng.tier;
-        floorBeats = 0;
-        eng.ctrl.forgive = 3;
-      }
-    }
-    function tickTiers(dt) {
-      const ctrl = eng.ctrl;
-      const own = ctrl.computeTier(ctrl.streak);
-      if (playStyle === "fidget") {
-        if (started) fidgetEnergy += dt / eng.beatSec / 8; // one step every two bars, even idle
-        const t = Math.max(own, ctrl.computeTier(Math.floor(fidgetEnergy)));
-        if (t > ctrl.tier) {
-          api.callout(tierNames[t - 1], W / 2, H * 0.3, colors[t - 1], 1.2);
-          api.ring(W / 2, H * 0.45, colors[t - 1], Math.min(W, H) * 0.45);
-          bulbFlash = 1.2;
-          eng.chime();
-        }
-        ctrl.tier = t;
-      } else if (tierFloor > own) {
-        if ((floorBeats += dt / eng.beatSec) >= 16) {
-          floorBeats = 0;
-          tierFloor--;
-        }
-        ctrl.tier = Math.max(own, tierFloor);
-      }
-    }
-    // Fidget presses are an instrument for your pressing speed. Slow presses ring long with wide
-    // rings of light; fast mashing climbs the scale in short staccato notes with sparks, and the
-    // insert lights become a rev meter. (Intense movement goes with better focus in ADHD studies,
-    // so speed is made expressive; nothing here asks you to decide anything.)
-    let pressRate = 0; // presses a second, smoothed
-    let rev = 0; // 0 calm .. 1 flat out
-    let lastPress = 0;
-    let climb = 0;
     let chase = 0;
+    eng.on("tier", (t) => {
+      api.callout(tierNames[t - 1], W / 2, H * 0.3, colors[t - 1], 1.2);
+      api.ring(W / 2, H * 0.45, colors[t - 1], Math.min(W, H) * 0.45);
+      bulbFlash = 1.2;
+      eng.chime();
+    });
+    // Slow presses ring long with wide rings of light; fast mashing climbs the scale in short
+    // staccato notes with sparks
     function fidgetPress(e) {
-      if (playStyle !== "fidget" || eng.paused) return;
-      const now = performance.now();
-      const gap = lastPress ? now - lastPress : 1000;
-      lastPress = now;
-      pressRate += (1000 / Math.max(60, gap) - pressRate) * 0.35;
-      fidgetEnergy += 1;
-      // Log scale, so the whole range shows: 1 a second lights a few inserts, 10 a second all of them
-      rev = Math.max(rev, Math.min(1, Math.log2(1 + pressRate) / Math.log2(11)));
-      climb = gap < 380 ? climb + 1 : Math.floor(Math.random() * 3); // quick runs climb the scale
-      const height = 0.9 - ((climb % 9) / 9) * 0.8;
-      eng.pluck(height, 1.4 - 1.25 * rev, 0.15 - 0.06 * rev);
+      if (!eng.press()) return;
+      const rev = eng.rev;
       const at = e && e.x !== undefined ? { x: e.x, y: e.y } : g.fidgetPoint ? g.fidgetPoint(api) : { x: W / 2, y: H * 0.55 };
       if (rev < 0.35) api.ring(at.x, at.y, api.color(), 70 - 40 * rev);
       api.burst(at.x, at.y, rev > 0.5 ? "#ffc400" : api.color(), 2 + Math.round(rev * 6), -1);
       if (g.onFidget) g.onFidget(api, rev, at);
     }
 
-    // The release is the second half of the click, like a pen: a soft low clack
-    function fidgetRelease(held) {
-      if (playStyle !== "fidget" || eng.paused) return;
-      eng.pluck(0.95, held > 0.35 ? 0.5 : 0.12, held > 0.35 ? 0.11 : 0.045);
-    }
-
     function toggleStyle() {
-      playStyle = playStyle === "fidget" ? "flow" : "fidget";
-      store(g.key + ".style", playStyle);
-      applyStyle(true);
-      api.callout(playStyle, W / 2, 130, "#ffc400", 1);
-      api.ring(W / 2, H * 0.5, playStyle === "fidget" ? "#ffc400" : api.color(), Math.min(W, H) * 0.5);
+      const style = eng.toggleStyle();
+      if (mode) endMode(false);
+      api.callout(style, W / 2, 130, "#ffc400", 1);
+      api.ring(W / 2, H * 0.5, style === "fidget" ? "#ffc400" : api.color(), Math.min(W, H) * 0.5);
       hud();
     }
 
@@ -331,11 +259,11 @@
       get tier() { return eng.tier; },
       color: () => colors[eng.tier - 1],
       get intensity() { return intensity; },
-      get style() { return playStyle; }, // "flow" or "fidget"
+      get style() { return eng.style; }, // "flow" or "fidget"
       get held() { return downAt ? (performance.now() - downAt) / 1000 : 0; }, // seconds the tap is held down
       chargeOf: (held) => Math.max(0, Math.min(1, (held - HOLD_SEC) / 0.7)),
       get charge() { return api.chargeOf(api.held); }, // 0 for a tap; fills over 0.7 s after the hold starts
-      get rev() { return rev; }, // Fidget: 0 calm .. 1 mashing flat out
+      get rev() { return eng.rev; }, // Fidget: 0 calm .. 1 mashing flat out
       // Pick a value by intensity: api.pick({ chill: 13, normal: 10, intense: 8 })
       pick: (o) => (o[intensity] !== undefined ? o[intensity] : o.normal),
       get mode() { return mode; }, // the table mode running now ("Double Score", a game's own...)
@@ -345,14 +273,14 @@
       // Award points directly (a star collected, a bonus); they ride the multiplier too
       bonus(n, label, x, y) {
         if (eng.auto || !started) return;
-        if (playStyle !== "fidget") addPoints(n); // Fidget: the moment, not the points
+        if (eng.style !== "fidget") addPoints(n); // Fidget: the moment, not the points
         if (label) api.callout(label, x === undefined ? W / 2 : x, y === undefined ? H * 0.38 : y, "#ffc400", 0.9);
       },
       // Things the player did well. quality "PERFECT" | "CLEAN" | "GRAZE" plays a harmony;
       // handleSec feeds the pacer. Ignored during autopilot (the engine enforces it).
       score(n = 1, quality = "CLEAN", handleSec) {
         const prev = eng.tier;
-        if (eng.auto || !started || playStyle === "fidget") return false;
+        if (eng.auto || !started || eng.style === "fidget") return false;
         eng.score(n, quality, handleSec);
         // Points: 100 a hit, doubled for perfect, times the combo multiplier
         combo += n;
@@ -387,7 +315,7 @@
       // Something got past the player. Steps the streak down by a quarter; never during
       // autopilot, and the two after taking control back are forgiven.
       miss() {
-        if (!started || playStyle === "fidget") return false;
+        if (!started || eng.style === "fidget") return false;
         const counted = eng.clip();
         if (counted) {
           // Steps the multiplier down one level, the way the engine steps the streak down a
@@ -403,7 +331,7 @@
       },
       // A tip shown once ever (per id), in context, then never again: discovery over manuals
       hint(id, text) {
-        if (!started || playStyle === "fidget") return; // tips are for Flow play, not the demo or a fidget
+        if (!started || eng.style === "fidget") return; // tips are for Flow play, not the demo or a fidget
         const key = g.key + ".hint." + id;
         try {
           if (localStorage.getItem(key)) return;
@@ -493,7 +421,7 @@
     }
 
     function startMode() {
-      const pool = playStyle === "fidget" ? g.modes || [] : MODES;
+      const pool = eng.style === "fidget" ? g.modes || [] : MODES;
       const choices = pool.length > 1 ? pool.filter((m) => m !== lastMode) : pool;
       if (!choices.length) {
         modeClock = 0;
@@ -596,18 +524,18 @@
       q("[data-mult]").innerHTML = mult + "&times;";
       q("[data-mult]").classList.toggle("ready", mult > 1);
       q("[data-intensity]").textContent = q("[data-pintensity]").textContent = intensity;
-      q("[data-style]").textContent = playStyle;
-      q("[data-style]").classList.toggle("on", playStyle === "fidget");
+      q("[data-style]").textContent = eng.style;
+      q("[data-style]").classList.toggle("on", eng.style === "fidget");
       const nextRank = RANKS[RANKS.indexOf(rank) + 1];
       q("[data-rank]").textContent = rank.name + " \u00b7 " + rank.finish + " ball \u00b7 " + lifetime.toLocaleString() + " lifetime" + (nextRank ? " \u00b7 " + nextRank.name + " at " + nextRank.at.toLocaleString() : "");
-      Skin.lights(q("[data-lights]"), playStyle === "fidget" ? rev * 100 : eng.flowIndex * 100, playStyle === "fidget" && rev > 0.6 ? "#ffc400" : api.color());
+      Skin.lights(q("[data-lights]"), eng.style === "fidget" ? eng.rev * 100 : eng.flowIndex * 100, eng.style === "fidget" && eng.rev > 0.6 ? "#ffc400" : api.color());
       let label = eng.tier === 1 ? (eng.locked ? "In sync" : tierNames[0]) : tierNames[eng.tier - 1];
       let c = api.color();
       if (mode && started && !eng.auto) {
         label = mode + " " + Math.ceil(modeLeft) + "s" + (mode === "Hurry-Up" ? " \u00b7 " + Math.round(hurry).toLocaleString() + " \u00b7 " + Math.max(0, 5 - hurryHits) + " to go" : mode === "Jackpot" ? " \u00b7 " + pot.toLocaleString() : "");
         c = "#ffc400";
       }
-      if (playStyle === "fidget" && started) [label, c] = ["Press \u00b7 mash \u00b7 hold", "#ffc400"];
+      if (eng.style === "fidget" && started) [label, c] = ["Press \u00b7 mash \u00b7 hold", "#ffc400"];
       if (eng.paused) [label, c] = ["Paused", "#f6e6c0"];
       else if (eng.auto && started) [label, c] = [g.autoLabel || "Autopilot · " + (typing ? "type" : "tap") + " to take over", "#ffc400"];
       q("[data-label]").textContent = label;
@@ -618,12 +546,12 @@
       q("[data-cross]").style.display = eng.muted ? "" : "none";
     }
     setInterval(() => !eng.paused && hud(), 250);
-    setInterval(() => playStyle === "fidget" && !eng.paused && Skin.lights(q("[data-lights]"), rev * 100, rev > 0.6 ? "#ffc400" : api.color()), 60);
+    setInterval(() => eng.style === "fidget" && !eng.paused && Skin.lights(q("[data-lights]"), eng.rev * 100, eng.rev > 0.6 ? "#ffc400" : api.color()), 60);
 
     // Session numbers go to a host page (the pocket app logs them for tuning), every 20 s
     // of play and whenever autopilot takes over
     function reportSession() {
-      if (!started || window.parent === window || playStyle === "fidget") return;
+      if (!started || window.parent === window || eng.style === "fidget") return;
       window.parent.postMessage({ type: "flow:session", session: Object.assign(eng.telemetry(), { points, high: hi, intensity, rank: rank.name }) }, "*");
     }
     setInterval(() => started && !eng.auto && !eng.paused && reportSession(), 20000);
@@ -661,20 +589,18 @@
       if (!downAt) return;
       const held = (performance.now() - downAt) / 1000;
       downAt = 0;
-      lastInputAt = performance.now();
+      eng.release(held);
       if (!started || eng.paused) return;
-      fidgetRelease(held);
       if (g.onRelease) g.onRelease(api, held, e || {});
     }
     function action(e) {
-      lastInputAt = downAt = performance.now();
+      downAt = performance.now();
       if (!started) start();
       if (eng.paused) return setPaused(false);
       fidgetPress(e);
       if (g.onAction) g.onAction(api, e || {});
     }
     function letter(ch) {
-      lastInputAt = performance.now();
       if (!started) start();
       if (eng.paused) return;
       fidgetPress();
@@ -737,7 +663,6 @@
       else if (g.onKey && !eng.paused && g.onKey(e.key, api)) {
         // A game's own keys start the game too, like Space or a tap
         e.preventDefault();
-        lastInputAt = performance.now();
         fidgetPress();
         if (!started) start();
       }
@@ -774,16 +699,13 @@
       last = now;
       eng.update(dt);
       if (!eng.paused) {
-        const fidgetIdle = playStyle === "fidget" && !downAt && performance.now() - lastInputAt > FIDGET_IDLE_MS;
+        const fidgetIdle = eng.fidgetIdle(!!downAt);
         if ((!started || eng.auto || fidgetIdle) && g.autopilot) g.autopilot(dt, api); // attract, autopilot, or Fidget filling in
         tickModes(dt);
-        tickTiers(dt);
         if (g.update) g.update(dt, api);
         flash = Math.max(0, flash - dt * 1.4);
         bulbFlash = Math.max(0, bulbFlash - dt);
-        rev *= Math.pow(0.45, dt); // the meter eases back, slowly enough that slow pressing still shows
-        pressRate *= Math.pow(0.5, dt);
-        chase += (dt / eng.beatSec) * 2 * (1 + (playStyle === "fidget" ? rev * 3 : 0)); // bulbs chase faster as you rev
+        chase += (dt / eng.beatSec) * 2 * (1 + (eng.style === "fidget" ? eng.rev * 3 : 0)); // bulbs chase faster as you rev
         const drag = Math.pow(0.12, dt); // particles slow as they spread, then hang and fade
         for (let i = particles.length - 1; i >= 0; i--) {
           const p = particles[i];
@@ -853,7 +775,6 @@
     if (window.visualViewport) visualViewport.addEventListener("resize", resize);
     resize();
     if (g.setup) g.setup(api);
-    applyStyle(); // a saved Fidget choice takes effect from the start
     hud();
     requestAnimationFrame(frame);
     return api;

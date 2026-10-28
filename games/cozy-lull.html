@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Paper lanterns drift up from a sleeping village to Tibbet, a fluffy moon moth. Tap as each one reaches her and she lights it with her feathery antennae, sending it up the river of lanterns. A rhythm micro-game that finds your tempo.">
+<title>Lull</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/cozy/cozy-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Lull: a lantern night over a sleepy village on the hills. Tibbet, a fluffy moon moth with
+// feathery antennae and long-tailed wings, flutters high over the rooftops. Paper lanterns drift up
+// from the village, each reaching her exactly on a beat; tap as one does and she touches it with
+// her antennae and it lights, warm, and floats on up to join the river of lanterns winding into
+// the sky. Every eight lit, an aurora ribbon unfurls across the night. A lantern you miss drifts
+// on past, pale; nothing is lost.
+//
+// The five questions:
+// 1. On the beat: a lantern sets off from the hills, due at Tibbet four beats later, always on a
+//    whole beat and at least two beats after the last.
+// 2. Movement: lanterns rise at one steady speed (height is a function of the beat position);
+//    Tibbet flutters across to each one in the beat and a half before it arrives.
+// 3. The player taps. Every press is a note (api.eng.tap) and a beat of Tibbet's wings.
+// 4. Clean within ±0.3 beat of a lantern's beat (wider with assist, for lanterns not yet set off),
+//    perfect within ±0.1.
+// 5. The look: a baked sky with a moon over hills and a village with lit windows, far-off
+//    lanterns always drifting up from it, aurora ribbons, the river of lit lanterns drifting away,
+//    moon dust, and Tibbet. Now and then something happens: a night train along the far hill, a
+//    cloud crossing the moon, a soft firework far away, a little moth flying by, a shooting star.
+//    The timing cue is a ring of little lights closing between her antennae, where the lantern
+//    will be, gold on the beat.
+// Fidget (F): every press lights the nearest pale lantern, wherever it is, with a thread of moon
+// dust. Hold then let go for a wing gust; a full charge makes a wish: every lantern flares and a
+// shooting star crosses the sky.
+(() => {
+  "use strict";
+
+  const S = CozySkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const PAPER = ["#ffd58a", "#ffb3cf", "#ffbf9e", "#c8b4ff", "#ffe6a8"];
+  const WING = "#c8f0e0";
+  const AURORA = ["#9cf0d0", "#c8b4ff", "#ff9fc0", "#8fd8e8"];
+  const MOODS = [
+    { top: "#0e0a24", mid: "#24184a", low: "#4a2e66", clouds: ["#c8b4ff", "#8fd8e8", "#ff9fc0", "#c8b4ff", "#9cf0d0"], band: "#e8dcff", seed: 9, hill: ["#24163c", "#170e28"], rim: "#c8b4ff" },
+    { top: "#06142a", mid: "#0f3048", low: "#245a66", clouds: ["#9cf0d0", "#8fd8e8", "#c8b4ff", "#9cf0d0", "#ffd58a"], band: "#d8fff0", seed: 19, hill: ["#122a3a", "#0a1824"], rim: "#9cf0d0" },
+    { top: "#150a2c", mid: "#341a56", low: "#6a2e70", clouds: ["#ff9fc0", "#c8b4ff", "#ffbf9e", "#ff9fc0", "#8fd8e8"], band: "#ffd9ec", seed: 29, hill: ["#2c1640", "#1a0c28"], rim: "#ff9fc0" },
+    { top: "#140c22", mid: "#3a2440", low: "#7a4a4e", clouds: ["#ffd58a", "#ffbf9e", "#ff9fc0", "#ffd58a", "#c8b4ff"], band: "#fff0d0", seed: 41, hill: ["#33203a", "#1e1224"], rim: "#ffd58a" }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let lanT = null; // the tracker; lanT.list is { x, at, kind, window, state: "wait" | "lit" | "pale", litAt, drift, size }
+  let dust = [], gusts = [], threads = [];
+  let ribbons = 1, ribbonAt = -99, lit8 = 0; // aurora ribbons unfurled (1..4)
+  let lastX = 0.5;
+  let clock = 0, lastTier = 1, flapAt = -9, missAt = -99, hits = 0, wishAt = -99, star = null;
+  let sky = { from: 1, to: 1, t: 1 };
+  let home = { x: 0, at: -1e6 }; // where Tibbet waits before the first lantern
+  let bg = null; // the background happenings
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => ((u = clamp(u, 0, 1)), u * u * (3 - 2 * u));
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    // smaller on short screens (the pocket's frames), so everyone fits under the bar
+    const k = H < 520 ? clamp(H / 420, 0.55, 0.9) : clamp(Math.min(W / 360, H / 640), 0.9, 1.9);
+    const meet = H * (H > W ? 0.42 : 0.44), hills = H * (H > W ? 0.8 : 0.78);
+    // lanterns rise behind her and meet the tips of her antennae
+    L = { k, meet, hills, moth: 30 * k, lw: 18 * k, span: Math.min(W * 0.3, 260 * k) };
+    L.tip = meet - L.moth * 1.62; // between the tips of her antennae
+    L.rise = (hills + 40 * k - L.tip) / 4;
+    if (!home.x) home.x = W / 2;
+  }
+
+  const lanternY = (l, now) => L.tip + (l.at - now) * L.rise;
+  // Where Tibbet is: waiting by the last lantern, fluttering across to the next in time
+  function mothAt(now) {
+    let a = home, b = null;
+    for (const l of lanT.list) {
+      if (l.at <= now) a = l;
+      else {
+        b = l;
+        break;
+      }
+    }
+    if (!b) return { x: a.x, to: null };
+    const t0 = b.at - Math.min(1.5, b.at - a.at);
+    const u = smooth((now - t0) / (b.at - t0));
+    return { x: a.x + (b.x - a.x) * u, to: b, moving: u > 0 && u < 1 };
+  }
+
+  // ---- Sprites ------------------------------------------------------------------------------
+  // The scene in two layers: the sky and far hills behind the lanterns, and the near hill with
+  // its village in front, so lanterns rise from behind the rooftops
+  function skyLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "lull" + tier, W, H, (g) => paint(g, m, false));
+    ctx.globalAlpha = 1;
+  }
+  function villageLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.draw(ctx, S.sprite(ctx, "village" + tier + "|" + W + "x" + H, W, H, 0, 0, (g) => paint(g, m, true)), 0, 0);
+    ctx.globalAlpha = 1;
+  }
+  const ridge = (base, amp, f, p) => (x) => base - amp * (0.6 + 0.4 * Math.sin(x * f + p)) - amp * 0.25 * Math.sin(x * f * 3.1 + p);
+  const farRidge = (m) => ridge(L.hills - 30 * L.k, 40 * L.k, 0.006 / L.k, m.seed);
+  const moonAt = () => [W * 0.22, H * 0.15, 24 * L.k];
+  function paint(g, m, front) {
+    if (!front) {
+      S.dreamSky(g, W, H, m);
+      // a big soft moon, high on the left
+      const [mx, my, mr] = moonAt();
+      g.globalCompositeOperation = "lighter";
+      for (const [rr, a] of [[mr * 5, 0.08], [mr * 2.2, 0.16]]) {
+        const gr = g.createRadialGradient(mx, my, 0, mx, my, rr);
+        gr.addColorStop(0, S.rgba("#fff2e2", a));
+        gr.addColorStop(1, S.rgba("#fff2e2", 0));
+        g.fillStyle = gr;
+        g.fillRect(mx - rr, my - rr, rr * 2, rr * 2);
+      }
+      g.globalCompositeOperation = "source-over";
+      const body = g.createRadialGradient(mx - mr * 0.3, my - mr * 0.3, mr * 0.1, mx, my, mr);
+      body.addColorStop(0, "#fffaf2");
+      body.addColorStop(1, S.mix("#ffe6d0", m.rim, 0.25));
+      g.fillStyle = body;
+      g.beginPath();
+      g.arc(mx, my, mr, 0, TAU);
+      g.fill();
+      g.fillStyle = S.mixA("#e8c8c8", m.rim, 0.3, 0.35);
+      for (const [x, y, s] of [[-0.3, 0.2, 0.22], [0.35, -0.2, 0.15], [0.1, 0.5, 0.12]]) {
+        g.beginPath();
+        g.arc(mx + x * mr, my + y * mr, s * mr, 0, TAU);
+        g.fill();
+      }
+    }
+    const k = L.k, r = S.rng(m.seed + 5);
+    // far hills, then the near hill with the village
+    const fill = (fn, col, rim) => {
+      g.fillStyle = col;
+      g.beginPath();
+      g.moveTo(0, H);
+      for (let x = 0; x <= W + 6; x += 6) g.lineTo(x, fn(x));
+      g.lineTo(W, H);
+      g.fill();
+      g.strokeStyle = rim;
+      g.lineWidth = 1;
+      g.beginPath();
+      for (let x = 0; x <= W + 6; x += 6) g.lineTo(x, fn(x));
+      g.stroke();
+    };
+    if (!front) {
+      fill(farRidge(m), S.mix(m.hill[0], m.low, 0.4), S.rgba(m.rim, 0.15));
+      return;
+    }
+    const near = ridge(L.hills + 10 * k, 26 * k, 0.009 / k, m.seed + 2);
+    // the village on the near hill: little houses with warm windows
+    const houses = Math.round(W / (54 * k));
+    for (let i = 0; i < houses; i++) {
+      if (r() < 0.2) continue;
+      const x = (i + 0.2 + r() * 0.6) * (W / houses), y = near(x) + 6 * k, w = (18 + r() * 14) * k, h = (15 + r() * 12) * k;
+      g.fillStyle = m.hill[1];
+      g.fillRect(x + w * 0.18, y - h - w * 0.42, w * 0.14, w * 0.3);
+      g.fillRect(x - w / 2, y - h, w, h + 10 * k);
+      g.strokeStyle = S.rgba(m.rim, 0.3);
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(x - w * 0.62, y - h);
+      g.lineTo(x, y - h - w * 0.5);
+      g.lineTo(x + w * 0.62, y - h);
+      g.stroke();
+      g.beginPath();
+      g.moveTo(x - w * 0.62, y - h);
+      g.lineTo(x, y - h - w * 0.5);
+      g.lineTo(x + w * 0.62, y - h);
+      g.fill();
+      g.globalCompositeOperation = "lighter";
+      const wx = x - w * 0.18, wy = y - h * 0.55;
+      const gr = g.createRadialGradient(wx, wy, 0, wx, wy, 12 * k);
+      gr.addColorStop(0, "rgba(255,200,120,0.45)");
+      gr.addColorStop(1, "rgba(255,200,120,0)");
+      g.fillStyle = gr;
+      g.fillRect(wx - 12 * k, wy - 12 * k, 24 * k, 24 * k);
+      g.fillStyle = "#ffd58a";
+      g.fillRect(wx - 2.5 * k, wy - 3 * k, 5 * k, 5 * k);
+      if (r() < 0.5) g.fillRect(x + w * 0.15, wy - 3 * k, 4 * k, 5 * k);
+      g.globalCompositeOperation = "source-over";
+    }
+    fill(near, m.hill[1], S.rgba(m.rim, 0.25));
+    // a few round trees along the ridge
+    for (let i = 0; i < W / (90 * k); i++) {
+      const x = r() * W, y = near(x) + 2, s = (8 + r() * 8) * k;
+      g.fillStyle = m.hill[1];
+      g.beginPath();
+      g.arc(x, y - s, s, 0, TAU);
+      g.arc(x - s * 0.7, y - s * 0.6, s * 0.7, 0, TAU);
+      g.fill();
+    }
+    // a path of little lights winding down the hill from the village, and grass along the bottom
+    g.globalCompositeOperation = "lighter";
+    const top = near(W * 0.55) + 14 * k;
+    for (let i = 0; i < 16; i++) {
+      const u = i / 15, y = top + (H - 20 - top) * u * u, x = W * 0.55 + Math.sin(u * 5.5) * W * 0.18 * (0.3 + u);
+      const s = (1.5 + u * 2.5) * k;
+      const gr = g.createRadialGradient(x, y, 0, x, y, s * 6);
+      gr.addColorStop(0, "rgba(255,213,138,0.4)");
+      gr.addColorStop(1, "rgba(255,213,138,0)");
+      g.fillStyle = gr;
+      g.fillRect(x - s * 6, y - s * 6, s * 12, s * 12);
+      g.fillStyle = "#ffe6b8";
+      g.beginPath();
+      g.arc(x, y, s * 0.6, 0, TAU);
+      g.fill();
+    }
+    g.globalCompositeOperation = "source-over";
+    g.strokeStyle = S.mix(m.hill[1], m.rim, 0.12);
+    g.lineCap = "round";
+    for (let i = 0; i < W / 4; i++) {
+      const x = r() * W, h = (6 + r() * 14) * k, y = H - r() * 16 * k;
+      g.lineWidth = 1 + r();
+      g.beginPath();
+      g.moveTo(x, y);
+      g.quadraticCurveTo(x + 2, y - h * 0.6, x + (r() - 0.5) * 8, y - h);
+      g.stroke();
+    }
+  }
+
+  // A sky lantern, pale or lit (on 0..1 baked as two sprites); its flame is live
+  function lanternSprite(ctx, kind, on) {
+    const c = PAPER[kind], w = Math.round(L.lw), h = Math.round(L.lw * 1.35);
+    return S.sprite(ctx, "lan" + kind + on + w, w * 5, h * 4, w * 2.5, h * 2, (g) => {
+      const paper = on ? c : S.mix(c, "#6a5a8a", 0.4);
+      if (on)
+        S.blurred(g, c, 22, (g) => {
+          g.fillStyle = S.rgba(c, 0.6);
+          g.beginPath();
+          g.ellipse(0, 0, w, h, 0, 0, TAU);
+          g.fill();
+        });
+      // the body: rounded at the top, narrowing a little to the open mouth
+      const body = () => {
+        g.beginPath();
+        g.moveTo(-w * 0.72, h * 0.95);
+        g.bezierCurveTo(-w * 1.15, h * 0.1, -w * 1.05, -h * 1.05, 0, -h);
+        g.bezierCurveTo(w * 1.05, -h * 1.05, w * 1.15, h * 0.1, w * 0.72, h * 0.95);
+        g.closePath();
+      };
+      const gr = g.createRadialGradient(0, h * 0.5, 0, 0, 0, h * 1.3);
+      gr.addColorStop(0, on ? "#fffaf0" : S.mix(paper, "#ffffff", 0.2));
+      gr.addColorStop(0.55, on ? S.mix(c, "#ffffff", 0.35) : paper);
+      gr.addColorStop(1, on ? S.mix(c, "#a04a5a", 0.3) : S.mix(paper, "#1c1030", 0.4));
+      g.fillStyle = gr;
+      body();
+      g.fill();
+      // paper seams
+      g.strokeStyle = on ? S.mixA(c, "#8a3a4a", 0.4, 0.3) : "rgba(30,16,48,0.3)";
+      g.lineWidth = 0.8;
+      for (const f of [-0.45, 0, 0.45]) {
+        g.beginPath();
+        g.moveTo(f * w * 0.7, h * 0.95);
+        g.quadraticCurveTo(f * w * 1.3, 0, f * w * 0.6, -h * 0.98);
+        g.stroke();
+      }
+      g.fillStyle = on ? S.mix(c, "#6a2a3a", 0.5) : "#2a1a3a";
+      g.fillRect(-w * 0.72, h * 0.9, w * 1.44, h * 0.1);
+    });
+  }
+
+  // Tibbet: a fuzzy round body and head; wings and antennae are live, so they can flap and sway
+  function bodySprite(ctx) {
+    const R = Math.round(L.moth * 0.5);
+    return S.sprite(ctx, "tibbet" + R, R * 5, R * 7, R * 2.5, R * 3, (g) => {
+      S.blurred(g, "#fff2e2", 16, (g) => {
+        g.fillStyle = "rgba(255,242,226,0.5)";
+        g.beginPath();
+        g.ellipse(0, R * 0.6, R * 0.8, R * 1.5, 0, 0, TAU);
+        g.fill();
+      });
+      // the fluffy body: a stack of soft tufts
+      for (const [y, s, c] of [[R * 1.9, 0.55, "#e8d8ea"], [R * 1.3, 0.75, "#f2e6ee"], [R * 0.6, 0.9, "#fbf2f4"]]) {
+        const gr = g.createRadialGradient(-R * 0.2, y - R * 0.3, 0, 0, y, R * s);
+        gr.addColorStop(0, "#ffffff");
+        gr.addColorStop(1, c);
+        g.fillStyle = gr;
+        g.beginPath();
+        g.ellipse(0, y, R * s, R * s * 0.85, 0, 0, TAU);
+        g.fill();
+      }
+      // the head, with a ruff of fluff round it
+      g.fillStyle = "#fff6f4";
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * TAU;
+        g.beginPath();
+        g.arc(Math.cos(a) * R * 0.78, -R * 0.15 + Math.sin(a) * R * 0.62, R * 0.3, 0, TAU);
+        g.fill();
+      }
+      const gr = g.createRadialGradient(-R * 0.25, -R * 0.4, 0, 0, -R * 0.1, R * 0.95);
+      gr.addColorStop(0, "#ffffff");
+      gr.addColorStop(1, "#f6e2ea");
+      g.fillStyle = gr;
+      g.beginPath();
+      g.arc(0, -R * 0.1, R * 0.82, 0, TAU);
+      g.fill();
+    });
+  }
+  // One wing pair's shape, baked: the forewing and the long-tailed hindwing of a moon moth
+  function wingSprite(ctx, hind) {
+    const R = Math.round(L.moth);
+    return S.sprite(ctx, "wing" + hind + R, R * 3.4, R * 3.6, R * 0.3, R * 1.4, (g) => {
+      const path = () => {
+        g.beginPath();
+        if (!hind) {
+          g.moveTo(0, 0);
+          g.bezierCurveTo(R * 0.4, -R * 1.2, R * 1.8, -R * 1.3, R * 2.2, -R * 0.7);
+          g.bezierCurveTo(R * 2.3, -R * 0.1, R * 1.2, R * 0.3, 0, R * 0.25);
+        } else {
+          g.moveTo(0, R * 0.2);
+          g.bezierCurveTo(R * 1.1, R * 0.1, R * 1.6, R * 0.7, R * 1.2, R * 1.2);
+          // the long tail
+          g.bezierCurveTo(R * 1.1, R * 1.6, R * 1.4, R * 1.9, R * 1.25, R * 2.1);
+          g.bezierCurveTo(R * 0.9, R * 1.8, R * 0.85, R * 1.4, R * 0.6, R * 1.1);
+          g.bezierCurveTo(R * 0.3, R * 0.9, R * 0.1, R * 0.6, 0, R * 0.2);
+        }
+        g.closePath();
+      };
+      S.blurred(g, WING, 18, (g) => {
+        g.fillStyle = S.rgba(WING, 0.55);
+        path();
+        g.fill();
+      });
+      const lin = g.createLinearGradient(0, 0, R * 2, 0);
+      lin.addColorStop(0, "#f2fff8");
+      lin.addColorStop(0.6, WING);
+      lin.addColorStop(1, "#b4a8f0");
+      g.fillStyle = lin;
+      path();
+      g.fill();
+      // a lavender edge, veins, and a soft eyespot
+      g.strokeStyle = "rgba(200,180,255,0.9)";
+      g.lineWidth = 1.6;
+      path();
+      g.stroke();
+      g.strokeStyle = "rgba(120,170,160,0.35)";
+      g.lineWidth = 0.8;
+      for (const [x, y] of hind ? [[R, R * 0.8], [R * 1.2, R * 1.8]] : [[R * 1.9, -R * 0.9], [R * 2, -R * 0.4], [R * 1.4, -R * 1.1]]) {
+        g.beginPath();
+        g.moveTo(0, R * 0.1);
+        g.quadraticCurveTo(x * 0.5, y * 0.4, x, y);
+        g.stroke();
+      }
+      const ex = hind ? R * 0.8 : R * 1.25, ey = hind ? R * 0.65 : -R * 0.45, er = R * (hind ? 0.18 : 0.22);
+      g.fillStyle = "#ffd58a";
+      g.beginPath();
+      g.arc(ex, ey, er, 0, TAU);
+      g.fill();
+      g.fillStyle = "#ff9fc0";
+      g.beginPath();
+      g.arc(ex, ey, er * 0.55, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function light(api, l, perfect, ghost) {
+    l.state = "lit";
+    l.litAt = api.eng.beatPos();
+    const y = lanternY(l, l.litAt);
+    for (let i = 0; i < (perfect ? 16 : 10) && dust.length < 180; i++) {
+      const a = Math.random() * TAU, v = 30 + Math.random() * 80, life = 0.8 + Math.random() * 0.7;
+      dust.push({ x: l.x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 20, life, max: life, color: i % 3 ? PAPER[l.kind] : "#fff2e2", star: i % 4 === 0 });
+    }
+    flapAt = clock;
+    if (perfect && !ghost) api.ring(l.x, y, api.color(), 36 * L.k);
+    // eight lit: an aurora ribbon unfurls
+    if (++lit8 >= 8) {
+      lit8 = 0;
+      ribbons = Math.min(4, ribbons + 1);
+      ribbonAt = clock;
+    }
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // The shell's tracker spawns, judges, scores and plays autopilot; Lull says what a lantern is.
+  // A lantern stays while it's in the sky, and the last one passed stays while Tibbet waits by it.
+  function setup(api) {
+    lanT = api.track({
+      spawn() {
+        if (!W) return null;
+        // across from the last one, but not too far for her to flutter
+        let x = lastX + (Math.random() < 0.5 ? -1 : 1) * (0.25 + Math.random() * 0.75) * L.span / W;
+        if (x < 0.2 || x > 0.8) x = lastX - (x - lastX);
+        x = clamp(x, 0.18, 0.82);
+        lastX = x;
+        return { x: x * W, kind: Math.floor(Math.random() * PAPER.length), litAt: -99, drift: Math.random() * TAU, size: 0.9 + Math.random() * 0.2 };
+      },
+      note: (l) => l.kind / PAPER.length,
+      hit(l, { perfect, ghost }) {
+        light(api, l, perfect, ghost);
+        if (!ghost && ++hits === 16) api.hint("gust", 'Hold <span class="pb-kbd">Space</span>, let go: a wing gust');
+        return {}; // no points pop: the lantern lighting is the reward
+      },
+      miss(l, counted) {
+        l.state = "pale";
+        missAt = clock;
+        if (counted) api.hint("light", "Tap as a lantern rises between Tibbet's antennae, when the ring turns gold");
+      },
+      keep: (l, now) => riverY(l, now) >= -80 || !lanT.list.some((o) => o.at > l.at && o.at < now),
+      ready: false, // Fidget lights the nearest one in view, below
+      cue: false, // drawn in the garden's look, between her antennae
+      perfect: PERFECT
+    });
+    bg = S.happenings(HAPPENINGS);
+  }
+
+  // ---- Background happenings: occasional, varied, and away from Tibbet --------------------------
+  const side = () => (Math.random() < 0.5 ? -1 : 1);
+  const HAPPENINGS = [
+    // a shooting star
+    { dur: 1.4, init: () => ({ x: W * (0.3 + Math.random() * 0.5), y: H * (0.05 + Math.random() * 0.1), dir: side() }),
+      draw: (ctx, u, p) => S.shootingStar(ctx, p.x, p.y, p.dir * W * 0.4, H * 0.12, u, 3 * L.k) },
+    // a little night train runs along the far hill, its windows lit
+    { dur: 14, init: () => ({ dir: side() }),
+      draw(ctx, u, p) {
+        const fr = farRidge(MOODS[(lastTier - 1) % 4]), len = 7, gap = 13 * L.k;
+        for (let j = 0; j < len; j++) {
+          const x = (p.dir > 0 ? -len * gap + u * (W + len * gap * 2) : W + len * gap - u * (W + len * gap * 2)) - p.dir * j * gap;
+          if (x < -20 || x > W + 20) continue;
+          const y = fr(x) + 2 * L.k;
+          S.glow(ctx, x, y - 3 * L.k, 9 * L.k, "#ffd58a", 0.35);
+          ctx.fillStyle = "#ffe6b0";
+          ctx.fillRect(x - 4 * L.k, y - 5 * L.k, 8 * L.k, 3.2 * L.k);
+          if (j === 0) {
+            for (let s = 1; s <= 3; s++) S.glow(ctx, x + p.dir * 2 * L.k - p.dir * s * 6 * L.k, y - 9 * L.k - s * 5 * L.k, (4 + s * 2) * L.k, "#fff2e2", 0.12);
+          }
+        }
+      } },
+    // a soft cloud drifts across the moon
+    { dur: 12, init: () => ({ dir: side() }),
+      draw(ctx, u, p) {
+        const [mx, my, mr] = moonAt(), x = mx + p.dir * (u - 0.5) * mr * 10;
+        for (const [dx, dy, s] of [[0, 0, 1], [-1.1, 0.2, 0.8], [1.1, 0.25, 0.75], [0.4, -0.4, 0.7]]) S.glow(ctx, x + dx * mr, my + mr * 0.4 + dy * mr, mr * 1.4 * s, "#e8dcff", 0.22 * Math.sin(u * Math.PI));
+      } },
+    // a soft firework far off over the hills, blooming in pastel and drifting down
+    { dur: 3, init: () => ({ x: W * (Math.random() < 0.5 ? 0.15 + Math.random() * 0.15 : 0.7 + Math.random() * 0.15), y: H * (0.24 + Math.random() * 0.08), c: AURORA[Math.floor(Math.random() * 4)] }),
+      draw(ctx, u, p) {
+        const rise = clamp(u / 0.3, 0, 1);
+        if (rise < 1) S.glow(ctx, p.x, L.hills - (L.hills - p.y) * ease(rise), 4 * L.k, "#ffe6a8", 0.8);
+        else {
+          const v = (u - 0.3) / 0.7;
+          for (let j = 0; j < 14; j++) {
+            const a = (j / 14) * TAU, r = ease(v) * 34 * L.k;
+            S.twinkle(ctx, p.x + Math.cos(a) * r, p.y + Math.sin(a) * r + v * v * 16 * L.k, 6 * L.k, j % 2 ? p.c : "#fff2e2", (1 - v) * 0.8);
+          }
+        }
+      } },
+    // a little moth friend flutters across in front of the village, waving
+    { dur: 8, layer: 1, init: () => ({ dir: side(), y: L.hills - 30 * L.k }),
+      draw(ctx, u, p, t) {
+        const x = p.dir > 0 ? -20 + u * (W + 40) : W + 20 - u * (W + 40), y = p.y + Math.sin(t * 2.4) * 12 * L.k, f = 0.4 + 0.6 * Math.abs(Math.sin(t * 9)), s = 8 * L.k;
+        S.glow(ctx, x, y, s * 3, WING, 0.35);
+        ctx.fillStyle = S.rgba(WING, 0.9);
+        for (const sd of [-1, 1]) {
+          ctx.beginPath();
+          ctx.ellipse(x + sd * s * 0.8 * f, y - s * 0.2, s * 0.9 * f, s * 0.7, sd * 0.4, 0, TAU);
+          ctx.fill();
+        }
+        ctx.fillStyle = "#fbf2f4";
+        ctx.beginPath();
+        ctx.arc(x, y, s * 0.45, 0, TAU);
+        ctx.fill();
+        S.face(ctx, x, y, s * 0.3, "happy", 0, "#ff9fc0");
+      } }
+  ];
+
+  function onFire(api) {
+    const now = api.eng.beatPos();
+    if (api.style === "fidget") {
+      // the nearest pale lantern lights, wherever it is, along a thread of moon dust
+      const m = mothAt(now);
+      let l = null;
+      for (const x of lanT.list) {
+        if (x.state === "lit") continue;
+        const y = lanternY(x, now);
+        if (y < -20 || y > H) continue;
+        if (!l || Math.abs(x.at - now) < Math.abs(l.at - now)) l = x;
+      }
+      api.eng.tap({ height: l ? l.kind / PAPER.length : 0.5 });
+      if (l) {
+        threads.push({ x0: m.x, y0: L.tip, l, t: 0 });
+        light(api, l, false, true);
+      }
+      flapAt = clock;
+      return;
+    }
+    lanT.fire();
+    flapAt = clock;
+  }
+
+  // A hold then release: a gust of moon dust from her wings; a full charge makes a wish
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const m = mothAt(api.eng.beatPos());
+    if (gusts.length < 4) gusts.push({ x: m.x, y: L.meet, t: 0, size: 0.6 + c });
+    flapAt = clock;
+    if (c >= 1) {
+      wishAt = clock;
+      star = { t: 0, y: H * (0.1 + Math.random() * 0.15) };
+      api.callout("Make a wish", W / 2, H * 0.24, "#ffd58a", 1.2);
+      api.eng.chime();
+    }
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    if (bg) bg.update(dt);
+    const drag = Math.pow(0.2, dt);
+    for (let i = dust.length - 1; i >= 0; i--) {
+      const p = dust[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 10 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) dust.splice(i, 1);
+    }
+    for (let i = gusts.length - 1; i >= 0; i--) if ((gusts[i].t += dt) > 1.4) gusts.splice(i, 1);
+    for (let i = threads.length - 1; i >= 0; i--) if ((threads[i].t += dt) > 0.6) threads.splice(i, 1);
+    if (star && (star.t += dt) > 1.6) star = null;
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // After it's lit, a lantern drifts on up more slowly, swaying, growing smaller as it goes
+  function riverY(l, now) {
+    if (l.state !== "lit") return lanternY(l, now);
+    const t = now - l.litAt;
+    return lanternY(l, l.litAt) - t * L.rise * 0.24 - t * t * 0.4 * L.k;
+  }
+  function riverX(l, now) {
+    if (l.state !== "lit") return l.x;
+    const t = now - l.litAt;
+    return l.x + Math.sin(t * 0.5 + l.drift) * 16 * L.k * Math.min(1, t) + t * 5 * L.k * Math.sign(Math.sin(l.drift));
+  }
+
+  // ---- The look ---------------------------------------------------------------------------------
+  // Aurora: soft curtains of light hanging from a wavy line across the upper sky, swaying, one
+  // more for every eight lanterns lit. Each curtain is a strip baked once, stamped as light.
+  function curtainSprite(ctx, color) {
+    const h = Math.round(110 * L.k);
+    return S.sprite(ctx, "curtain" + color + h, 8, h, 4, 0, (g) => {
+      const lin = g.createLinearGradient(0, 0, 0, h);
+      lin.addColorStop(0, S.rgba(color, 0));
+      lin.addColorStop(0.12, S.rgba(color, 0.55));
+      lin.addColorStop(0.35, S.rgba(color, 0.25));
+      lin.addColorStop(1, S.rgba(color, 0));
+      g.fillStyle = lin;
+      g.fillRect(-4, 0, 8, h);
+    });
+  }
+  function drawAurora(ctx, now) {
+    const n = Math.round(W / (7 * L.k));
+    for (let i = 0; i < ribbons; i++) {
+      const born = i === ribbons - 1 && clock - ribbonAt < 3 ? ease((clock - ribbonAt) / 3) : 1;
+      const flare = i === ribbons - 1 && clock - ribbonAt < 1.5 ? 1 + (1.5 - (clock - ribbonAt)) : 1;
+      const sp = curtainSprite(ctx, AURORA[i % AURORA.length]);
+      const y0 = H * (0.08 + i * 0.06);
+      ctx.globalCompositeOperation = "lighter";
+      for (let j = 0; j < n * born; j++) {
+        const u = j / n;
+        const x = u * (W + 20) - 10;
+        const y = y0 + Math.sin(u * 4.2 + clock * 0.22 + i * 1.7) * 24 * L.k + Math.sin(u * 13 - clock * 0.35 + i) * 6 * L.k;
+        // the curtain's folds: brighter and longer here and there, rippling slowly
+        const fold = 0.5 + 0.5 * Math.sin(u * 23 + clock * 0.6 + i * 3);
+        ctx.globalAlpha = (0.11 + 0.2 * fold) * Math.min(1, flare) * (0.8 + 0.2 * Math.sin(clock * 0.5 + i)) * (j > n * born - 3 ? 0.5 : 1);
+        ctx.drawImage(sp.c, x - 4 * L.k, y, 16 * L.k, sp.h * (0.6 + 0.6 * fold));
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  function drawLantern(ctx, l, now, pulse) {
+    const lit = l.state === "lit";
+    const y = riverY(l, now), x = riverX(l, now);
+    if (y < -60 || y > H + 60) return;
+    const t = lit ? now - l.litAt : 0;
+    const far = lit ? clamp(1 - t * 0.04, 0.4, 1) : 1;
+    const s = l.size * far;
+    const flick = 0.85 + 0.15 * Math.sin(clock * 11 + l.drift * 5);
+    const wish = clock - wishAt < 1.5 ? 1 - (clock - wishAt) / 1.5 : 0;
+    if (lit) {
+      const on = ease(t / 0.4);
+      S.glow(ctx, x, y, L.lw * 4 * s * (1 + wish), PAPER[l.kind], (0.3 + 0.1 * pulse) * on + wish * 0.4);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(Math.sin(clock * 0.8 + l.drift) * 0.08);
+      ctx.scale(s, s);
+      if (on < 1) S.draw(ctx, lanternSprite(ctx, l.kind, 0), 0, 0);
+      ctx.globalAlpha = on;
+      S.draw(ctx, lanternSprite(ctx, l.kind, 1), 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+      S.glow(ctx, x, y + L.lw * 1.1 * s, 7 * L.k * s * flick, "#ffe6a8", 0.95);
+    } else {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(Math.sin(clock * 0.9 + l.drift) * 0.06);
+      ctx.scale(s, s);
+      S.draw(ctx, lanternSprite(ctx, l.kind, 0), 0, 0);
+      ctx.restore();
+      // a little flame waiting inside, a little brighter in a wish
+      S.glow(ctx, x, y + L.lw * 1.1 * s, 4 * L.k * flick, "#ffbf6a", 0.6 + wish * 0.4);
+      if (wish > 0) S.glow(ctx, x, y, L.lw * 3, PAPER[l.kind], wish * 0.5);
+
+    }
+  }
+
+  function drawMoth(ctx, now) {
+    const m = mothAt(now);
+    const R = L.moth;
+    const hover = Math.sin(clock * 2.1) * 4 * L.k + Math.sin(now * Math.PI) * 3 * L.k;
+    const x = m.x, y = L.meet + hover;
+    // wings: a slow flap on every beat, a quick one on a tap, quicker while she's flying
+    const tap = clock - flapAt < 0.3 ? Math.sin(((clock - flapAt) / 0.3) * Math.PI) : 0;
+    const beat = Math.pow(Math.max(0, Math.cos(frac(now) * Math.PI)), 2);
+    const flap = clamp(0.25 + 0.35 * beat + 0.4 * tap + (m.moving ? 0.25 * Math.abs(Math.sin(clock * 12)) : 0), 0, 1);
+    const open = 1 - flap * 0.65;
+    S.glow(ctx, x, y + R * 0.2, R * 3.4, WING, 0.18 + 0.1 * beat);
+    for (const s of [-1, 1]) {
+      for (const hind of [1, 0]) {
+        ctx.save();
+        ctx.translate(x + s * R * 0.12, y + R * (hind ? 0.35 : 0.05));
+        ctx.scale(s * open, 1);
+        ctx.rotate(hind ? 0.1 : -0.1);
+        S.draw(ctx, wingSprite(ctx, hind), 0, 0);
+        ctx.restore();
+      }
+    }
+    ctx.save();
+    ctx.translate(x, y);
+    S.draw(ctx, bodySprite(ctx), 0, 0);
+    // feathery antennae, swaying, tipped with light that glows brighter as a lantern nears
+    const left = m.to ? m.to.at - now : 9;
+    const near = clamp(1 - left / 1.6, 0, 1);
+    for (const s of [-1, 1]) {
+      const sw = Math.sin(clock * 1.7 + s) * 0.08 + tap * 0.2 * s;
+      const ax = s * R * 0.2, ay = -R * 0.45;
+      const ex = ax + s * R * (0.55 + sw), ey = ay - R * 1.05;
+      ctx.strokeStyle = "#e8d0c8";
+      ctx.lineWidth = 1.4 * L.k;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.quadraticCurveTo(ax + s * R * 0.05, ay - R * 0.6, ex, ey);
+      ctx.stroke();
+      // the feathery barbs
+      ctx.lineWidth = 0.9 * L.k;
+      ctx.strokeStyle = "rgba(240,220,210,0.85)";
+      for (let i = 1; i <= 6; i++) {
+        const u = i / 7, px = ax + (ex - ax) * u + s * R * 0.03 * Math.sin(u * Math.PI), py = ay + (ey - ay) * u;
+        const bl = R * 0.18 * Math.sin(u * Math.PI);
+        ctx.beginPath();
+        ctx.moveTo(px - bl * 0.8, py + bl * 0.4);
+        ctx.lineTo(px, py);
+        ctx.lineTo(px + bl * 0.8, py + bl * 0.4);
+        ctx.stroke();
+      }
+      S.glow(ctx, ex, ey, (6 + 8 * near + 6 * tap) * L.k, "#ffd58a", 0.5 + 0.5 * Math.max(near, tap));
+    }
+    const blink = frac(now / 5 + 0.3) < 0.03;
+    const mood = tap > 0.2 && clock - missAt > 0.3 ? "happy" : clock - missAt < 0.5 ? "o" : near > 0.3 ? "idle" : blink ? "blink" : "idle";
+    const look = m.to ? clamp((m.to.x - x) / L.span, -1, 1) * 0.6 : 0;
+    S.face(ctx, 0, -R * 0.05, R * 0.34, mood, look, "#ff9fc0");
+    ctx.restore();
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const m = MOODS[(api.tier - 1) % 4];
+    drawAurora(ctx, now);
+    bg.draw(ctx, 0);
+    // far-off lanterns always drifting up from the village, small and faint
+    for (let i = 0; i < 8; i++) {
+      const u = frac(clock * 0.012 + i / 8), x = W * (0.08 + 0.84 * frac(i * 0.618 + 0.1)) + Math.sin(clock * 0.3 + i) * 10 * L.k;
+      const y = L.hills - 10 * L.k - u * L.hills * 0.85, a = Math.sin(u * Math.PI) * 0.8;
+      S.glow(ctx, x, y, 7 * L.k, PAPER[i % PAPER.length], a * 0.6);
+      ctx.fillStyle = S.rgba(S.mix(PAPER[i % PAPER.length], "#ffffff", 0.4), a);
+      ctx.fillRect(x - 1.6 * L.k, y - 2.2 * L.k, 3.2 * L.k, 4.4 * L.k);
+    }
+    if (star) {
+      const u = star.t / 1.6, trail = [];
+      for (let j = 0; j < 10; j++) trail.push([W * (1.1 - (u - j * 0.02) * 1.3), star.y + (u - j * 0.02) * H * 0.18]);
+      S.streak(ctx, trail, 4 * L.k, "#fff2e2");
+    }
+    S.motes(ctx, W, L.hills, clock, ["#ffd58a", "#fff2c0", m.rim], { n: 14, size: 5, rise: 6, sway: 22, alpha: 0.5, seed: 27 });
+    // the river: lit lanterns drifting away, the farthest first
+    const order = lanT.list.slice().sort((a, b) => riverY(a, now) - riverY(b, now));
+    for (const l of order) if (l.state === "lit") drawLantern(ctx, l, now, pulse);
+    for (const t of threads) {
+      const u = t.t / 0.6, x1 = riverX(t.l, now), y1 = riverY(t.l, now), trail = [];
+      for (let j = 0; j <= 8; j++) {
+        const v = clamp(u * 1.6 - j * 0.05, 0, 1);
+        trail.push([t.x0 + (x1 - t.x0) * v, t.y0 + (y1 - t.y0) * v - Math.sin(v * Math.PI) * 30 * L.k]);
+      }
+      ctx.globalAlpha = 1 - u;
+      S.streak(ctx, trail, 3 * L.k, "#ffd58a");
+      ctx.globalAlpha = 1;
+    }
+    for (const l of order) if (l.state !== "lit") drawLantern(ctx, l, now, pulse);
+    if (sky.t < 1) villageLayer(ctx, sky.from, 1);
+    villageLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    // a warm mist over the village, breathing slowly
+    for (let i = 0; i < 4; i++) {
+      const x = W * (0.12 + 0.26 * i) + Math.sin(clock * 0.1 + i) * 30 * L.k;
+      S.glow(ctx, x, L.hills + 10 * L.k, 110 * L.k, i % 2 ? "#ffbf9e" : m.rim, 0.07 + 0.02 * Math.sin(clock * 0.4 + i));
+    }
+    bg.draw(ctx, 1);
+    drawMoth(ctx, now);
+    // the timing cue: little lights closing between her antennae, where the lantern will be
+    const nx = lanT.next();
+    if (nx) S.cue(ctx, api, nx.x, L.tip, nx.at - now, { size: L.lw * 1.25, color: PAPER[nx.kind], perfect: PERFECT });
+    for (const gst of gusts) {
+      const u = gst.t / 1.4;
+      for (let j = 0; j < 10; j++) {
+        const a = (j / 10) * TAU + u * 2;
+        const r = L.moth * (0.8 + ease(u) * 3 * gst.size);
+        S.twinkle(ctx, gst.x + Math.cos(a) * r, gst.y + Math.sin(a) * r * 0.6, 7 * L.k, AURORA[j % 4], (1 - u) * 0.8);
+      }
+    }
+    for (const p of dust) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, p.color, a);
+      else S.glow(ctx, p.x, p.y, 5 * L.k, p.color, a * 0.9);
+    }
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const x = mothAt(now).x;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = c >= 1 ? "#ffd58a" : WING;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(x, L.meet, L.moth * 2.4, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+  }
+
+  SpaceShell.mount({
+    skin: S,
+    setup,
+    key: "cozy-lull",
+    title: "Lull",
+    hint: "Tap when a lantern rises between Tibbet's glowing antennae",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Lantern light", "Aurora", "Wishing night"],
+    fidgetPoint: (api) => ({ x: mothAt(api.eng.beatPos()).x, y: L.meet }),
+    resize: layout,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

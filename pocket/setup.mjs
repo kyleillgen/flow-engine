@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // One-time setup for Flow Pocket on Windows, and a re-sync after the games change.
-//   node pocket/setup.mjs          download the runtime (if missing) and copy the games in
-//   node pocket/setup.mjs --sync   only copy the games in
+//   node pocket/setup.mjs          download the runtime (if missing) and install the cartridges
+//   node pocket/setup.mjs --sync   only install the cartridges
 //
 // Downloads, from the official Neutralinojs GitHub releases, pinned to v6.10.0:
 //   neutralinojs-v6.10.0.zip (8.1 MB; only neutralino-win_x64.exe is extracted)
 //   neutralino.js (18 KB, the client library)
 // Nothing else is fetched, and nothing is installed system-wide: the app uses the WebView2
 // runtime that ships with Windows 11.
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cartFiles, unpackTo } from "../carts/cart.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -23,21 +24,46 @@ const BIN = join(HERE, "bin");
 const EXE = join(HERE, "flow-pocket.exe");
 const RES = join(HERE, "resources");
 
-// The pocket app carries its own copy of the engine, shell, skin and games, in the same layout as
-// the repo, so the games' relative script paths work inside the app too
+// The pocket plays cartridges. Each one is installed into resources/carts/<id>/ in the repo's
+// layout, so its games' relative script paths work unchanged: every cartridge in carts/, then any
+// .cart file dropped into ~/.flow-pocket/carts/ (a dropped one with the same id wins). The
+// launcher reads the list from resources/carts/index.js.
 const ROOT = join(HERE, "..");
-const POCKET_GAMES = ["flow.html", "orbit.html", "flipper.html", "ricochet.html"];
-function syncGames() {
-  const put = (from, to) => {
-    mkdirSync(dirname(join(RES, to)), { recursive: true });
-    copyFileSync(join(ROOT, from), join(RES, to));
-  };
-  put("engine/flow-engine.js", "engine/flow-engine.js");
-  put("shell/flow-shell.js", "shell/flow-shell.js");
-  put("skins/pinball/pinball-skin.js", "skins/pinball/pinball-skin.js");
-  for (const f of ["oswald-latin.woff2", "inter-latin.woff2", "README.md"]) put("skins/pinball/fonts/" + f, "skins/pinball/fonts/" + f);
-  for (const g of POCKET_GAMES) put("games/" + g, "games/" + g);
-  console.log("engine, shell, skin and games copied into pocket/resources");
+const FIRST = "space"; // the cartridge the shelf starts with
+function syncCarts() {
+  const out = join(RES, "carts");
+  rmSync(out, { recursive: true, force: true });
+  // Copies from before cartridges, no longer used
+  for (const d of ["engine", "shell", "skins", "games"]) rmSync(join(RES, d), { recursive: true, force: true });
+  const carts = new Map();
+  for (const id of readdirSync(join(ROOT, "carts"))) {
+    if (!existsSync(join(ROOT, "carts", id, "cart.json"))) continue;
+    const { cart, files } = cartFiles(id);
+    for (const f of files) {
+      mkdirSync(dirname(join(out, id, f)), { recursive: true });
+      copyFileSync(join(ROOT, f), join(out, id, f));
+    }
+    carts.set(cart.id, cart);
+  }
+  const dropped = join(homedir(), ".flow-pocket", "carts");
+  if (existsSync(dropped)) {
+    for (const f of readdirSync(dropped).filter((f) => f.endsWith(".cart"))) {
+      try {
+        const tmp = join(out, ".unpack");
+        const cart = unpackTo(join(dropped, f), tmp);
+        if (!/^[a-z][a-z0-9-]*$/.test(cart.id || "")) throw new Error("bad id");
+        rmSync(join(out, cart.id), { recursive: true, force: true });
+        renameSync(tmp, join(out, cart.id));
+        carts.set(cart.id, cart);
+      } catch (e) {
+        console.log(`skipped ${f}: ${e.message}`);
+      }
+    }
+  }
+  const list = [...carts.values()].sort((a, b) => (a.id === FIRST ? -1 : b.id === FIRST ? 1 : a.name.localeCompare(b.name)));
+  const index = list.map(({ id, name, blurb, colors, games }) => ({ id, name, blurb, colors, games }));
+  writeFileSync(join(out, "index.js"), "window.POCKET_CARTS = " + JSON.stringify(index, null, 1) + ";\n");
+  console.log(`cartridges installed into pocket/resources/carts: ${list.map((c) => c.name).join(", ")}`);
   // Tell a running pocket to reload itself, so updated games show without restarting it
   try {
     const dir = join(homedir(), ".flow-pocket");
@@ -77,7 +103,7 @@ async function main() {
       await download(`https://github.com/neutralinojs/neutralino.js/releases/download/v${VERSION}/neutralino.js`, client);
     }
   }
-  syncGames();
+  syncCarts();
 }
 
 main().catch((e) => {

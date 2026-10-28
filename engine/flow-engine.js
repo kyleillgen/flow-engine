@@ -118,6 +118,10 @@
 
           this.isMuted = false;
           this.isInitialized = false;
+          // Set by create({ lofi, rain, minBpm }) before the first note
+          this.lofi = false;  // swung 16ths, softer kit, vinyl crackle, tape wow, a muffled master
+          this.rain = false;  // a rain-on-glass room tone under everything
+          this.floor = 88;    // the slowest tempo the synth will play
           this.voiceIndex = 0; // 0: LO-FI RHODES, 1: SYNTHWAVE PULSE, 2: AMBIENT DRIFT
 
           this.stepIndex = 0;
@@ -193,11 +197,78 @@
 
           this.bassFilter.connect(compressor);
           this.padFilter.connect(compressor);
-          compressor.connect(this.masterGain);
+          if (this.lofi) {
+              // The muffled, through-a-wall sound: a gentle low-pass on everything
+              const tone = this.ctx.createBiquadFilter();
+              tone.type = "lowpass";
+              tone.frequency.value = 3400;
+              tone.Q.value = 0.5;
+              compressor.connect(tone);
+              tone.connect(this.masterGain);
+          } else {
+              compressor.connect(this.masterGain);
+          }
           this.masterGain.connect(this.ctx.destination);
+          if (this.lofi) this.startBed("crackle");
+          if (this.rain) this.startBed("rain");
 
           this.nextStepTime = this.ctx.currentTime + 0.04;
           this.isInitialized = true;
+      }
+
+      // A looped bed of texture under the music: vinyl crackle (quiet noise with sparse pops)
+      // or rain on glass (soft, low-passed noise). Made once, from a few seconds of samples.
+      startBed(kind) {
+          const sr = this.ctx.sampleRate, len = sr * 3;
+          const buf = this.ctx.createBuffer(1, len, sr);
+          const d = buf.getChannelData(0);
+          let last = 0;
+          for (let i = 0; i < len; i++) {
+              const white = Math.random() * 2 - 1;
+              if (kind === "rain") {
+                  last = (last + 0.04 * white) / 1.04; // brownish: deeper than white noise
+                  d[i] = last * 3.2;
+              } else {
+                  d[i] = white * 0.05;
+              }
+          }
+          if (kind === "crackle") {
+              for (let k = 0; k < 18; k++) {
+                  const at = Math.floor(Math.random() * (len - 40)), amp = 0.3 + Math.random() * 0.6;
+                  for (let j = 0; j < 40; j++) d[at + j] += amp * Math.exp(-j / 6) * (j % 2 ? -1 : 1);
+              }
+          }
+          const src = this.ctx.createBufferSource();
+          src.buffer = buf;
+          src.loop = true;
+          const filter = this.ctx.createBiquadFilter();
+          filter.type = kind === "rain" ? "lowpass" : "bandpass";
+          filter.frequency.value = kind === "rain" ? 1300 : 2600;
+          filter.Q.value = 0.7;
+          const gain = this.ctx.createGain();
+          gain.gain.value = kind === "rain" ? 0.09 : 0.07;
+          src.connect(filter);
+          filter.connect(gain);
+          gain.connect(this.masterGain);
+          src.start();
+      }
+
+      // Tape wow: a slow wobble of a few cents, the same for every note at a given moment
+      wow(osc, time, length) {
+          if (!this.lofi) return;
+          const at = (t) => Math.sin(t * Math.PI * 2 * 0.45) * 7;
+          osc.detune.setValueAtTime(at(time), time);
+          osc.detune.linearRampToValueAtTime(at(time + length), time + length);
+      }
+
+      // A short burst of noise, made once, for the brushed snare
+      noise() {
+          if (this.noiseBuf) return this.noiseBuf;
+          const sr = this.ctx.sampleRate;
+          this.noiseBuf = this.ctx.createBuffer(1, Math.floor(sr * 0.3), sr);
+          const d = this.noiseBuf.getChannelData(0);
+          for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+          return this.noiseBuf;
       }
 
       cycleVoice() {
@@ -267,7 +338,7 @@
           const targetFeedback = tier >= 3 ? 0.44 : 0.28;
           this.delayFeedback.gain.setTargetAtTime(targetFeedback, now, 0.15);
 
-          const beatSec = 60 / Math.max(88, Math.min(136, bpm));
+          const beatSec = 60 / Math.max(this.floor, Math.min(136, bpm));
           this.delayNode.delayTime.setTargetAtTime(beatSec * 0.75, now, 0.1);
       }
 
@@ -414,7 +485,7 @@
       updateScheduler(bpm, flowIndex, tier, callbacks) {
           if (!this.isInitialized || !this.ctx) return;
           const now = this.ctx.currentTime;
-          const secondsPerBeat = 60.0 / Math.max(88, Math.min(136, bpm));
+          const secondsPerBeat = 60.0 / Math.max(this.floor, Math.min(136, bpm));
           this.beatSec = secondsPerBeat;
           const sixteenthDuration = secondsPerBeat / 4.0;
 
@@ -428,7 +499,9 @@
           this.autoMix += Math.max(-mixDt / fadeSec, Math.min(mixDt / fadeSec, this.autoTarget - this.autoMix));
 
           while (this.nextStepTime < now + 0.09) {
-              this.scheduleStep(this.stepIndex, this.nextStepTime, flowIndex, tier, callbacks);
+              // Lo-fi swings the 16ths: every second one lands a little late
+              const swing = this.lofi && this.stepIndex % 2 === 1 ? sixteenthDuration * 0.16 : 0;
+              this.scheduleStep(this.stepIndex, this.nextStepTime + swing, flowIndex, tier, callbacks);
               this.stepIndex = (this.stepIndex + 1) % 16;
               if (this.stepIndex === 0) {
                   this.barCount++;
@@ -486,6 +559,7 @@
                   padGain.gain.linearRampToValueAtTime(padAmp, time + 0.35 + 0.5 * this.autoMix);
                   padGain.gain.exponentialRampToValueAtTime(0.0008, time + padRelease);
 
+                  this.wow(padOsc, time, padRelease);
                   padOsc.connect(padGain);
                   padGain.connect(this.padFilter);
                   padOsc.start(time);
@@ -500,18 +574,39 @@
               const kickOsc = this.ctx.createOscillator();
               const kickGain = this.ctx.createGain();
               kickOsc.type = "sine";
-              const startPitch = voice === 1 ? 135 : 112;
+              // Lo-fi: a short, round sine kick down near 50 Hz
+              const startPitch = this.lofi ? 78 : voice === 1 ? 135 : 112;
               kickOsc.frequency.setValueAtTime(startPitch, time);
-              kickOsc.frequency.exponentialRampToValueAtTime(42, time + 0.13);
+              kickOsc.frequency.exponentialRampToValueAtTime(this.lofi ? 48 : 42, time + 0.13);
 
-              const kickAmp = (voice === 2 ? 0.22 : 0.30) * drumMix;
+              const kickAmp = (this.lofi ? 0.26 : voice === 2 ? 0.22 : 0.30) * drumMix;
+              const kickLen = this.lofi ? 0.22 : 0.16;
               kickGain.gain.setValueAtTime(kickAmp, time);
-              kickGain.gain.exponentialRampToValueAtTime(0.001, time + 0.16);
+              kickGain.gain.exponentialRampToValueAtTime(0.001, time + kickLen);
 
               kickOsc.connect(kickGain);
               kickGain.connect(this.masterGain);
               kickOsc.start(time);
-              kickOsc.stop(time + 0.17);
+              kickOsc.stop(time + kickLen + 0.01);
+          }
+
+          // Lo-fi: a brushed snare on two and four, noise with a slow attack
+          if (this.lofi && (step === 4 || step === 12) && this.autoMix < 0.9) {
+              const src = this.ctx.createBufferSource();
+              src.buffer = this.noise();
+              const bp = this.ctx.createBiquadFilter();
+              bp.type = "bandpass";
+              bp.frequency.value = 1700;
+              bp.Q.value = 0.8;
+              const g = this.ctx.createGain();
+              g.gain.setValueAtTime(0.001, time);
+              g.gain.linearRampToValueAtTime(0.07 * drumMix, time + 0.014);
+              g.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+              src.connect(bp);
+              bp.connect(g);
+              g.connect(this.masterGain);
+              src.start(time);
+              src.stop(time + 0.2);
           }
 
           // Off-beat dusty shaker / hat
@@ -519,13 +614,13 @@
               const hatOsc = this.ctx.createOscillator();
               const hatGain = this.ctx.createGain();
               hatOsc.type = "square";
-              hatOsc.frequency.setValueAtTime(voice === 0 ? 4200 : 5600, time);
+              hatOsc.frequency.setValueAtTime(this.lofi ? 3100 : voice === 0 ? 4200 : 5600, time);
 
               const hatFilter = this.ctx.createBiquadFilter();
               hatFilter.type = "highpass";
               hatFilter.frequency.value = 3000;
 
-              const amp = (step % 4 === 2 ? 0.026 : 0.012) * (1 - this.autoMix);
+              const amp = (step % 4 === 2 ? 0.026 : 0.012) * (1 - this.autoMix) * (this.lofi ? 0.45 : 1);
               hatGain.gain.setValueAtTime(Math.max(0.0006, amp), time);
               hatGain.gain.exponentialRampToValueAtTime(0.0005, time + 0.04);
 
@@ -598,11 +693,25 @@
               const leadGain = this.ctx.createGain();
 
               // LO-FI RHODES uses warm bell-like sine+triangle FM feel; SYNTHWAVE uses rich saw/triangle
-              leadOsc.type = voice === 0 ? "sine" : voice === 1 ? "sawtooth" : "triangle";
+              leadOsc.type = this.lofi || voice === 0 ? "sine" : voice === 1 ? "sawtooth" : "triangle";
               leadOsc.frequency.setValueAtTime(noteFreq, time);
 
-              const peak = queuedTap ? 0.135 : 0.065;
-              const decay = voice === 2 ? 0.38 : 0.25;
+              // Lo-fi: a muted, kalimba-like pluck, softer and rounder, with a quick tine on top
+              const peak = (queuedTap ? 0.135 : 0.065) * (this.lofi ? 0.75 : 1);
+              const decay = this.lofi ? 0.5 : voice === 2 ? 0.38 : 0.25;
+              this.wow(leadOsc, time, decay);
+              if (this.lofi && queuedTap) {
+                  const tine = this.ctx.createOscillator();
+                  const tg = this.ctx.createGain();
+                  tine.type = "triangle";
+                  tine.frequency.setValueAtTime(noteFreq * 3, time);
+                  tg.gain.setValueAtTime(0.02, time);
+                  tg.gain.exponentialRampToValueAtTime(0.0005, time + 0.08);
+                  tine.connect(tg);
+                  tg.connect(this.padFilter);
+                  tine.start(time);
+                  tine.stop(time + 0.09);
+              }
               leadGain.gain.setValueAtTime(0.001, time);
               leadGain.gain.linearRampToValueAtTime(peak, time + 0.01);
               leadGain.gain.exponentialRampToValueAtTime(0.0007, time + decay);
@@ -636,11 +745,11 @@
   // actions may make up one beat: Flow's taps use [0.5, 1, 2] (half time, on the beat,
   // double time); typing uses [2, 3, 4] keystrokes per beat. In-band fits win, then the
   // one nearest the current tempo, so the reading doesn't flip between folds.
-  function fitTempoFold(intervalMs, perBeat, currentBpm) {
+  function fitTempoFold(intervalMs, perBeat, currentBpm, minBpm = BAND_MIN) {
     let best = null;
     for (const k of perBeat) {
       const bpm = 60000 / (intervalMs * k);
-      const clamped = Math.max(BAND_MIN, Math.min(BAND_MAX, bpm));
+      const clamped = Math.max(minBpm, Math.min(BAND_MAX, bpm));
       const cost = Math.abs(bpm - clamped) * 4 + Math.abs(clamped - currentBpm);
       if (!best || cost < best.cost) best = { bpm: clamped, k, cost };
     }
@@ -660,6 +769,7 @@
         savedMinTaps: 4,
         stableTol: 1.5, // smoothed vs latest reading must agree within this many BPM
         idleSec: 2.5, // no action for this long (game time) starts autopilot
+        minBpm: BAND_MIN, // the slowest tempo it will settle on (a lo-fi game may ask for 72)
         tierAt: [8, 20, 40]
       },
       options || {}
@@ -692,7 +802,7 @@
     };
 
     c.useSavedTempo = (bpm) => {
-      if (!(bpm >= BAND_MIN && bpm <= BAND_MAX)) return false;
+      if (!(bpm >= o.minBpm && bpm <= BAND_MAX)) return false;
       c.bpm = c.detected = c.recent = bpm;
       c.saved = true;
       return true;
@@ -726,10 +836,10 @@
       let fit = null;
       if (c.fold) {
         const b = 60000 / (med * c.fold);
-        if (b >= BAND_MIN * 0.85 && b <= BAND_MAX * 1.15) fit = Math.max(BAND_MIN, Math.min(BAND_MAX, b));
+        if (b >= o.minBpm * 0.85 && b <= BAND_MAX * 1.15) fit = Math.max(o.minBpm, Math.min(BAND_MAX, b));
       }
       if (fit === null) {
-        const r = fitTempoFold(med, o.perBeat, c.bpm);
+        const r = fitTempoFold(med, o.perBeat, c.bpm, o.minBpm);
         fit = r.bpm;
         if (intervals.length >= 4) c.fold = r.k;
       }
@@ -862,6 +972,74 @@
   }
 
   // ==========================================================================
+  // Play style: Flow (the game, with score and stakes) or Fidget (a toy). Pure, like the
+  // controller; the engine plays its notes and saves the choice. Fidget turns the table around:
+  // the world bends to the player's hands instead of the hands fitting the world, so every press
+  // works (each game decides how, by checking eng.style) and nothing scores or misses. Presses
+  // are an instrument: slow ones ring long, quick runs climb the scale in short staccato notes,
+  // and `rev` (0 calm .. 1 flat out, log scale: 1 press a second shows a little, 10 all of it)
+  // is a meter of pressing speed. (Intense movement goes with better focus in ADHD studies, so
+  // speed is made expressive; nothing asks the player to decide anything.) Presses don't move
+  // the tempo, and autopilot waits until 4 s untouched.
+  // Fidget still travels: the tiers climb with presses and, slowly, with time (a step every two
+  // bars even idle). Going back to Flow is a handover, not a cut: the tier reached settles one
+  // step every four bars unless the streak holds it up, and the first three misses are forgiven.
+  // ==========================================================================
+  function createStyle(ctrl) {
+    const s = { style: "flow", rev: 0, pressRate: 0, climb: 0, energy: 0, floor: 1, floorBeats: 0, lastPress: 0, lastInput: 0, baseIdle: ctrl.o.idleSec, idleMs: 4000 };
+    s.set = (style, switching) => {
+      s.style = style === "fidget" ? "fidget" : "flow";
+      const fidget = s.style === "fidget";
+      ctrl.o.idleSec = fidget ? Infinity : s.baseIdle;
+      if (fidget && ctrl.auto) ctrl.setAuto(false);
+      if (switching && !fidget) {
+        s.floor = ctrl.tier;
+        s.floorBeats = 0;
+        ctrl.forgive = 3;
+      }
+      return s.style;
+    };
+    // Any input at all, so autopilot knows the player is still there
+    s.touch = (nowMs) => (s.lastInput = nowMs);
+    // A Fidget press: the note to play for it
+    s.press = (nowMs, rand = Math.random) => {
+      const gap = s.lastPress ? nowMs - s.lastPress : 1000;
+      s.lastPress = nowMs;
+      s.pressRate += (1000 / Math.max(60, gap) - s.pressRate) * 0.35;
+      s.energy += 1;
+      s.rev = Math.max(s.rev, Math.min(1, Math.log2(1 + s.pressRate) / Math.log2(11)));
+      s.climb = gap < 380 ? s.climb + 1 : Math.floor(rand() * 3); // quick runs climb the scale
+      return { height: 0.9 - ((s.climb % 9) / 9) * 0.8, sustain: 1.4 - 1.25 * s.rev, vel: 0.15 - 0.06 * s.rev };
+    };
+    // The release is the second half of the click, like a pen: a soft low clack
+    s.release = (heldSec) => ({ height: 0.95, sustain: heldSec > 0.35 ? 0.5 : 0.12, vel: heldSec > 0.35 ? 0.11 : 0.045 });
+    // Fidget with the button up and nothing pressed for 4 s: the game may play itself
+    s.idle = (nowMs, holding) => s.style === "fidget" && !holding && nowMs - s.lastInput > s.idleMs;
+    // Every frame (not while paused). Returns the new tier when Fidget climbs one, else 0.
+    s.update = (dt, beatSec, started) => {
+      s.rev *= Math.pow(0.45, dt); // the meter eases back, slowly enough that slow pressing still shows
+      s.pressRate *= Math.pow(0.5, dt);
+      const own = ctrl.computeTier(ctrl.streak);
+      if (s.style === "fidget") {
+        if (started) s.energy += dt / beatSec / 8; // a step every two bars, even idle
+        const t = Math.max(own, ctrl.computeTier(Math.floor(s.energy)));
+        const up = t > ctrl.tier ? t : 0;
+        ctrl.tier = t;
+        return up;
+      }
+      if (s.floor > own) {
+        if ((s.floorBeats += dt / beatSec) >= 16) {
+          s.floorBeats = 0;
+          s.floor--;
+        }
+        ctrl.tier = Math.max(own, s.floor);
+      }
+      return 0;
+    };
+    return s;
+  }
+
+  // ==========================================================================
   // The engine: controller + synth + timing calibration + stopping cues + measurement
   // ==========================================================================
   function store(key, value) {
@@ -879,7 +1057,11 @@
         key: "flowEngine", // storage namespace for this game
         phaseFollow: true, // light phase following after lock (alpha 0.2); off suits typing
         autoOnBlur: true, // looking away starts autopilot
-        flowCheck: true // occasional two-question check on entering autopilot
+        flowCheck: true, // occasional two-question check on entering autopilot
+        track: null, // the starting track, by name ("RAIN ON GLASS") or index; the player's choice wins
+        voice: null, // the starting voice, by name ("LO-FI RHODES") or index; the player's choice wins
+        lofi: false, // swung 16ths, a softer kit, vinyl crackle, tape wow and a muffled master
+        rain: false // a rain-on-glass room tone under the music
       },
       options || {}
     );
@@ -889,11 +1071,26 @@
 
     const ctrl = createController(o);
     const pacer = createPacer(o.pacing);
+    const style = createStyle(ctrl);
     const synth = new CoCreationResonanceSynth();
+    synth.lofi = !!o.lofi;
+    synth.rain = !!o.rain;
+    if (o.minBpm) synth.floor = Math.min(88, o.minBpm - 8); // room for the wind-down's slowing
+    // A game's own starting music; the player's saved choice below overrides it
+    const pick = (v, list) => (typeof v === "number" ? v : list.indexOf(String(v).toUpperCase()));
+    setTrack(o.track !== null ? Math.max(0, pick(o.track, TRACKS.map((t) => t.name))) : 0);
+    if (o.voice !== null) synth.voiceIndex = Math.max(0, pick(o.voice, GROOVE_VOICES));
     const TEMPO_KEY = o.key + ".tempo";
+    const STYLE_KEY = o.key + ".style";
     const PREFS_KEY = o.key + ".prefs";
     const OFFSET_KEY = "flowEngine.offsetMs"; // a property of the device, shared by all games
     ctrl.useSavedTempo(parseFloat(store(TEMPO_KEY)));
+    // ?tier=2..4 shows a tier's look without playing up to it (for reviewing art; scores as usual)
+    const previewTier = parseInt(params.get("tier"), 10);
+    if (previewTier >= 2 && previewTier <= 4) {
+      ctrl.streak = ctrl.best = ctrl.o.tierAt[previewTier - 2];
+      ctrl.tier = ctrl.computeTier(ctrl.streak);
+    }
 
     let level = 0.8;
     let offsetMs = Math.max(-150, Math.min(150, parseInt(store(OFFSET_KEY) || "0", 10) || 0));
@@ -906,7 +1103,7 @@
     let handoverAt = null;
     let handoverGap = 0;
     const timing = { meanAsync: 0, samples: 0 };
-    const listeners = { beat: [], lock: [], auto: [], manual: [], pause: [], signal: [] };
+    const listeners = { beat: [], lock: [], auto: [], manual: [], pause: [], signal: [], style: [], tier: [] };
     const emit = (evt, arg) => listeners[evt].forEach((fn) => fn(arg));
 
     try {
@@ -992,7 +1189,21 @@
     }
 
     // About one session in five, after 45 s of play, on entering autopilot: two flow items
-    // (fluency, absorption; 1-7) and a time estimate, stored with the session's numbers
+    // (fluency, absorption; 1-7) and a time estimate, stored with the session's numbers.
+    // The panel's look belongs to the shell: it's plain markup with fe-check classes, and the
+    // default below sits inside :where(), so any rule a shell writes for those classes wins.
+    // Classes: fe-check (the panel), fe-check-head, fe-check-title, fe-check-close,
+    // fe-check-note, fe-check-scale (a row of 1-7 buttons; the chosen one gets .on), fe-check-est.
+    const CHECK_CSS = `
+    :where(.fe-check) { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(340px, calc(100vw - 32px)); z-index: 50; background: #020617; border: 1px solid #1e293b; border-radius: 12px; padding: 12px 14px; color: #cbd5e1; font: 12px system-ui, sans-serif; }
+    :where(.fe-check-head) { display: flex; justify-content: space-between; margin-bottom: 6px; }
+    :where(.fe-check-title) { color: #e2e8f0; font-weight: 700; }
+    :where(.fe-check-close) { background: none; border: 0; color: #64748b; font-size: 14px; cursor: pointer; }
+    :where(.fe-check-note) { color: #64748b; }
+    :where(.fe-check-scale) { display: flex; gap: 4px; margin: 6px 0 10px; }
+    :where(.fe-check-scale button) { flex: 1; padding: 6px 0; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #cbd5e1; font: 600 12px monospace; cursor: pointer; }
+    :where(.fe-check-scale button.on) { background: #155e75; }
+    :where(.fe-check-est) { width: 60px; margin-left: 4px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 2px 4px; }`;
     let checkEl = null;
     function maybeAskFlowCheck() {
       if (!o.flowCheck || tel.check || checkEl || tel.activeSec < 45) return;
@@ -1000,18 +1211,20 @@
       store("flowEngine.sessions", String(count));
       tel.check = "skipped";
       if (count % 5 !== 0) return;
-      const scale = (name) =>
-        `<div style="display:flex;gap:4px;margin:6px 0 10px">${[1, 2, 3, 4, 5, 6, 7]
-          .map((n) => `<button data-q="${name}" data-v="${n}" style="flex:1;padding:6px 0;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#cbd5e1;font:600 12px monospace">${n}</button>`)
-          .join("")}</div>`;
+      if (!document.getElementById("fe-check-style")) {
+        const style = document.createElement("style");
+        style.id = "fe-check-style";
+        style.textContent = CHECK_CSS;
+        document.head.prepend(style); // first, so a shell's own sheet comes after it
+      }
+      const scale = (name) => `<div class="fe-check-scale">${[1, 2, 3, 4, 5, 6, 7].map((n) => `<button data-q="${name}" data-v="${n}">${n}</button>`).join("")}</div>`;
       checkEl = document.createElement("div");
-      checkEl.style.cssText =
-        "position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(340px,calc(100vw - 32px));z-index:50;background:#020617;border:1px solid #1e293b;border-radius:12px;padding:12px 14px;color:#cbd5e1;font:12px system-ui,sans-serif";
+      checkEl.className = "fe-check";
       checkEl.innerHTML =
-        `<div style="display:flex;justify-content:space-between;margin-bottom:6px"><b style="color:#e2e8f0">Quick check (optional)</b><button data-close style="background:none;border:0;color:#64748b;font-size:14px">✕</button></div>` +
-        `<div>That ran fluidly and smoothly <span style="color:#64748b">(1 no – 7 yes)</span></div>${scale("fluency")}` +
-        `<div>I was absorbed and lost track of time <span style="color:#64748b">(1–7)</span></div>${scale("absorption")}` +
-        `<label>About how many minutes did that feel like? <input data-est type="number" min="0" step="0.5" style="width:60px;margin-left:4px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;padding:2px 4px"></label>`;
+        `<div class="fe-check-head"><span class="fe-check-title">Quick check (optional)</span><button class="fe-check-close" data-close aria-label="Close">✕</button></div>` +
+        `<div>That ran fluidly and smoothly <span class="fe-check-note">(1 no – 7 yes)</span></div>${scale("fluency")}` +
+        `<div>I was absorbed and lost track of time <span class="fe-check-note">(1–7)</span></div>${scale("absorption")}` +
+        `<label>About how many minutes did that feel like? <input class="fe-check-est" data-est type="number" min="0" step="0.5"></label>`;
       tel.check = { fluency: null, absorption: null, estimatedMin: null, actualMin: +(tel.activeSec / 60).toFixed(2) };
       checkEl.addEventListener("pointerdown", (e) => e.stopPropagation());
       checkEl.addEventListener("keydown", (e) => e.stopPropagation());
@@ -1020,7 +1233,7 @@
         if (!b) return;
         if (b.hasAttribute("data-close")) return closeFlowCheck();
         tel.check[b.dataset.q] = +b.dataset.v;
-        checkEl.querySelectorAll(`[data-q="${b.dataset.q}"]`).forEach((x) => (x.style.background = x === b ? "#155e75" : "#0f172a"));
+        checkEl.querySelectorAll(`[data-q="${b.dataset.q}"]`).forEach((x) => x.classList.toggle("on", x === b));
         saveTelemetry();
       });
       checkEl.querySelector("[data-est]").addEventListener("input", (e) => {
@@ -1169,6 +1382,8 @@
           else tel.autoSec += dt;
           drainEvents();
         }
+        const climbed = style.update(dt, eng.beatSec, started);
+        if (climbed) emit("tier", climbed); // Fidget reached a new tier (Flow's come back from score())
         // Until audio is running (browsers need a gesture first), a silent clock keeps the
         // same tempo, so games can play themselves in attract mode before anyone taps. It keeps
         // running until the audio clock has scheduled its first beat, so motion never freezes
@@ -1208,6 +1423,7 @@
       },
       // handleSec (optional): how long the player took on this item, for the pacer
       score(n = 1, quality, handleSec) {
+        if (style.style === "fidget") return false; // Fidget: nothing scores or misses
         const prevTier = ctrl.tier;
         if (!ctrl.score(n)) return false;
         pacer.record(handleSec, true);
@@ -1217,6 +1433,7 @@
         return ctrl.tier > prevTier;
       },
       clip() {
+        if (style.style === "fidget") return false;
         if (ctrl.forgive > 0) {
           ctrl.forgive--;
           return false;
@@ -1278,6 +1495,41 @@
         ctrl.manualLock = !ctrl.manualLock;
         return ctrl.manualLock;
       },
+      // ---- Flow or Fidget (see createStyle). A shell shows the switch and passes presses on;
+      // each game decides what "every press works" means for it, by checking eng.style.
+      setStyle(next) {
+        applyStyle(next, true);
+        store(STYLE_KEY, style.style);
+        emit("style", style.style);
+        return style.style;
+      },
+      toggleStyle() {
+        return eng.setStyle(style.style === "fidget" ? "flow" : "fidget");
+      },
+      // Every press (tap, letter, game key), in either style. In Fidget it plays the press's
+      // note and revs the meter, and returns that note; otherwise null.
+      press() {
+        const now = performance.now();
+        style.touch(now);
+        if (paused || style.style !== "fidget") return null;
+        const n = style.press(now);
+        eng.pluck(n.height, n.sustain, n.vel);
+        return n;
+      },
+      // The press let go after heldSec: in Fidget, a soft clack
+      release(heldSec) {
+        style.touch(performance.now());
+        if (!started || paused || style.style !== "fidget") return;
+        const n = style.release(heldSec);
+        eng.pluck(n.height, n.sustain, n.vel);
+      },
+      // True in Fidget when nothing is held and nothing's been pressed for 4 s: the game may
+      // play itself (the engine's own autopilot stays off in Fidget)
+      fidgetIdle(holding) {
+        return style.idle(performance.now(), holding);
+      },
+      get style() { return style.style; },
+      get rev() { return style.rev; },
       telemetry: summary,
       history: () => {
         try {
@@ -1289,7 +1541,7 @@
       get started() { return started; },
       get paused() { return paused; },
       get bpm() { return ctrl.bpm; },
-      get beatSec() { return 60 / Math.max(88, Math.min(136, ctrl.bpm * (1 - 0.05 * ctrl.windDown))); },
+      get beatSec() { return 60 / Math.max(synth.floor, Math.min(136, ctrl.bpm * (1 - 0.05 * ctrl.windDown))); },
       get locked() { return ctrl.locked; },
       get auto() { return ctrl.auto; },
       get tier() { return ctrl.tier; },
@@ -1301,8 +1553,19 @@
       get muted() { return synth.isMuted; },
       get volume() { return level; }
     };
+    // Fidget's presses are heard but not measured, so mashing can't drag the player's tempo,
+    // timing or telemetry away from their natural rhythm; and Fidget plays its own notes
+    // instead of the grid-snapped lead
+    function applyStyle(next, switching) {
+      style.set(next, switching);
+      eng.quietLead = eng.holdTempo = style.style === "fidget";
+      drainEvents();
+    }
+    applyStyle(store(STYLE_KEY), false); // the player's last choice for this game
+    // ?test=1 hands the engine to a test harness (to press exactly on the beat, say)
+    if (params.get("test") === "1") window.flowEngine = eng;
     return eng;
   }
 
-  window.FlowEngine = { create, createController, createPacer, fitTempo, BAND_MIN, BAND_MAX, TRACKS, version: 1 };
+  window.FlowEngine = { create, createController, createPacer, createStyle, fitTempo, BAND_MIN, BAND_MAX, TRACKS, version: 1 };
 })();

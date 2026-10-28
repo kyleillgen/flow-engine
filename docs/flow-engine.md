@@ -36,7 +36,12 @@ const eng = FlowEngine.create({
   phaseFollow: true,      // nudge the beat toward the player after lock (off for typing)
   tierAt: [8, 20, 40],    // streak for tiers 2, 3 and 4
   autoOnBlur: true,
-  flowCheck: true
+  flowCheck: true,
+  track: "RAIN ON GLASS", // the starting track (name or index); the player's saved choice wins
+  voice: "LO-FI RHODES",  // the starting voice, likewise
+  minBpm: 72, startBpm: 80, // a slower floor than the default 96 (start near it: tempo moves ~3% a bar)
+  lofi: true,             // swung 16ths, a softer kit with a brushed snare, vinyl crackle, tape wow, a muffled master
+  rain: true              // a rain-on-glass room tone under the music
 });
 
 eng.start();                         // from the first user gesture (audio needs one)
@@ -55,15 +60,27 @@ eng.chime();                         // phrase celebration shimmer
 eng.setAuto(on); eng.pause(on);
 eng.cycleTrack(); eng.cycleVoice(); eng.toggleMute(); eng.changeVolume(0.1);
 eng.adjustOffset(10); eng.toggleHold();
+
+// Flow or Fidget (the player's choice, saved per game). In Fidget nothing scores or misses,
+// presses are heard but don't move the tempo, the tiers climb with presses and time, and
+// autopilot waits for 4 s untouched. Going back to Flow eases the tier down and forgives 3 misses.
+eng.setStyle("fidget"); eng.toggleStyle(); eng.style;   // "flow" | "fidget"; emits "style"
+eng.press();                         // every press, either style: in Fidget plays its note, revs the meter
+eng.release(heldSec);                // the press let go: in Fidget a soft clack
+eng.fidgetIdle(holding);             // Fidget and 4 s untouched: the game may play itself
+eng.rev;                             // 0 calm .. 1 mashing flat out
+eng.on("tier", (t) => {});           // Fidget reached a new tier
 eng.telemetry(); eng.history();
 
 eng.bpm; eng.beatSec; eng.locked; eng.auto; eng.paused; eng.tier; eng.streak;
 eng.assist; eng.flowIndex; eng.trackName; eng.voiceName; eng.muted; eng.volume; eng.milestones;
 ```
 
-`FlowEngine.createController()` and `FlowEngine.createPacer()` are the pure state machines underneath, with no audio and no DOM. The controller enforces the autopilot rule: `score` and `clip` are ignored while autopilot is on. Its contract tests are in `tests/flow-engine.test.cjs` (run `node --test tests/flow-engine.test.cjs`). They cover tempo locking for steady tappers, half- and double-time folding, typing rhythms with pauses, slow re-syncs (no more than 1.5% per bar), autopilot (including the rule that it never scores or costs), misses, assist, and the pacer (follows capacity, adds and returns room, never faster than capacity, waits between changes).
+The occasional flow check (`flowCheck: true`) is the one piece of UI the engine draws. Its look belongs to the shell: it's plain markup with `fe-check` classes (`fe-check`, `-head`, `-title`, `-close`, `-note`, `-scale` with `.on` on the chosen button, `-est`). The engine's own plain style is a zero-specificity default, so any rule a shell writes for those classes wins. The pinball shell keeps the default; the space shell restyles it.
 
-Experiment switches work in any game: `?phase=frozen` and `?milestones=off`.
+`FlowEngine.createController()`, `FlowEngine.createPacer()` and `FlowEngine.createStyle()` are the pure state machines underneath, with no audio and no DOM. The controller enforces the autopilot rule: `score` and `clip` are ignored while autopilot is on. Its contract tests are in `tests/flow-engine.test.cjs` (run `node --test tests/flow-engine.test.cjs`). They cover tempo locking for steady tappers, half- and double-time folding, typing rhythms with pauses, slow re-syncs (no more than 1.5% per bar), autopilot (including the rule that it never scores or costs), misses, assist, and the pacer (follows capacity, adds and returns room, never faster than capacity, waits between changes).
+
+Experiment switches work in any game: `?phase=frozen` and `?milestones=off`. For reviewing and testing: `?tier=2` to `?tier=4` starts at that tier, and `?test=1` puts the engine on `window.flowEngine` (the space shell adds `window.flowTest` with the shell's api and trackers), so a harness can press exactly on the beat.
 
 ## Fitting the tempo
 

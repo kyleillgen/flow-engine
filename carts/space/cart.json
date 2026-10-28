@@ -1,0 +1,22 @@
+{
+  "id": "space",
+  "name": "Space",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "Cozy neon space: little aliens, a glowing jellyfish, moons, a moon garden, a whale and the stars.",
+  "colors": ["#7fe9ff", "#ff8fd8"],
+  "files": [
+    "shell/space-shell.js",
+    "skins/neon/neon-skin.js",
+    "skins/pinball/fonts/oswald-latin.woff2",
+    "skins/pinball/fonts/inter-latin.woff2"
+  ],
+  "games": [
+    { "file": "games/nova.html", "label": "Nova", "hint": "Fire as each diver drops into your sights" },
+    { "file": "games/tidelight.html", "label": "Tide", "hint": "Pulse while the hoop's inner ring is gold" },
+    { "file": "games/skip.html", "label": "Skip", "hint": "Tap as Bobo lands on each moon" },
+    { "file": "games/bloom.html", "label": "Bloom", "hint": "Tap as each seed touches the soil" },
+    { "file": "games/hum.html", "label": "Hum", "hint": "Tap as each star krill reaches her" },
+    { "file": "games/stargaze.html", "label": "Star", "hint": "Tap as the thread reaches each star" }
+  ]
+}

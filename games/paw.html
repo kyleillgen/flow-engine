@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="A felt fish swings on a string, back to Biscuit the café cat on the beat. Tap as it reaches him and he bats it away. A rhythm micro-game that finds your tempo.">
+<title>Paw</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/cafe/cafe-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Paw: closing time, and Biscuit the café cat is wide awake. A felt fish hangs on a string from
+// a wand and swings back to him, reaching his paw on a whole beat. Tap as it arrives and he bats
+// it away; right on it and he purrs. Missed, it bops him gently on the nose; nothing is lost.
+//
+// The swing is a function of the beat position. From one arrival a to the next b the fish swings
+// out for a beat, sways at the far end, then swings back in over the last two beats (or makes one
+// smooth arc when they're close). Clean is ±0.3 beat (wider with assist, for arrivals not yet
+// scheduled), perfect ±0.1.
+// Fidget (F): every press is a swipe that catches the fish wherever it is. Hold then let go for a
+// pounce; a full charge is a flip. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = CafeSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const FISH = ["#a3b596", "#d9a093", "#8fa3b5", "#e8cf8f"];
+
+  let W = 0, H = 0, L = {};
+  let track = { list: [] }; // the shell's tracker; swings: { at, state: "wait" | "hit" | "missed", window, kind }
+  let sparks = [], pops = [];
+  let clock = 0, hits = 0;
+  // Life in the background, on its own clock and never on a beat: the street through the window,
+  // a moth that finds the floor lamp now and then, and Biscuit's ears
+  const life = S.street();
+  let moth = { on: 0, wait: 15 + Math.random() * 20 }, stir = 5 + Math.random() * 8;
+  let swipe = -9, spin = 0, spinV = 0, happy = 0, blink = 0, ear = 0;
+  let grab = null; // Fidget: { t0, from: {x, y} } the fish pulled to the paw
+  let pounce = null; // { t0, k, full }
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => {
+    u = clamp(u, 0, 1);
+    return u * u * (3 - 2 * u);
+  };
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const size = Math.min(H * 0.17, W * 0.24, 130);
+    const u = size / 10;
+    const catX = W * 0.6, floor = H * 0.8;
+    const paw = { x: catX - 6 * u, y: floor - 6.4 * u };
+    // the wand (out of sight above) hangs the fish over the middle of its swing, so the far end
+    // mirrors the paw on screen and the arc stays shallow
+    const pivot = { x: Math.max((paw.x + W * 0.1) / 2, paw.x - size * 2.6), y: -H * 0.25 };
+    // the string ends at the fish's tail, so its body hangs right at the paw
+    const knot = { x: paw.x, y: paw.y - size * 0.32 * 1.4 };
+    const len = Math.hypot(knot.x - pivot.x, knot.y - pivot.y);
+    const near = Math.atan2(knot.x - pivot.x, knot.y - pivot.y);
+    const ww = Math.min(W * 0.26, 220);
+    L = { size, u, catX, floor, paw, pivot, len, near, far: -near * 0.9, fish: size * 0.32, win: { x: W - ww - W * 0.07, y: H * 0.14, w: ww, h: ww * 1.25 } };
+  }
+  // The string's angle at beat position now (0 hangs straight down; positive swings right, to the cat)
+  function angleAt(now) {
+    let a = null, b = null;
+    for (const s of track.list) {
+      if (s.at <= now) a = s;
+      else {
+        b = s;
+        break;
+      }
+    }
+    const aAt = a ? a.at : -1e9;
+    const sway = (t) => L.far + Math.sin(t * Math.PI * 0.5) * 0.05;
+    if (b && b.at - aAt < 3) return L.near + (L.far - L.near) * Math.sin(Math.PI * clamp((now - aAt) / (b.at - aAt), 0, 1));
+    if (now < aAt + 1) return L.near + (L.far - L.near) * smooth(now - aAt);
+    if (!b || now < b.at - 2) return sway(now - aAt - 1);
+    const from = sway(b.at - 2 - aAt - 1);
+    return from + (L.near - from) * smooth((now - (b.at - 2)) / 2) * (1 + 0.04 * Math.sin(Math.PI * clamp((now - (b.at - 2)) / 2, 0, 1)));
+  }
+  function fishAt(now) {
+    const a = angleAt(now);
+    let x = L.pivot.x + Math.sin(a) * L.len, y = L.pivot.y + Math.cos(a) * L.len;
+    if (grab) {
+      const k = 1 - smooth((clock - grab.t0) / 0.6);
+      x += (L.paw.x - x) * k;
+      y += (L.paw.y - y) * k;
+    }
+    return { x, y, a };
+  }
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  function fishSprite(ctx, kind) {
+    const s = Math.round(L.fish), c = FISH[kind];
+    // a felt fish hanging nose down from its string (origin at the string's knot)
+    return S.sprite(ctx, "fish" + kind + "_" + s, s * 2.4, s * 3.6, s * 1.2, s * 0.3, (g) => {
+      g.fillStyle = "rgba(10,6,6,0.25)";
+      g.beginPath();
+      g.ellipse(s * 0.12, s * 1.5, s * 0.62, s * 1.1, 0, 0, TAU);
+      g.fill();
+      // tail at the top, by the knot
+      g.fillStyle = S.mix(c, "#2b1b17", 0.2);
+      g.beginPath();
+      g.moveTo(0, s * 0.45);
+      g.lineTo(-s * 0.55, 0);
+      g.lineTo(s * 0.55, 0);
+      g.closePath();
+      g.fill();
+      const body = g.createLinearGradient(-s * 0.6, 0, s * 0.6, 0);
+      body.addColorStop(0, S.mix(c, "#2b1b17", 0.25));
+      body.addColorStop(0.6, S.mix(c, "#fff6e4", 0.2));
+      body.addColorStop(1, c);
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, s * 1.4, s * 0.58, s * 1.05, 0, 0, TAU);
+      g.fill();
+      // stitches down the side, an eye and a fin
+      g.strokeStyle = "rgba(255,246,228,0.6)";
+      g.lineWidth = s * 0.05;
+      g.setLineDash([s * 0.12, s * 0.1]);
+      g.beginPath();
+      g.ellipse(0, s * 1.4, s * 0.48, s * 0.95, 0, -Math.PI * 0.5, Math.PI * 0.5);
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = "#2b1b17";
+      g.beginPath();
+      g.arc(-s * 0.15, s * 2.0, s * 0.09, 0, TAU);
+      g.fill();
+      g.strokeStyle = "#2b1b17";
+      g.lineWidth = s * 0.06;
+      g.beginPath();
+      g.moveTo(-s * 0.3, s * 1.75);
+      g.lineTo(-s * 0.1, s * 1.85);
+      g.stroke();
+      g.fillStyle = S.mix(c, "#fff6e4", 0.35);
+      g.beginPath();
+      g.ellipse(s * 0.3, s * 1.35, s * 0.22, s * 0.12, 0.6, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // The reading corner, baked once per size: wall, a small rainy window, a rug, a cushion, a plant
+  function room(g) {
+    const lin = g.createLinearGradient(0, 0, 0, H);
+    lin.addColorStop(0, "#251a1b");
+    lin.addColorStop(1, "#1a1213");
+    g.fillStyle = lin;
+    g.fillRect(0, 0, W, H);
+    // striped wallpaper, barely there
+    g.fillStyle = "rgba(255,226,180,0.025)";
+    for (let x = 0; x < W; x += 28) g.fillRect(x, 0, 12, L.floor);
+    // the little window, up on the right
+    const { x: wx, y: wy, w: ww, h: wh } = L.win;
+    S.nightWindow(g, wx, wy, ww, wh, 31);
+    g.strokeStyle = "#3b2a22";
+    g.lineWidth = 7;
+    g.strokeRect(wx - 3, wy - 3, ww + 6, wh + 6);
+    g.lineWidth = 3;
+    g.beginPath();
+    g.moveTo(wx + ww / 2, wy);
+    g.lineTo(wx + ww / 2, wy + wh);
+    g.stroke();
+    S.wood(g, wx - 10, wy + wh + 2, ww + 20, 9, 7);
+    // the floor, the rug and the cushion
+    S.wood(g, 0, L.floor - 6, W, H - L.floor + 6, 17, "#4a3226");
+    g.fillStyle = "rgba(0,0,0,0.3)";
+    g.fillRect(0, L.floor - 6, W, 3);
+    g.save();
+    g.translate(L.catX, L.floor + H * 0.05);
+    g.scale(1, 0.22);
+    g.fillStyle = "#6b4a52";
+    g.beginPath();
+    g.arc(0, 0, Math.min(W * 0.42, L.size * 3.4), 0, TAU);
+    g.fill();
+    g.strokeStyle = "rgba(243,230,207,0.18)";
+    g.lineWidth = 10;
+    g.beginPath();
+    g.arc(0, 0, Math.min(W * 0.42, L.size * 3.4) * 0.8, 0, TAU);
+    g.stroke();
+    g.restore();
+    g.fillStyle = "#8a5f58";
+    g.beginPath();
+    g.ellipse(L.catX + L.u * 0.5, L.floor + L.u * 0.4, L.u * 8.5, L.u * 2.2, 0, 0, TAU);
+    g.fill();
+    g.fillStyle = "rgba(255,230,200,0.12)";
+    g.beginPath();
+    g.ellipse(L.catX + L.u * 0.5, L.floor - L.u * 0.5, L.u * 7.2, L.u * 1.2, 0, 0, TAU);
+    g.fill();
+    // a plant in a pot, far left
+    const px = W * 0.91, py = L.floor;
+    const r = S.rng(8);
+    for (let i = 0; i < 9; i++) {
+      const a = -Math.PI / 2 + (r() - 0.5) * 1.6, len = 30 + r() * 50;
+      g.strokeStyle = "#55664c";
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(px, py - 30);
+      const ex = px + Math.cos(a) * len, ey = py - 30 + Math.sin(a) * len;
+      g.quadraticCurveTo(px + Math.cos(a) * len * 0.3, ey + 10, ex, ey);
+      g.stroke();
+      g.fillStyle = i % 2 ? "#7d916c" : "#66795a";
+      g.beginPath();
+      g.ellipse(ex, ey, 10, 4.5, a, 0, TAU);
+      g.fill();
+    }
+    g.fillStyle = "#b07a5a";
+    g.beginPath();
+    g.moveTo(px - 18, py - 32);
+    g.lineTo(px + 18, py - 32);
+    g.lineTo(px + 13, py);
+    g.lineTo(px - 13, py);
+    g.fill();
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function bat(api, s, perfect, ghost) {
+    s.state = "hit";
+    swipe = clock;
+    spinV = (perfect ? 16 : 10) * (Math.random() < 0.5 ? 1 : -1);
+    const p = L.paw;
+    pops.push({ x: p.x, y: p.y, t: 0, big: perfect });
+    for (let i = 0; i < (perfect ? 7 : 4) && sparks.length < 50; i++) sparks.push({ x: p.x + (Math.random() - 0.5) * L.fish * 2, y: p.y - Math.random() * L.fish * 2, t: -i * 0.05, c: i % 2 ? "#ffe2b0" : FISH[s.kind] });
+    if (!ghost) {
+      happy = perfect ? 0.9 : 0.5;
+      if (perfect) {
+        ear = 1;
+        api.ring(p.x, p.y, api.color(), L.fish * 3);
+        if (Math.random() < 0.35) api.callout("mrrp", L.catX, L.floor - L.size * 1.9, "#ffe2b0", 0.8);
+      }
+    }
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1-4. The shell's tracker brings the fish to the paw on a whole beat, four beats out and at least
+  // two after the last, judges the swipe, scores it and plays autopilot; this says how Biscuit reacts
+  function setup(api) {
+    track = api.track({
+      perfect: PERFECT,
+      keep: 16, // the last swing that has passed stays: the fish's way out starts from it
+      cue: false, // drawn round the paw, below
+      spawn: () => ({ kind: Math.floor(Math.random() * FISH.length) }),
+      note: (s) => (api.style === "fidget" ? clamp(fishAt(api.eng.beatPos()).y / H, 0, 1) : s.kind / FISH.length),
+      // A tap: Biscuit swipes. In Fidget he grabs the fish wherever it is.
+      hit(s, { perfect, ghost, fidget }) {
+        if (fidget) grab = { t0: clock };
+        bat(api, s, perfect, ghost && !fidget);
+        if (!ghost && ++hits === 16) api.hint("pounce", 'hold <span class="pb-kbd">Space</span>, let go: a pounce');
+        return L.paw;
+      },
+      // A miss bops him gently on the nose, and he blinks
+      miss() {
+        blink = 0.4;
+        spinV = 3;
+        api.hint("paw", "tap as the fish reaches his paw");
+      },
+      empty() {
+        swipe = clock;
+        if (api.style !== "fidget") return;
+        spinV = 12;
+        happy = 0.5;
+      }
+    });
+  }
+
+  // A hold then release: a pounce; a full charge is a flip
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    pounce = { t0: clock, k: c, full: c >= 1 };
+    if (c >= 1) {
+      api.callout("zoomies", W / 2, H * 0.3, "#ffe2b0", 1.1);
+      api.eng.chime();
+    }
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    spinV *= Math.pow(0.08, dt);
+    spin = (spin + spinV * dt) * Math.pow(0.2, dt);
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    for (let i = sparks.length - 1; i >= 0; i--) if ((sparks[i].t += dt) > 0.9) sparks.splice(i, 1);
+    if (grab && clock - grab.t0 > 0.6) grab = null;
+    if (pounce && clock - pounce.t0 > 0.8) pounce = null;
+    happy = Math.max(0, happy - dt);
+    blink = Math.max(0, blink - dt);
+    ear = Math.max(0, ear - dt * 3);
+    life.update(dt);
+    if ((stir -= dt) <= 0) {
+      stir = 5 + Math.random() * 9;
+      ear = 1;
+    }
+    if (life.flash > 0.95) ear = 1;
+    moth.wait -= dt;
+    if (moth.wait <= 0 && !moth.on) moth.on = clock;
+    if (moth.on && clock - moth.on > 9) moth = { on: 0, wait: 25 + Math.random() * 25 };
+  }
+
+  // 5. The look
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    S.layer(ctx, "paw", W, H, room);
+    const w = L.win;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(w.x, w.y, w.w, w.h);
+    ctx.clip();
+    life.draw(ctx, w.x, w.y, w.w, w.h, 0.3);
+    S.rain(ctx, w.x, w.y, w.w, w.h, clock, 0.9 * life.rain);
+    S.beads(ctx, w.x, w.y, w.w, w.h, clock, Math.round(5 + 4 * life.rain));
+    ctx.restore();
+    // a floor lamp on the left, its pool of light on Biscuit's rug
+    const lx = W * 0.16, ly = H * 0.3;
+    ctx.fillStyle = "#120c0c";
+    ctx.fillRect(lx - 1.5, ly, 3, L.floor - ly);
+    ctx.fillStyle = "#4a3a30";
+    ctx.beginPath();
+    ctx.moveTo(lx - 28, ly + 6);
+    ctx.lineTo(lx - 16, ly - 26);
+    ctx.lineTo(lx + 16, ly - 26);
+    ctx.lineTo(lx + 28, ly + 6);
+    ctx.closePath();
+    ctx.fill();
+    S.lamp(ctx, lx, ly + 4, Math.max(W, H) * 0.55, 0.8);
+    S.glow(ctx, lx, ly + 2, 22, "#fff0d0", 0.8);
+    if (moth.on) S.moth(ctx, lx, ly + 14, 26, clock, Math.min(1, (clock - moth.on) / 1.5, (9 - (clock - moth.on)) / 1.5));
+    S.lamp(ctx, L.catX, L.floor - L.size * 0.6, L.size * 3, 0.3);
+
+    // the next arrival, for the cue and Biscuit's eyes
+    let next = null;
+    for (const s of track.list) if (s.state === "wait" && (!next || s.at < next.at)) next = s;
+    const left = next ? next.at - now : 9;
+    const f = fishAt(now);
+
+    // the wand and the string; the fish turning on it
+    ctx.strokeStyle = "#7a5a44";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(L.pivot.x - W * 0.5, L.pivot.y - H * 0.2);
+    ctx.lineTo(L.pivot.x, L.pivot.y);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(243,230,207,0.55)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(L.pivot.x, L.pivot.y);
+    ctx.lineTo(f.x, f.y);
+    ctx.stroke();
+    ctx.lineCap = "butt";
+    // the cue: a soft ring closing on Biscuit's paw as the fish swings in
+    if (next && left < 2 && left > -next.window && api.style !== "fidget") S.cue(ctx, L.paw.x, L.paw.y, L.fish * 0.9 + Math.max(0, left) * L.fish * 1.6, left, PERFECT, api.color(), 1, 2);
+    const kind = next ? next.kind : track.list.length ? track.list[track.list.length - 1].kind : 0;
+    ctx.save();
+    ctx.translate(f.x, f.y);
+    ctx.rotate(-f.a + Math.sin(spin) * 0.6);
+    ctx.scale(Math.cos(spin * 0.7) * 0.25 + 0.75, 1);
+    S.draw(ctx, fishSprite(ctx, kind), 0, 0);
+    ctx.restore();
+
+    // Biscuit: watching the fish, crouching as it comes, swiping on a tap
+    const sw = (clock - swipe) / 0.28;
+    const paw = sw < 1 ? Math.sin(clamp(sw, 0, 1) * Math.PI) : 0;
+    const close = left < 1.2;
+    let cx = L.catX, cy = L.floor, rot = 0;
+    if (close && !paw) cx += Math.sin(clock * 22) * L.u * 0.35; // the wiggle before a pounce
+    if (pounce) {
+      const u = (clock - pounce.t0) / 0.8;
+      cy -= Math.sin(clamp(u, 0, 1) * Math.PI) * L.size * (0.6 + pounce.k * 0.8);
+      if (pounce.full) rot = smooth(u) * TAU;
+    }
+    const eyes = blink > 0 ? "closed" : happy > 0 ? "happy" : close ? "wide" : "open";
+    // he watches the fish, or, while it's far out, whatever is going by the window
+    const look = left > 2.5 && life.watch() !== null ? 1 : clamp((f.x - L.catX) / (W * 0.3), -1, 1);
+    ctx.save();
+    if (rot) {
+      ctx.translate(cx, cy - L.size * 0.8);
+      ctx.rotate(-rot);
+      ctx.translate(-cx, -(cy - L.size * 0.8));
+    }
+    S.cat(ctx, cx, cy, L.size, { pose: "sit", eyes, look, paw: Math.max(paw, close ? 0.12 : 0), side: -1, tail: clock * (close ? 5 : 1.4), breath: clock * 1.6, ear });
+    ctx.restore();
+    if (happy > 0.4) S.glow(ctx, L.catX, L.floor - L.size * 1.05, L.size * 0.9, "#d9a093", (happy - 0.4) * 0.5);
+
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.5);
+      S.softRing(ctx, p.x, p.y, L.fish * (0.6 + (p.big ? 2.2 : 1.3) * ease(e)), "#ffe2b0", (1 - e) * 0.8, 2);
+    }
+    for (const s of sparks) if (s.t > 0) S.twinkle(ctx, s.x, s.y - s.t * 30, 10, s.c, 1 - s.t / 0.9);
+    // the hold's charge: an arc closing round, cream when full
+    api.drawCharge(L.catX, L.floor - L.size * 0.9, L.size * 1.1, null, "#ffe2b0");
+    S.motes(ctx, W, H, clock, ["#ffe2b0", "#f3e6cf"], { n: 8, size: 5, rise: 4, sway: 20, alpha: 0.22, seed: 12 });
+  }
+
+  SpaceShell.mount({
+    key: "cafePaw",
+    title: "Paw",
+    hint: "Tap as the fish swings into Biscuit's paw",
+    skin: S,
+    marquee: S.marquee,
+    engine: { track: "RAIN ON GLASS", voice: "LO-FI RHODES", lofi: true, minBpm: 72, startBpm: 80 },
+    tierNames: ["Warming up", "Purring", "Playful", "Zoomies"],
+    fidgetPoint: () => L.paw,
+    resize: layout,
+    setup,
+    onFire: () => track.fire(),
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

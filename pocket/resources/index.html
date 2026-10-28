@@ -5,32 +5,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Flow Pocket</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #140f0c; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05030f; }
   body { display: flex; flex-direction: column; }
-  /* The title strip: a dark cabinet rail. Window controls are quiet glass; the game picker is
-     one segmented control with the playing game lit cream */
-  .strip { display: flex; flex-direction: column; gap: 6px; padding: 6px 7px 7px; background: linear-gradient(#1f1814, #130e0b); box-shadow: 0 1px 0 rgba(246,230,192,.07), 0 6px 16px rgba(0,0,0,.45); position: relative; z-index: 2; cursor: grab; user-select: none; }
+  /* The title strip: a dark console rail with a line of light along its lower edge. Window
+     controls are quiet outlines; the game picker is one segmented control with the playing
+     game lit cyan to magenta */
+  .strip { display: flex; flex-direction: column; gap: 6px; padding: 6px 7px 7px; background: linear-gradient(#120b30, #07051a); box-shadow: 0 1px 0 rgba(0,240,255,.5), 0 2px 12px rgba(0,240,255,.2), 0 6px 18px rgba(0,0,0,.5); position: relative; z-index: 2; cursor: grab; user-select: none; }
   .row { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .grow { flex: 1; min-width: 0; }
-  .strip .pb-btn { flex: none; height: 22px; padding: 0 8px !important; font: 500 10px/22px Oswald, Impact, sans-serif !important; letter-spacing: .1em; color: #f6e6c0 !important; background: rgba(246,230,192,.07) !important; box-shadow: 0 0 0 1px rgba(246,230,192,.07) inset; border-radius: 7px !important; }
-  .strip .pb-btn:hover { background: rgba(246,230,192,.14) !important; transform: none; }
-  .strip .pb-btn.on { color: #ffc400 !important; background: rgba(255,196,0,.12) !important; box-shadow: 0 0 0 1px rgba(255,196,0,.25) inset; }
+  .strip .pb-btn { flex: none; height: 22px; padding: 0 8px !important; font: 500 10px/22px Oswald, Impact, sans-serif !important; letter-spacing: .12em; color: rgba(234,252,255,.85) !important; background: rgba(255,255,255,.03) !important; box-shadow: 0 0 0 1px rgba(0,240,255,.22) inset; border-radius: 7px !important; }
+  .strip .pb-btn:hover { background: rgba(0,240,255,.1) !important; box-shadow: 0 0 0 1px rgba(0,240,255,.5) inset, 0 0 10px rgba(0,240,255,.2); transform: none; }
+  .strip .pb-btn.on { color: #ffd23a !important; background: rgba(255,210,58,.1) !important; box-shadow: 0 0 0 1px rgba(255,210,58,.5) inset, 0 0 10px rgba(255,210,58,.2); }
   .strip .pb-btn.win { display: grid; place-items: center; width: 24px; padding: 0 !important; }
   .strip .pb-btn.win svg { width: 10px; height: 10px; }
-  .strip #closeBtn:hover { background: #e8231f !important; color: #fff !important; box-shadow: none; }
-  .seg { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: rgba(0,0,0,.4); box-shadow: 0 1px 2px rgba(0,0,0,.5) inset, 0 0 0 1px rgba(246,230,192,.05); }
-  .seg .pb-btn { background: transparent !important; box-shadow: none; color: rgba(246,230,192,.62) !important; padding: 0 10px !important; }
-  .seg .pb-btn:hover { color: #f6e6c0 !important; background: rgba(246,230,192,.06) !important; }
-  .seg .pb-btn.on { color: #140f0c !important; background: linear-gradient(#fbf1da, #f0dcae) !important; box-shadow: 0 1px 3px rgba(0,0,0,.45); font-weight: 600 !important; }
-  .fps { font: 500 9px Oswald, Impact, sans-serif; letter-spacing: .1em; text-transform: uppercase; color: rgba(246,230,192,.32); min-width: 30px; text-align: right; }
-  .lamp { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; padding-left: 2px; font: 500 10px Oswald, Impact, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: rgba(246,230,192,.8); white-space: nowrap; min-width: 0; }
-  .lamp i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #3a2a20; box-shadow: 0 1px 1px rgba(0,0,0,.5) inset; }
-  .lamp.working i { background: radial-gradient(circle at 35% 35%, #fff3c4, #ffc400 60%); box-shadow: 0 0 6px rgba(255,196,0,.6); }
-  .lamp.done i { background: radial-gradient(circle at 35% 35%, #d8ffe4, #1fbf55 60%); box-shadow: 0 0 6px rgba(31,191,85,.6); animation: blink 0.5s steps(1) 8; }
-  .lamp.needs i { background: radial-gradient(circle at 35% 35%, #ffd2c4, #e8231f 60%); box-shadow: 0 0 6px rgba(232,35,31,.6); animation: blink 0.5s steps(1) 8; }
-  @keyframes blink { 50% { background: #3a2a20; box-shadow: none; } }
+  .strip #closeBtn:hover { background: #ff2b6a !important; color: #fff !important; box-shadow: 0 0 12px rgba(255,43,106,.6); }
+  .seg { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: rgba(0,0,0,.45); box-shadow: 0 0 0 1px rgba(0,240,255,.14), 0 1px 2px rgba(0,0,0,.6) inset; }
+  .seg .pb-btn { background: transparent !important; box-shadow: none; color: rgba(160,220,255,.6) !important; padding: 0 9px !important; }
+  .seg .pb-btn:hover { color: #eafcff !important; background: rgba(0,240,255,.08) !important; box-shadow: none; }
+  .seg .pb-btn.on { color: #05030f !important; background: linear-gradient(90deg, var(--c1, #00f0ff), var(--c2, #ff2bd6)) !important; box-shadow: 0 0 12px var(--c2, #ff2bd6); font-weight: 600 !important; }
+  #cart { color: var(--c1, #00f0ff) !important; box-shadow: 0 0 0 1px var(--c1, #00f0ff) inset; }
+  .seg .pb-btn[hidden] { display: none; }
+  .fps { font: 500 9px Oswald, Impact, sans-serif; letter-spacing: .1em; text-transform: uppercase; color: rgba(0,240,255,.4); min-width: 30px; text-align: right; }
+  .lamp { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; padding-left: 2px; font: 500 10px Oswald, Impact, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: rgba(234,252,255,.8); white-space: nowrap; min-width: 0; }
+  .lamp i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #1a1440; box-shadow: 0 0 0 1px rgba(0,240,255,.2) inset; }
+  .lamp.working i { background: radial-gradient(circle at 35% 35%, #fff6c8, #ffd23a 60%); box-shadow: 0 0 8px rgba(255,210,58,.8); }
+  .lamp.done i { background: radial-gradient(circle at 35% 35%, #d8ffe8, #39ff88 60%); box-shadow: 0 0 8px rgba(57,255,136,.8); animation: blink 0.5s steps(1) 8; }
+  .lamp.needs i { background: radial-gradient(circle at 35% 35%, #ffd2de, #ff2b6a 60%); box-shadow: 0 0 8px rgba(255,43,106,.8); animation: blink 0.5s steps(1) 8; }
+  @keyframes blink { 50% { background: #1a1440; box-shadow: none; } }
   .lamp span { overflow: hidden; text-overflow: ellipsis; }
-  iframe { flex: 1; width: 100%; border: 0; display: block; background: #140f0c; }
+  iframe { flex: 1; width: 100%; border: 0; display: block; background: #05030f; }
 </style>
 </head>
 <body>
@@ -46,11 +49,9 @@
       <button class="pb-btn win" id="closeBtn" title="Close" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
     </div>
     <div class="row">
-    <div class="seg">
-    <button class="pb-btn" data-game="flow.html" title="Flow // Resonance">Flow</button>
-    <button class="pb-btn" data-game="orbit.html" title="Orbit: fling the ball from bumper to bumper">Orbit</button>
-    <button class="pb-btn" data-game="flipper.html" title="Flipper: keep the ball up with the flippers">Flip</button>
-    <button class="pb-btn" data-game="ricochet.html" title="Ricochet: kick off the walls and climb">Rico</button>
+    <button class="pb-btn" id="cart" title="Cartridge: click for the next one"></button>
+    <div class="seg" id="games">
+    <button class="pb-btn" data-n="1"></button><button class="pb-btn" data-n="2"></button><button class="pb-btn" data-n="3"></button><button class="pb-btn" data-n="4"></button><button class="pb-btn" data-n="5"></button><button class="pb-btn" data-n="6"></button>
     </div>
     <span class="grow"></span>
     <span class="fps" id="fps" title="Frames per second the game is actually drawing"></span>
@@ -59,12 +60,13 @@
   <iframe id="game" title="Game" allow="autoplay"></iframe>
 
   <script src="js/neutralino.js"></script>
-  <script src="skins/pinball/pinball-skin.js"></script>
+  <script src="carts/space/skins/neon/neon-skin.js"></script>
+  <script src="carts/index.js"></script>
   <script>
     // Flow Pocket launcher: one small window, one game at a time, and a lamp that follows
     // Claude Code through pocket/signal.mjs. When Claude finishes (or needs you), the game gets
     // the engine's build-done message: it goes to autopilot, winds the music down and chimes.
-    PinballSkin.install({ vignette: false });
+    NeonSkin.install({ vignette: false });
     Neutralino.init();
     Neutralino.events.on("windowClose", () => Neutralino.app.exit());
 
@@ -76,20 +78,46 @@
       } catch (e) {}
     };
 
-    function open(game) {
-      store("pocket.game", game);
-      frame.src = "games/" + game + "?pocket=1";
-      document.querySelectorAll("[data-game]").forEach((b) => b.classList.toggle("on", b.dataset.game === game));
+    // Cartridges (installed by setup.mjs into carts/<id>/) and their games. The six game buttons
+    // stay put and are relabelled for each cartridge, so the drag region's carve-outs stay right.
+    const CARTS = window.POCKET_CARTS || [];
+    const cartBtn = document.getElementById("cart");
+    const gameBtns = [...document.querySelectorAll("#games [data-n]")];
+    let cart = CARTS.find((c) => c.id === store("pocket.cart")) || CARTS[0];
+    function open(file) {
+      store("pocket.game." + cart.id, file);
+      frame.src = `carts/${cart.id}/${file}?pocket=1`;
+      gameBtns.forEach((b) => b.classList.toggle("on", b.dataset.file === file));
     }
-    document.querySelectorAll("[data-game]").forEach((b, i) => {
-      b.addEventListener("click", () => open(b.dataset.game));
-      b.title += ` (${i + 1})`;
+    function loadCart(c) {
+      cart = c;
+      store("pocket.cart", c.id);
+      cartBtn.textContent = c.name;
+      cartBtn.title = `${c.name}: ${c.blurb || ""} (click for the next cartridge)`;
+      const [c1, c2] = c.colors || [];
+      if (c1) document.documentElement.style.setProperty("--c1", c1);
+      if (c2) document.documentElement.style.setProperty("--c2", c2);
+      gameBtns.forEach((b, i) => {
+        const g = c.games[i];
+        b.hidden = !g;
+        if (!g) return;
+        b.dataset.file = g.file;
+        b.textContent = g.label;
+        b.title = `${g.label}: ${g.hint} (${i + 1})`;
+      });
+      const saved = store("pocket.game." + c.id);
+      open(c.games.some((g) => g.file === saved) ? saved : c.games[0].file);
+    }
+    gameBtns.forEach((b) => b.addEventListener("click", () => b.dataset.file && open(b.dataset.file)));
+    cartBtn.addEventListener("click", () => {
+      loadCart(CARTS[(CARTS.indexOf(cart) + 1) % CARTS.length]);
+      frame.contentWindow.focus();
     });
-    // Number keys pick a game: 1 Flow, 2 Orbit, 3 Flip, 4 Rico. The game in the frame has the
-    // keyboard, so it passes digits up (flow:game); the strip handles them itself when focused.
+    // Number keys pick a game in the cartridge (1 to 6). The game in the frame has the keyboard,
+    // so it passes digits up (flow:game); the strip handles them itself when focused.
     function openNth(n) {
-      const b = document.querySelectorAll("[data-game]")[n - 1];
-      if (b) open(b.dataset.game);
+      const b = gameBtns[n - 1];
+      if (b && !b.hidden) open(b.dataset.file);
     }
     window.addEventListener("message", (e) => e.data && e.data.type === "flow:game" && openNth(e.data.n));
     // The game should always have the keyboard. The strip's buttons never take focus (so Space
@@ -112,9 +140,8 @@
     window.addEventListener("keydown", (e) => pass(e, true));
     window.addEventListener("keyup", (e) => pass(e, false));
     frame.addEventListener("load", giveFocus);
-    // A saved game that's since been retired (Leap, Rollover) falls back to Flow
-    const saved = store("pocket.game");
-    open(document.querySelector(`[data-game="${saved}"]`) ? saved : "flow.html");
+    if (cart) loadCart(cart);
+    else document.body.insertAdjacentHTML("beforeend", '<p style="color:#eafcff;padding:16px">No cartridges installed. Run node pocket/setup.mjs --sync</p>');
 
     // Pinned (always on top) by default: the pocket is meant to sit over whatever you're working
     // in. Windows can drop a window's topmost flag (after minimising, or when another app raises
@@ -234,7 +261,7 @@
       document.getElementById("fps").textContent = e.data.fps + " FPS";
       try {
         const home = await Neutralino.os.getEnv("USERPROFILE");
-        const line = JSON.stringify({ t: new Date().toISOString(), game: store("pocket.game"), fps: e.data.fps, workMs: e.data.workMs, canvas: e.data.canvas, dpr: devicePixelRatio, view: innerWidth + "x" + innerHeight, gpu, args: navigator.userAgent.slice(-40) });
+        const line = JSON.stringify({ t: new Date().toISOString(), game: cart.id + "/" + store("pocket.game." + cart.id), fps: e.data.fps, workMs: e.data.workMs, canvas: e.data.canvas, dpr: devicePixelRatio, view: innerWidth + "x" + innerHeight, gpu, args: navigator.userAgent.slice(-40) });
         await Neutralino.filesystem.appendFile(home + "/.flow-pocket/perf.log", line + "\n");
       } catch (err) {}
     });

@@ -1,0 +1,22 @@
+{
+  "id": "cozy",
+  "name": "Cozy",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "A moonlit garden: tea that blooms, a glowing axolotl's pond, a cloud bakery, lanterns for a moon moth, and Tidelight.",
+  "colors": ["#ffb3cf", "#ffd58a"],
+  "files": [
+    "skins/cozy/cozy-skin.js",
+    "shell/space-shell.js",
+    "skins/neon/neon-skin.js",
+    "skins/pinball/fonts/inter-latin.woff2",
+    "skins/pinball/fonts/oswald-latin.woff2"
+  ],
+  "games": [
+    { "file": "games/cozy-steep.html", "label": "Steep", "hint": "Tap as a cup passes under the spout" },
+    { "file": "games/cozy-ripple.html", "label": "Ripple", "hint": "Tap as a drop meets the water" },
+    { "file": "games/cozy-frost.html", "label": "Frost", "hint": "Tap as each mark comes round to the nozzle" },
+    { "file": "games/cozy-lull.html", "label": "Lull", "hint": "Tap as a lantern reaches Tibbet" },
+    { "file": "games/tidelight.html", "label": "Tide", "hint": "Pulse while the hoop's inner ring is gold" }
+  ]
+}

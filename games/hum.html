@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Hum, a gentle space whale, swims through a nebula with her calf. Tap as each glowing star krill reaches her and she sings. A rhythm micro-game that finds your tempo.">
+<meta property="og:title" content="Hum · Flow Engine">
+<meta property="og:description" content="Hum, a gentle space whale, swims through a nebula with her calf. Tap as each star krill reaches her and she sings.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/games/hum.html">
+<meta name="twitter:card" content="summary_large_image">
+<title>Hum</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/neon/neon-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Hum: a gentle space whale swims through a nebula, her calf close behind. Little glowing star
+// krill drift in from the right on wavy paths and reach her mouth on a whole beat. Tap as one
+// arrives and she sings: a wave of song rolls out, one of the spots along her back lights up,
+// and the calf answers half a beat later. Light all eight and the song is complete. A krill you
+// miss swirls past and away; nothing is lost.
+//
+// Hum's bob and every krill's path are functions of the beat position, so the krill land
+// exactly where her mouth will be. Clean is ±0.3 beat (wider with assist), perfect ±0.1.
+// Fidget (F): every press sings and draws the next krill straight in. Hold then let go for a
+// breach; a full charge also fills the sky with aurora. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = NeonSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const INK = "#1c1238";
+  const SKIN = ["#7fb8ff", "#6fe0d0", "#b39cff", "#ffb0a0"]; // Hum's colour drifts with the tiers
+  const CALF = ["#a8d0ff", "#9ff0e2", "#cbbcff", "#ffcabd"];
+  const KRILL = ["#ffe08a", "#ff9ccf", "#8dffc4", "#9fe8ff"];
+  const MOODS = [
+    { top: "#060a26", mid: "#14204e", low: "#2a3a78", clouds: ["#7fe9ff", "#b69cff", "#ff8fd8", "#7fe9ff", "#8dffc4"], band: "#c8e4ff", seed: 13 },
+    { top: "#03141e", mid: "#0c3446", low: "#1e6a6a", clouds: ["#8dffc4", "#7fe9ff", "#c8fff0", "#b69cff", "#8dffc4"], band: "#c8fff0", seed: 27 },
+    { top: "#100828", mid: "#2e1652", low: "#6a2e86", clouds: ["#c49cff", "#ff8fd8", "#7fe9ff", "#c49cff", "#ffd2f0"], band: "#e8d8ff", seed: 39 },
+    { top: "#140a22", mid: "#3e2246", low: "#94505a", clouds: ["#ffc46b", "#ff8fd8", "#ffe0a0", "#c49cff", "#ffb38a"], band: "#ffe8c8", seed: 53 }
+  ];
+  const SPOTS = 8;
+
+  let W = 0, H = 0, L = {};
+  let krill = []; // { color, t0, at, sy, wave, phase, window, state: "swim" | "eaten" | "past", fade }
+  let songs = [], echoes = [], motes = [], sprays = [];
+  let lit = 0, beatsSince = 99, lastAt = -99;
+  let clock = 0, lastTier = 1, warp = 0, hits = 0, gulp = -9, sing = -9;
+  let breach = null; // { t0, dur, h }
+  let aurora = 0;
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // The timing ring warms toward gold in the last third of a beat and is full gold, with a glow,
+  // inside the perfect window. Only while timing counts (not in Fidget).
+  const GOLD = "#ffd76a";
+  let timed = true;
+  const gilt = (left) => (!timed ? 0 : Math.abs(left) < PERFECT ? 1 : 0.55 * clamp(1 - (Math.abs(left) - PERFECT) / 0.3, 0, 1));
+  function cueRing(ctx, x, y, r, color, a, w, left) {
+    const g = gilt(left);
+    S.softRing(ctx, x, y, r, g ? S.mix(color, GOLD, g) : color, a, w * (1 + g * 0.8));
+    if (g >= 1) S.glow(ctx, x, y, r * 2.4, GOLD, 0.4 * a);
+  }
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const len = clamp(Math.min(W * 0.56, H * 0.5), 170, 520);
+    const tall = H > W * 1.2;
+    // On a tall phone screen the calf swims below her; on a wide one, behind
+    L = { len, k: len / 300, x: tall ? W * 0.5 + len * 0.1 : W * 0.4, y: H * (tall ? 0.44 : 0.5), calf: tall ? [-0.28, 0.55] : [-0.62, 0.26] };
+  }
+  // Hum's centre at beat position `now` (she bobs a slow wave across four beats)
+  function humAt(now) {
+    let y = L.y + Math.sin((now * Math.PI) / 4) * H * 0.03;
+    if (breach) {
+      const u = clamp((clock - breach.t0) / breach.dur, 0, 1);
+      y -= Math.sin(u * Math.PI) * breach.h;
+    }
+    return [L.x + Math.sin((now * Math.PI) / 8) * W * 0.02, y];
+  }
+  // Where her mouth is (krill aim here), ignoring a breach so the arrivals never move
+  function mouthAt(now) {
+    return [L.x + Math.sin((now * Math.PI) / 8) * W * 0.02 + L.len * 0.46, L.y + Math.sin((now * Math.PI) / 4) * H * 0.03 + L.len * 0.06];
+  }
+  function krillPos(k, now) {
+    const u = (now - k.t0) / (k.at - k.t0);
+    const [mx, my] = mouthAt(k.at);
+    if (u <= 1) {
+      const x = W + 30 + (mx - W - 30) * u;
+      const y = k.sy + (my - k.sy) * u * u * (3 - 2 * u) + Math.sin(u * Math.PI * 2.5 + k.phase) * k.wave * (1 - u);
+      return [x, y];
+    }
+    // a missed krill swirls on past and away
+    const t = u - 1;
+    return [mx - t * 260, my + Math.sin(t * 6 + k.phase) * 30 - t * 60];
+  }
+  const nextKrill = () => krill.find((k) => k.state === "swim");
+
+  // ---- Hum, drawn in her own units: nose at +150, tail at -150 -----------------------------------
+  function bodyPath(ctx, tail) {
+    ctx.beginPath();
+    ctx.moveTo(150, 8);
+    ctx.bezierCurveTo(150, -40, 90, -58, 20, -54);
+    ctx.bezierCurveTo(-50, -50, -100, -24, -132, -6 + tail * 0.3);
+    ctx.lineTo(-140, 2 + tail * 0.4);
+    ctx.bezierCurveTo(-100, 26, -40, 46, 30, 44);
+    ctx.bezierCurveTo(100, 42, 150, 36, 150, 8);
+    ctx.closePath();
+  }
+  function flukes(ctx, tail) {
+    ctx.save();
+    ctx.translate(-138, 2 + tail * 0.4);
+    ctx.rotate(tail * 0.012);
+    ctx.beginPath();
+    ctx.moveTo(4, 0);
+    ctx.bezierCurveTo(-20, -6, -40, -30, -52, -34);
+    ctx.bezierCurveTo(-44, -16, -36, -6, -26, 0);
+    ctx.bezierCurveTo(-36, 6, -44, 16, -52, 34);
+    ctx.bezierCurveTo(-40, 30, -20, 6, 4, 0);
+    ctx.fill();
+    ctx.restore();
+  }
+  function drawWhale(ctx, x, y, k, color, now, o) {
+    const beatPh = frac(now);
+    const tail = Math.sin(now * Math.PI) * 14; // one stroke of the tail every two beats
+    ctx.save();
+    ctx.translate(x, y);
+    for (const gx of [-60, 40]) S.glow(ctx, gx * k, 0, 130 * k, color, 0.1);
+    ctx.scale(k, k);
+    ctx.rotate(o.tilt || 0);
+    const g = ctx.createLinearGradient(0, -56, 0, 46);
+    g.addColorStop(0, S.mix(color, "#ffffff", 0.25));
+    g.addColorStop(0.55, S.mix(color, "#1c1238", 0.35));
+    g.addColorStop(1, S.mix(color, "#0a0620", 0.7));
+    ctx.fillStyle = g;
+    flukes(ctx, tail);
+    bodyPath(ctx, tail);
+    ctx.fill();
+    // a pale belly with soft grooves
+    ctx.save();
+    bodyPath(ctx, tail);
+    ctx.clip();
+    ctx.fillStyle = S.mixA(color, "#ffffff", 0.6, 0.35);
+    ctx.beginPath();
+    ctx.ellipse(50, 40, 100, 22, -0.05, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = S.rgba("#ffffff", 0.18);
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.moveTo(140 - i * 4, 22 + i * 4);
+      ctx.quadraticCurveTo(70, 30 + i * 5, -10, 30 + i * 3);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = S.mixA(color, "#ffffff", 0.5, 0.6);
+    ctx.lineWidth = 2;
+    bodyPath(ctx, tail);
+    ctx.stroke();
+    ctx.globalCompositeOperation = "source-over";
+    // the spots along her back: lit ones glow, the next to light flickers on the beat
+    if (o.spots) {
+      for (let i = 0; i < SPOTS; i++) {
+        const sx = 100 - i * 26, sy = -46 + Math.pow((i - 3) / 5, 2) * 22;
+        const on = i < o.lit;
+        S.glow(ctx, sx, sy, on ? 14 : 7, on ? KRILL[i % 4] : "#ffffff", on ? 0.95 : i === o.lit ? 0.25 + 0.3 * (1 - beatPh) : 0.18);
+      }
+    }
+    // eye: content and half-closed, wide when a krill is close, shut tight while singing
+    ctx.fillStyle = ctx.strokeStyle = INK;
+    ctx.lineCap = "round";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    if (o.mood === "sing") {
+      ctx.arc(104, -8, 6, Math.PI * 1.15, Math.PI * 1.85);
+      ctx.stroke();
+    } else if (o.mood === "o") {
+      ctx.ellipse(104, -10, 5, 6.5, 0, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(102, -12.5, 2, 0, TAU);
+      ctx.fill();
+    } else {
+      ctx.arc(104, -12, 6, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "rgba(255,130,170,0.5)";
+    ctx.beginPath();
+    ctx.ellipse(110, 6, 8, 4, 0, 0, TAU);
+    ctx.fill();
+    // mouth: a long gentle smile, open in an "o" while singing
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    if (o.mood === "sing") {
+      ctx.fillStyle = INK;
+      ctx.ellipse(140, 14, 6, 8 * o.open, 0, 0, TAU);
+      ctx.fill();
+    } else {
+      ctx.moveTo(146, 16);
+      ctx.quadraticCurveTo(128, 24, 108, 18);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "hum" + tier, W, H, (g) => S.dreamSky(g, W, H, MOODS[(tier - 1) % 4]));
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Song ------------------------------------------------------------------------------------
+  function sung(api, k, perfect, ghost) {
+    const now = api.eng.beatPos();
+    if (k) k.state = "eaten";
+    const [mx, my] = mouthAt(now);
+    gulp = sing = clock;
+    const color = k ? k.color : api.color();
+    songs.push({ x: mx - L.len * 0.08, y: my - L.len * 0.1, t: 0, color, big: perfect ? 1.4 : 1 });
+    echoes.push({ at: clock + api.eng.beatSec / 2, color });
+    for (let i = 0; i < (perfect ? 12 : 7) && motes.length < 200; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2, v = 40 + Math.random() * 80, life = 0.8 + Math.random() * 0.7;
+      motes.push({ x: mx, y: my, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? color : "#ffffff", r: 2.5 + Math.random() * 3, star: i % 3 === 0 });
+    }
+    if (ghost) return;
+    if (perfect) api.ring(mx, my, api.color(), 70);
+    if (++lit >= SPOTS) {
+      lit = 0;
+      api.bonus(1600, "Song complete", W / 2, H * 0.24);
+      aurora = Math.max(aurora, 0.7);
+      warp = Math.max(warp, 0.6);
+    }
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: a krill sets off from the right edge, reaching her mouth 4 beats on
+  function onBeat(n, api) {
+    if (++beatsSince < Math.max(2, api.eng.paceBeats()) || !W) return;
+    beatsSince = 0;
+    const at = Math.max(n + 4, lastAt + 2);
+    lastAt = at;
+    krill.push({ color: KRILL[Math.floor(Math.random() * 4)], t0: n, at, sy: H * (0.22 + Math.random() * 0.56), wave: 30 + Math.random() * 50, phase: Math.random() * TAU, window: 0.3 + 0.15 * api.eng.assist, state: "swim", fade: 1 });
+  }
+
+  // 3. A tap: she sings to the krill arriving now
+  function onFire(api) {
+    const now = api.eng.beatPos();
+    if (api.style === "fidget") {
+      const k = nextKrill();
+      sung(api, k, false, true);
+      api.eng.tap({ height: k ? KRILL.indexOf(k.color) / 4 : 0.5 });
+      return;
+    }
+    let k = null;
+    for (const x of krill) if (x.state === "swim" && Math.abs(now - x.at) < x.window && (!k || Math.abs(now - x.at) < Math.abs(now - k.at))) k = x;
+    api.eng.tap({ height: k ? KRILL.indexOf(k.color) / 4 : 0.85 });
+    if (!k) {
+      const [mx, my] = mouthAt(now);
+      songs.push({ x: mx, y: my, t: 0, color: "#ffffff", big: 0.4 });
+      return;
+    }
+    const perfect = Math.abs(now - k.at) < PERFECT;
+    sung(api, k, perfect, false);
+    // 4. Score it
+    api.hit(perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 1.5);
+    if (++hits === 16) api.hint("breach", 'Hold <span class="pb-kbd">Space</span>, let go: a breach');
+  }
+
+  // A hold then release: she breaches in a spray of stars; a full charge fills the sky with aurora
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    breach = { t0: clock, dur: 0.9 + c * 0.6, h: H * (0.08 + c * 0.14) };
+    const [x, y] = humAt(api.eng.beatPos());
+    for (let i = 0; i < 10 + c * 20; i++) sprays.push({ x: x + L.len * 0.25, y: y - L.len * 0.18, vx: (Math.random() - 0.5) * 160, vy: -120 - Math.random() * 200, t: 0, color: KRILL[i % 4] });
+    if (c >= 1) {
+      aurora = 1;
+      api.callout("Aurora", W / 2, H * 0.24, "#8dffc4", 1.2);
+      api.eng.chime();
+      warp = 1;
+    }
+  }
+
+  function autopilot(dt, api) {
+    const now = api.eng.beatPos();
+    for (const k of krill) if (k.state === "swim" && now >= k.at) sung(api, k, false, true);
+  }
+
+  // 2. Movement and misses
+  // ---- Asides: now and then something happens far off ---------------------------------------
+  // Slow and faint, behind everything and never on the beat, so it never gets in the way of the
+  // timing, and never gold, which means "tap now". One at a time, every 14 to 30 seconds,
+  // and never the same one twice running.
+  let aside = null, asideIn = 8 + Math.random() * 6, asideLast = -1;
+  const fadeIO = (u) => Math.min(1, u * 5, (1 - u) * 5);
+  // x across the screen at progress u, coming in from the side a.dir says, m of a width off each edge
+  const across = (a, u, m) => (a.dir > 0 ? -W * m + u * W * (1 + 2 * m) : W * (1 + m) - u * W * (1 + 2 * m));
+  function asides(dt) {
+    if (aside) {
+      if ((aside.t += dt) >= aside.dur) {
+        aside = null;
+        asideIn = 14 + Math.random() * 16;
+      }
+      return;
+    }
+    if ((asideIn -= dt) > 0) return;
+    let i = Math.floor(Math.random() * ASIDES.length);
+    if (i === asideLast) i = (i + 1) % ASIDES.length;
+    asideLast = i;
+    aside = Object.assign({ i, t: 0, dir: Math.random() < 0.5 ? -1 : 1, y: 0.06 + Math.random() * 0.14, x0: 0.15 + Math.random() * 0.55 }, ASIDES[i].start);
+  }
+  function drawAside(ctx) {
+    if (!aside) return;
+    const u = aside.t / aside.dur;
+    ASIDES[aside.i].draw(ctx, aside, u, fadeIO(u), Math.min(W, H) / 500);
+  }
+  const ASIDES = [
+    { // a far pod of little whales, rising and falling as they swim
+      start: { dur: 18 },
+      draw(ctx, a, u, f, k) {
+        for (let n = 0; n < 3; n++) {
+          const x = across(a, u, 0.25) - a.dir * n * 46 * k, y = H * (a.y + 0.05 + n * 0.03) + Math.sin(a.t * 0.9 + n) * 10 * k;
+          for (let j = 0; j < 5; j++) S.glow(ctx, x - a.dir * j * 6 * k, y + Math.sin(a.t * 0.9 + n - j * 0.3) * j * k, (11 - j * 1.6) * k, "#9fd0ff", f * 0.22);
+        }
+      }
+    },
+    { // a comet, slow, its tail of light behind it
+      start: { dur: 11 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + u * 0.05);
+        for (let j = 9; j >= 0; j--) S.glow(ctx, x - a.dir * j * 13 * k, y - j * 0.8 * k, (16 - j) * k, "#9fe8ff", f * 0.2 * (1 - j / 11));
+        S.twinkle(ctx, x, y, 9 * k, "#ffffff", f * 0.7);
+      }
+    },
+    { // three shooting stars, one after another
+      start: { dur: 3.4 },
+      draw(ctx, a, u, f, k) {
+        ["#8dffc4", "#ff9ccf", "#bba6ff"].forEach((c, n) => {
+          const v = (u * 3.4 - n * 0.8) / 0.9;
+          if (v < 0 || v > 1) return;
+          const x0 = W * (0.15 + 0.22 * n + a.y), y0 = H * (0.05 + 0.05 * n);
+          for (let j = 0; j < 7; j++) {
+            const w = Math.max(0, v - j * 0.035);
+            S.glow(ctx, x0 + a.dir * w * W * 0.3, y0 + w * H * 0.12, (6 - j * 0.6) * k, c, (1 - v) * 0.55 * (1 - j / 7));
+          }
+        });
+      }
+    },
+    { // a ringed planet, far off, slowly passing
+      start: { dur: 24 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.1), y = H * (a.y + 0.08), r = 18 * k;
+        S.glow(ctx, x, y, r * 2.6, "#8dffc4", f * 0.14);
+        ctx.globalAlpha = f * 0.3;
+        ctx.fillStyle = "#8dffc4";
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(-0.25 * a.dir);
+        ctx.scale(1, 0.3);
+        S.softRing(ctx, 0, 0, r * 1.75, "#bba6ff", f * 0.5, 1.4);
+        ctx.restore();
+      }
+    },
+    { // star gulls in a loose V, drifting over
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + 0.04) + Math.sin(a.t * 0.8) * 8 * k;
+        for (let i = 0; i < 7; i++) {
+          const row = Math.ceil(i / 2), side = i % 2 ? 1 : -1;
+          const bx = x - a.dir * row * 15 * k, by = y + side * row * 8 * k + Math.sin(a.t * 3 + i) * 2 * k;
+          S.glow(ctx, bx, by, 6 * k, "#dff6ff", f * 0.45);
+          S.glow(ctx, bx, by, 2.5 * k, "#ffffff", f * 0.5);
+        }
+      }
+    }
+  ];
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    asides(dt);
+    for (const k of krill) {
+      if (k.state === "swim" && now > k.at + k.window) {
+        k.state = "past";
+        if (api.miss()) api.hint("sing", "Tap as the krill reaches her mouth");
+      }
+      if (k.state === "past") k.fade -= dt * 0.6;
+    }
+    krill = krill.filter((k) => k.state === "swim" || (k.state === "past" && k.fade > 0));
+    for (let i = echoes.length - 1; i >= 0; i--) {
+      if (clock < echoes[i].at) continue;
+      const [x, y] = calfAt(now);
+      songs.push({ x: x + L.len * 0.15, y: y - L.len * 0.03, t: 0, color: echoes[i].color, big: 0.55 });
+      echoes.splice(i, 1);
+    }
+    const drag = Math.pow(0.15, dt);
+    for (let i = motes.length - 1; i >= 0; i--) {
+      const p = motes[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 20 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) motes.splice(i, 1);
+    }
+    for (let i = sprays.length - 1; i >= 0; i--) {
+      const p = sprays[i];
+      p.vy += 260 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.t += dt) > 1.4) sprays.splice(i, 1);
+    }
+    for (let i = songs.length - 1; i >= 0; i--) if ((songs[i].t += dt) > 1.6) songs.splice(i, 1);
+    if (breach && clock - breach.t0 > breach.dur) breach = null;
+    aurora = Math.max(0, aurora - dt / 9);
+    if (api.tier !== lastTier) {
+      if (api.tier > lastTier) warp = 1;
+      sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    }
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    warp = Math.max(0, warp - dt * 0.9);
+  }
+  // The calf swims behind and below, half a beat behind her bob
+  function calfAt(now) {
+    const [x, y] = humAt(now - 0.5);
+    return [x + L.len * L.calf[0], y + L.len * L.calf[1]];
+  }
+
+  // 5. The look
+  function draw(ctx, api) {
+    timed = api.style !== "fidget";
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    const tier = api.tier;
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const mood = MOODS[(tier - 1) % 4];
+    S.glow(ctx, W * (0.7 + 0.1 * Math.sin(clock * 0.05)), H * 0.3, W * 0.8, mood.clouds[0], 0.1);
+    S.glow(ctx, W * (0.2 + 0.1 * Math.sin(clock * 0.04 + 2)), H * 0.72, W * 0.7, mood.clouds[1], 0.08);
+    // aurora: long soft ribbons of light, slowly folding
+    const aur = Math.max(aurora, 0.12 + 0.05 * pulse);
+    for (let r = 0; r < 3; r++) {
+      const c = [mood.clouds[1], mood.clouds[2], "#8dffc4"][r];
+      for (let i = 0; i <= 14; i++) {
+        const u = i / 14;
+        const x = u * W, y = H * (0.16 + r * 0.07) + Math.sin(u * 5 + clock * 0.3 + r) * H * 0.04;
+        S.glow(ctx, x, y, H * 0.08, c, aur * 0.22);
+      }
+    }
+    S.stars(ctx, W, H, warp);
+    drawAside(ctx);
+    S.motes(ctx, W, H, clock, [mood.clouds[1], mood.clouds[3], "#fff1d6"], { n: 14, size: 8, rise: 4, sway: 20, par: -clock * 6 % W, alpha: 0.25, seed: 8 });
+
+    // the song: soft arcs of light rolling forward and up from her head
+    for (const s of songs) {
+      const e = ease(s.t / 1.6);
+      for (let j = 0; j < 3; j++) {
+        const r = (30 + e * 200 + j * 18) * L.k * s.big;
+        const a = (1 - e) * (0.8 - j * 0.22);
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.rotate(-0.4);
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = Math.max(0, a);
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = 3 * (1 - e) + 1;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, -0.9, 0.9);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+
+    const nk = nextKrill();
+    const singing = clock - sing < 0.45;
+    const open = singing ? Math.sin(((clock - sing) / 0.45) * Math.PI) : 0;
+    const color = SKIN[(tier - 1) % 4];
+    const [cx, cy] = calfAt(now);
+    drawWhale(ctx, cx, cy, L.k * 0.42, CALF[(tier - 1) % 4], now - 0.5, { mood: singing && clock - sing > 0.2 ? "sing" : "idle", open: 0.7, tilt: Math.sin((now * Math.PI) / 4) * 0.04 });
+    const [hx, hy] = humAt(now);
+    drawWhale(ctx, hx, hy, L.k, color, now, { spots: true, lit, mood: singing ? "sing" : nk && nk.at - now < 1 ? "o" : "idle", open: 0.4 + open * 0.6, tilt: Math.sin((now * Math.PI) / 4) * 0.03 + (breach ? -Math.sin(((clock - breach.t0) / breach.dur) * TAU) * 0.15 : 0) });
+
+    // star krill, each with a wiggling tail of light, and the ring closing on her mouth
+    for (const k of krill) {
+      const trail = [];
+      for (let i = 0; i < 9; i++) {
+        const at = now - i * 0.05;
+        if (at < k.t0) break;
+        trail.push(krillPos(k, at));
+      }
+      const a = k.state === "past" ? Math.max(0, k.fade) : 1;
+      ctx.globalAlpha = a;
+      if (trail.length > 1) S.streak(ctx, trail, 3 * L.k + 1.5, k.color);
+      ctx.globalAlpha = 1;
+      const [x, y] = trail[0] || krillPos(k, now);
+      S.glow(ctx, x, y, 18 * L.k + 6, k.color, 0.6 * a);
+      S.twinkle(ctx, x, y, 10 * L.k + 4, k.color, a);
+    }
+    if (nk) {
+      const left = nk.at - now;
+      if (left < 2) {
+        const [mx, my] = mouthAt(nk.at);
+        cueRing(ctx, mx, my, 8 + Math.max(0, left) * 34 * L.k, nk.color, Math.min(1, (2 - left) / 0.6), 1.5, left);
+      }
+    }
+    for (const p of sprays) {
+      const a = 1 - p.t / 1.4;
+      S.twinkle(ctx, p.x, p.y, 8, p.color, a);
+    }
+    for (const p of motes) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, p.r * 2, p.color, a);
+      else S.glow(ctx, p.x, p.y, p.r * 1.6, p.color, a * 0.9);
+    }
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const col = c >= 1 ? "#ffc46b" : "#9fe8ff";
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = col;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(hx + L.len * 0.3, hy - L.len * 0.05, L.len * 0.14, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+    S.motes(ctx, W, H, clock, [api.color(), "#ffc2ea", "#d6c8ff"], { n: 6, size: 26, rise: 10, sway: 30, alpha: 0.1, seed: 37 });
+  }
+
+  SpaceShell.mount({
+    key: "hum",
+    title: "Hum",
+    hint: "Tap as each star krill reaches her",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Humming", "Chorus", "Whalesong"],
+    onPhrase: () => (warp = Math.max(warp, 0.45)),
+    fidgetPoint: (api) => {
+      const [x, y] = mouthAt(api.eng.beatPos());
+      return { x, y };
+    },
+    resize: layout,
+    onBeat,
+    onFire,
+    onRelease,
+    autopilot,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>
