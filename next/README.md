@@ -18,7 +18,7 @@ All four are one-button and pinball-themed. Press **F** to switch between Flow a
 |---|---|
 | **Flow** (`games/flow.html`) | The original, by Gemini. Tap a steady rhythm and the craft flies a ribbon through the pillars. Hold for a boost; a full charge loops the loop. |
 | **Orbit** (`games/orbit.html`) | A steel ball circles a pop bumper. Fling it as it crosses the lit arrow and the next bumper up the table catches it. In Fidget, hold to wind up a sling. |
-| **Flipper** (`games/flipper.html`) | One button, both flippers. Flip as the ball lands and it pops up, floats, and drifts back down a bar later: a juggle. A perfect flip sends it through the floating star. Hold to cradle, let go for the orbit shot. |
+| **Flipper** (`games/flipper.html`) | One button, both flippers. Flip as the ball lands to send it ricocheting through the drop targets and bumpers. Hold to cradle, let go for the orbit shot. |
 | **Ricochet** (`games/ricochet.html`) | A ball climbs a shaft between two rubber walls. Kick as it reaches a wall and it springs across, higher every time. Hold to grip, let go for a super jump. |
 
 Also included: **Word Rain** (`games/word-rain.html`), a typing game, and **Drop Catch** (`games/template.html`), the smallest complete game to copy.
