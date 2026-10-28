@@ -1,14 +1,20 @@
 # Working on flow-engine
 
-Every change goes through a pull request; `main` only moves by merging one.
+There are two copies of the site:
 
-1. Branch from `main` (`git switch -c flipper-fall`).
-2. Keep the change small: touch the lines the fix needs, not the whole game.
-3. Push and open a pull request. Two things happen on their own:
-   - **CI** runs the engine tests and plays every game headless for a few seconds (`npm test`, `npm run smoke`).
-   - **A preview** of the whole site goes up at `https://kyleillgen.github.io/flow-engine/pr-preview/pr-<number>/`, linked in a comment on the PR, so the change can be played before it's merged.
-4. Play the preview. Merge if it's better, close the PR if it isn't; either way `main` stays good. The preview is removed when the PR closes.
+| | Branch | Link |
+|---|---|---|
+| **Live** | `main` | https://kyleillgen.github.io/flow-engine/ |
+| **Try** | `next` | https://kyleillgen.github.io/flow-engine/next/ |
 
-The live site is `https://kyleillgen.github.io/flow-engine/`, rebuilt from `main` on every merge.
+Work in progress goes to `next`, which deploys to the Try link (marked "Try build" on every page). Once it plays better, `next` is merged into `main` and goes live. If it doesn't, `next` is reset to `main` and the live site never sees it.
 
-Before opening a PR, check the change against the design rules in [docs/flow-science-check.md](docs/flow-science-check.md): never end the game, never get harder over time, keep things landing on the beat.
+`main` is protected: it only moves by a pull request from `next` (or a fix branch) that passes CI.
+
+Before anything goes to the Try link:
+
+1. Keep the change small: touch the lines the fix needs, not the whole game. Tune a number before redesigning a mechanic.
+2. Run `npm test` and `npm run smoke` (CI runs both too).
+3. Play it, side by side with the live version, and check it against the design rules in [docs/flow-science-check.md](docs/flow-science-check.md): never end the game, never get harder over time, keep things landing on the beat.
+
+Feel can't be tested automatically, so the last check is always someone playing the Try link.

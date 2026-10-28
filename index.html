@@ -3,7 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>flow-engine</title>
+<title>Flow Engine</title>
+<link rel="icon" href="icon.png">
+<meta name="description" content="Rhythm micro-games for the gaps while code builds. They find your tempo, never end and never get harder.">
+<meta property="og:title" content="Flow Engine">
+<meta property="og:description" content="Rhythm micro-games for the gaps while code builds. They find your tempo, never end and never get harder.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   @font-face { font-family: "Oswald"; src: url("skins/pinball/fonts/oswald-latin.woff2") format("woff2"); font-weight: 200 700; font-display: swap; }
   @font-face { font-family: "Inter"; src: url("skins/pinball/fonts/inter-latin.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
@@ -21,12 +28,15 @@
   a.game b { display: block; font: 500 22px/1.1 Oswald, sans-serif; letter-spacing: 0.05em; text-transform: uppercase; color: var(--cream); margin-bottom: 6px; }
   a.game small { color: var(--muted); font-size: 14px; }
   h2 { font: 500 15px/1 Oswald, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 44px 0 14px; }
+  .try { display: block; margin: -32px 0 28px; padding: 10px 14px; border-radius: 10px; background: rgba(255,196,0,.12); border: 1px solid rgba(255,196,0,.45); color: var(--cream); text-decoration: none; font-size: 14px; }
+  .try b { color: var(--yellow); font-weight: 600; }
   footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
   footer a { color: var(--cream); }
 </style>
 </head>
 <body>
 <main>
+  <a class="try" id="try" hidden href="../">You're on the Try build: work in progress. <b>Go to the live site</b></a>
   <h1>Flow <span>Engine</span></h1>
   <div class="rule"></div>
   <p class="lede">Rhythm micro-games for the gaps while code builds. They find your tempo, never end and never get harder. Space or tap to play, hold and let go for a trick shot, F to switch between Flow and Fidget.</p>
@@ -43,5 +53,6 @@
   </div>
   <footer>Source, the build guide and Flow Pocket for Windows: <a href="https://github.com/kyleillgen/flow-engine">github.com/kyleillgen/flow-engine</a></footer>
 </main>
+<script>if (/\/next\//.test(location.pathname)) { document.getElementById("try").hidden = false; document.title += " (Try build)"; }</script>
 </body>
 </html>
