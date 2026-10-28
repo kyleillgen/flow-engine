@@ -17,13 +17,14 @@
 <script src="../skins/pinball/pinball-skin.js"></script>
 <script src="../shell/flow-shell.js"></script>
 <script>
-// Flipper: one button works both flippers. The ball comes down to a flipper on a beat; flip as
-// it gets there and it flies up the table, ricocheting off whatever it meets (bumpers, drop
-// targets, the slingshots), and still comes back down to a flipper on a beat. Flip early and it
-// goes left, late and it goes right. Knock the whole bank of targets down and it pays.
+// Flipper: a juggle. One button works both flippers. The ball comes down onto a flipper on a
+// beat; flip as it lands and it pops up into the space above in a slow, floaty arc and drifts back
+// down onto a flipper a bar later. Flip early and it drifts left, late and it drifts right, and the
+// higher the pop the cleaner the flip. A gold star floats somewhere above: a perfect flip sends
+// the ball through it. Pop it all the way up and it kisses the drop targets at the top.
 //
 // Flow: a ring closes on the flipper the ball is heading for, and the ball lands as it closes.
-// The clean window is about ±0.24 beat and "perfect" is ±0.08 (about ±45 ms). Flip well off the
+// The clean window is about +-0.24 beat and "perfect" is +-0.08 (about +-45 ms). Flip well off the
 // mark and you whiff; miss it and the ball drops between the flippers, and the kickback in the
 // outlane fires it straight back into play. The ball is never lost.
 //
@@ -31,9 +32,8 @@
 // go after a hold and the ball takes the orbit lane round the top of the table (a full charge
 // goes round twice) and comes back down to the other flipper, ready to flip. Just for fun.
 //
-// Fidget: every press flips the ball off wherever it is, so mashing keeps it pinging between the
-// targets and bumpers. A ball you leave alone rests on a flipper, and a hold-and-release fires the
-// orbit shot from anywhere.
+// Fidget: every press pops the ball up again from wherever it is, so mashing keeps it in the air.
+// A ball you leave alone rests on a flipper, and a hold-and-release fires the orbit shot.
 (() => {
   "use strict";
 
@@ -42,7 +42,8 @@
   const NT = 5; // drop targets in the bank
 
   let targets = []; // { x, y, up, drop, lit }
-  let pops = []; // pop bumpers { x, y, pop }
+  let pops = []; // pop bumpers { x, y, pop } (none: the space above the flippers is the juggle's)
+  let star = null; // the floating star { x, y, born, got }
   let path = null; // { pts: [{ x, y, t, hit }], next, kind, quality, ghost, scored, whiffed, side }
   let rest = null; // a cradled / resting ball: { x, y, side }
   let flipT = 0; // seconds the flippers stay up after a tap
@@ -85,13 +86,7 @@
       const old = targets[i];
       return { x: cx - span / 2 + (span * i) / (NT - 1), y: ty, up: old ? old.up : true, drop: old ? old.drop : 0, lit: old ? old.lit : false };
     });
-    const by = Math.round(Y(0.42));
-    const bs = Math.min(W * 0.2, 80);
-    pops = [
-      { x: cx - bs, y: by, pop: 0 },
-      { x: cx + bs, y: by, pop: 0 },
-      { x: cx, y: by + bs * 0.75, pop: 0 }
-    ];
+    pops = [];
   }
 
   // ---- Paths: a ball's flight is a list of points with times (in beats); between them it
@@ -121,105 +116,54 @@
     return [e.x, e.y];
   }
 
-  // A shot is a real little flight: the ball leaves the flipper, rises against gravity and
-  // ricochets off the walls, pop bumpers, drop targets and slingshots, simulated in advance. Only
-  // the last moment (a quarter of a second at most) is steered: of a dozen slightly different
-  // launches, the one that comes down nearest a flipper on its own is kept, then a smooth curve
-  // carries it the rest of the way, arriving exactly at tEnd. So every shot goes somewhere different, and still lands on
-  // the beat. aim (-1 left .. 1 right) tilts the launch; Flow sets it from how early or late you
-  // flipped, the way the spot on a real flipper decides where the ball goes.
+  // A pop: the ball leaves the flipper, floats up to an apex and drifts back down onto a flipper,
+  // arriving exactly at tEnd. It rises quickly, hangs at the top, then sinks at a slow, steady
+  // speed (like a balloon, not a stone), so the last stretch reads like a falling note: you can
+  // time the flip from anywhere on the way down. Across, it curves through the apex. aim (-1 left
+  // .. 1 right) sets the drift; through: [x, y] sends it through that point (the star) at the top.
+  // It crosses to the other flipper, like a rally.
   function shot(api, x, y, t0, tEnd, opts) {
     opts = opts || {};
     const { W } = api;
-    const secs = Math.max(0.25, (tEnd - t0) * api.eng.beatSec);
-    const span = fy - TOP;
-    const g = 2.6 * span; // px/s²
-    const land = Math.min(0.3, secs * 0.25);
-    const simT = secs - land;
-    const aim0 = opts.aim !== undefined ? opts.aim : (Math.random() * 2 - 1) * 0.6;
-    const DT = 1 / 120;
-    // One candidate flight: launch at a given aim and let it ricochet until the steer takes over
-    function fly(aim) {
-      const a = -Math.PI / 2 + (x < cx ? 0.2 : -0.2) + aim * 0.5 + (Math.random() - 0.5) * 0.16;
-      const v0 = Math.sqrt(2 * g * Math.max(90, y - TOP) * 0.88);
-      let vx = Math.cos(a) * v0, vy = Math.sin(a) * v0;
-      const knocked = new Set();
-      const samples = [{ x, y, s: 0 }];
-      let px = x, py = y;
-      const mark = (hit, sling) => {
-        const last = samples[samples.length - 1];
-        if (hit && !last.hit) last.hit = hit;
-        if (sling !== undefined) last.sling = sling;
-      };
-      for (let i = 1, tt = DT; tt <= simT; i++, tt += DT) {
-        vy += g * DT;
-        px += vx * DT;
-        py += vy * DT;
-        // Walls and the arch
-        if (px < 17) (px = 17), (vx = Math.abs(vx) * 0.85);
-        if (px > W - 17) (px = W - 17), (vx = -Math.abs(vx) * 0.85);
-        if (py < TOP + 2) (py = TOP + 2), (vy = Math.abs(vy) * 0.8);
-        // Pop bumpers kick the ball away
-        for (const b of pops) {
-          const dx = px - b.x, dy = py - b.y, d = Math.hypot(dx, dy);
-          if (d < 33 && d > 0) {
-            const nx = dx / d, ny = dy / d;
-            const vn = vx * nx + vy * ny;
-            if (vn < 0) (vx -= 2 * vn * nx), (vy -= 2 * vn * ny);
-            vx += nx * 260;
-            vy += ny * 260;
-            px = b.x + nx * 33;
-            py = b.y + ny * 33;
-            mark(b);
-          }
-        }
-        // Drop targets knock down and bounce it back
-        for (const t of targets) {
-          if (!t.up || knocked.has(t)) continue;
-          if (Math.abs(px - t.x) < 24 && Math.abs(py - t.y) < 28) {
-            knocked.add(t);
-            if (vy < 0) (vy = Math.abs(vy) * 0.75), (py = t.y + 28);
-            else (vy = -Math.abs(vy) * 0.75), (py = t.y - 28);
-            mark(t);
-          }
-        }
-        // Low on the table the slingshots fire it back up
-        if (py > fy - 90 && vy > 0) {
-          vy = -Math.sqrt(2 * g * span * (0.35 + Math.random() * 0.2));
-          vx += (px < cx ? 1 : -1) * (90 + Math.random() * 90);
-          mark(null, px < cx ? 0 : 1);
-        }
-        const sp = Math.hypot(vx, vy);
-        if (sp > 1500) (vx *= 1500 / sp), (vy *= 1500 / sp);
-        if (i % 2 === 0) samples.push({ x: px, y: py, s: tt });
+    const e = opts.aim !== undefined ? opts.aim : (Math.random() * 2 - 1) * 0.5;
+    let ax, ay;
+    if (opts.through) [ax, ay] = opts.through;
+    else {
+      ax = cx + e * Math.min(cx - 60, 150) + (Math.random() - 0.5) * 30;
+      ay = Y(0.12 + 0.36 * Math.min(1, Math.abs(e)) + Math.random() * 0.06);
+    }
+    ay = Math.max(TOP + 24, Math.min(ay, y - 90));
+    const side = opts.side !== undefined ? opts.side : ax < cx ? 1 : 0;
+    const [ex, ey] = strike(side);
+    const xc = Math.max(24, Math.min(W - 24, 2 * ax - (x + ex) / 2));
+    const N = 60, UA = 0.4, K = 0.25; // apex at 40% of the time; the sink settles to speed over its first quarter
+    const pts = [];
+    for (let k = 0; k <= N; k++) {
+      const u = k / N;
+      let py, q;
+      if (u <= UA) {
+        const r = u / UA;
+        py = y - (y - ay) * (1 - (1 - r) * (1 - r));
+        q = 0.5 * r;
+      } else {
+        const r = (u - UA) / (1 - UA);
+        const f = (r < K ? (r * r) / (2 * K) : r - K / 2) / (1 - K / 2);
+        py = ay + (ey - ay) * f;
+        q = 0.5 + 0.5 * r;
       }
-      // How much steering it would need: where plain gravity would carry it by tEnd, compared
-      // with the nearer flipper (or the one asked for)
-      const fx = px + vx * land, fyy = py + vy * land + 0.5 * g * land * land;
-      const side = opts.side !== undefined ? opts.side : fx < cx ? 0 : 1;
-      const [sx, sy] = strike(side);
-      return { samples, px, py, vx, vy, side, sx, sy, cost: Math.hypot(fx - sx, fyy - sy) };
+      pts.push({ x: (1 - q) * (1 - q) * x + 2 * q * (1 - q) * xc + q * q * ex, y: py, t: t0 + (tEnd - t0) * u, straight: true });
     }
-    // Try a dozen launches around the chosen aim and keep the one that comes down most naturally,
-    // so the final steer is barely there
-    let best = fly(aim0);
-    for (let k = 0; k < 11 && best.cost > 12; k++) {
-      const c = fly(aim0 + (Math.random() * 2 - 1) * 0.35);
-      if (c.cost < best.cost) best = c;
-    }
-    const { samples, px, py, vx, vy, side, sx, sy } = best;
-    // The steer: a smooth (Hermite) curve onto the flipper, leaving with the ball's own velocity
-    // and arriving the way gravity would bring it
-    const ex = vx * 0.6 + (side ? -40 : 40), ey = Math.max(300, vy + g * land);
-    const s0 = samples[samples.length - 1].s;
-    for (let k = 1; k <= 18; k++) {
-      const u = k / 18, T = land;
-      const h00 = 2 * u ** 3 - 3 * u * u + 1, h10 = u ** 3 - 2 * u * u + u, h01 = -2 * u ** 3 + 3 * u * u, h11 = u ** 3 - u * u;
-      samples.push({ x: h00 * px + h10 * T * vx + h01 * sx + h11 * T * ex, y: h00 * py + h10 * T * vy + h01 * sy + h11 * T * ey, s: s0 + (secs - s0) * u });
-    }
-    const pts = samples.map((q) => ({ x: q.x, y: q.y, t: t0 + (q.s / secs) * (tEnd - t0), straight: true, hit: q.hit, sling: q.sling }));
+    // A pop that reaches the top kisses the drop target there
+    const top = pts[Math.round(N * UA)];
+    for (const t of targets) if (t.up && Math.abs(t.x - top.x) < 28 && top.y < t.y + 34) top.hit = t;
     path = Object.assign({ pts, next: 1, kind: "shot", side, whiffed: false }, opts, { side });
     rest = null;
+  }
+
+  // The star floats in the space above, somewhere a pop can reach
+  function newStar(api, now) {
+    const { W } = api;
+    star = { x: cx + (Math.random() * 2 - 1) * Math.min(cx - 70, 130), y: Y(0.24 + Math.random() * 0.26), born: now, got: 0 };
   }
 
   // The orbit lane: up one side, round the top arch, down the other side to the far flipper
@@ -287,13 +231,13 @@
 
   // Every flight (a shot, the orbit lane, the kickback) ends on a flipper at a beat, ready to flip
   const arrivalT = () => (path ? path.pts[path.pts.length - 1].t : null);
-  const pace = (api) => Math.max(2, Math.round(api.eng.paceBeats()));
+  const pace = (api) => api.pick({ chill: 4, normal: 4, intense: 3 }); // a pop a bar: time to watch it float
 
   // Fidget shots run on seconds, quicker the faster you press
   function fidgetShot(api, now) {
     const [x, y] = ballAt(now);
-    const secs = (1.1 - 0.5 * api.rev) * (0.85 + Math.random() * 0.3);
-    shot(api, x, y, now, now + secs / api.eng.beatSec, { ghost: true, fidget: true, aim: (cx - x) / cx * 0.6 + (Math.random() - 0.5) * 0.8 });
+    const secs = (1.9 - 0.6 * api.rev) * (0.85 + Math.random() * 0.3);
+    shot(api, x, y, now, now + secs / api.eng.beatSec, { ghost: true, fidget: true, aim: (cx - x) / cx * 0.6 + (Math.random() - 0.5) * 0.9 });
   }
 
   const api = FlowShell.mount({
@@ -317,6 +261,7 @@
       const now = api.eng.beatPos();
       lastBall = [sx, sy];
       shot(api, sx, sy, now, Math.ceil(now + 3), { ghost: true });
+      newStar(api, now);
     },
     resize(api) {
       layout(api);
@@ -354,8 +299,9 @@
           api.score(1, perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 0.5);
           if (perfect) api.ring(sx, sy, api.color(), 46);
         }
-        // Early sends it left, late sends it right; perfect goes straight up the middle
-        return shot(api, sx, sy, now, T + pace(api), { aim: Math.max(-1, Math.min(1, err / win(api))) * (perfect ? 0.3 : 1) });
+        // Early drifts it left, late drifts it right; perfect pops it through the star
+        const through = perfect && star && !star.got ? [star.x, star.y] : undefined;
+        return shot(api, sx, sy, now, T + pace(api), { aim: Math.max(-1, Math.min(1, err / win(api))) * (perfect ? 0.3 : 1), through });
       }
       api.eng.tap({ note: false });
       if (Math.abs(err) > 0.55) return;
@@ -456,6 +402,18 @@
       }
 
       const b = ballAt(now);
+      // The star: the ball passing through collects it; a new one appears, or it moves on after
+      // four bars untouched
+      if (star) {
+        if (!star.got && Math.hypot(b[0] - star.x, b[1] - star.y) < 26) {
+          star.got = now;
+          api.bonus(250, "Star", star.x, star.y - 34);
+          api.eng.pluck(0.95, 0.35, 0.06);
+          api.burst(star.x, star.y, "#ffc400", 12, -1);
+          api.ring(star.x, star.y, "#ffc400", 44);
+        }
+        if ((star.got && now - star.got > 1.5) || (!star.got && now - star.born > 16)) newStar(api, now);
+      }
       lastBall = [b[0], b[1]];
       trail.unshift([b[0], b[1]]);
       if (trail.length > 9) trail.pop();
@@ -664,8 +622,14 @@
         }
       }
 
-      // Pop bumpers
-      for (const b of pops) Skin.bumper(ctx, b.x, b.y, 22, b.pop > 0.2 ? "#fff8e6" : col, b.pop);
+      // The floating star: fades in, bobs gently, flares and fades when collected
+      if (star) {
+        const age = now - star.born;
+        const got = star.got ? Math.min(1, (now - star.got) / 0.6) : 0;
+        ctx.globalAlpha = Math.min(1, age / 1.5) * (1 - got);
+        if (ctx.globalAlpha > 0.01) Skin.star(ctx, star.x, star.y + Math.sin(age * 1.6) * 4, 11 + 10 * got + kick * 1.5);
+        ctx.globalAlpha = 1;
+      }
 
       // The landing ring: closes on the flipper the ball is heading for, shut as it lands
       const T = arrivalT();
