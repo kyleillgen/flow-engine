@@ -48,6 +48,7 @@
   @media (max-width: 520px) { .fs-voice, .pb-best { display: none; } .fs-controls { gap: 4px; } }
   .fs-over { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(20,15,12,.72); }
   .fs-over.show { display: flex; }
+  .fs-try { position: fixed; top: 64px; right: 10px; z-index: 12; font: 600 11px/1 Oswald, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: #11152a; background: #ffc400; padding: 5px 8px 4px; border-radius: 4px; text-decoration: none; opacity: .9; }
   .fs-hint { position: fixed; bottom: 26px; left: 0; right: 0; z-index: 10; text-align: center; pointer-events: none; transition: opacity .7s; }
   /* Attract mode: the game plays itself under a marquee until the first input */
   .fs-marquee { position: fixed; left: 0; right: 0; top: 34%; z-index: 15; text-align: center; pointer-events: none; transition: opacity .6s, transform .6s cubic-bezier(.34,1.56,.64,1); }
@@ -118,6 +119,16 @@
         <div class="pb-note">Stop for a few seconds and it plays itself, without scoring. Any input takes over again, and the next two misses are forgiven.</div>
       </div></div>`;
     document.body.appendChild(root);
+    // On the Try link (the site's /next/ copy), say so, and link to the live version
+    if (/\/next\//.test(location.pathname)) {
+      const tag = document.createElement("a");
+      tag.className = "fs-try";
+      tag.href = location.pathname.replace("/next/", "/") + location.search;
+      tag.textContent = "Try build";
+      tag.title = "Work in progress. Tap for the live version";
+      root.appendChild(tag);
+      document.title += " (Try build)";
+    }
     const q = (sel) => root.querySelector(sel);
 
     const eng = FlowEngine.create(Object.assign({ key: g.key }, g.engine || {}));
