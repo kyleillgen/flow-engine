@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Mallow the cloud-sheep bakes for the night sky. Tap as each mark on the turning moon cake comes round to the piping bag, and a glowing rosette blooms. Eight make a cake, and it floats up to be a moon. A rhythm micro-game that finds your tempo.">
+<title>Frost</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/cozy/cozy-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Frost: a bakery on a cloud. Mallow, a cloud-sheep baker in a little hat, pipes frosting onto a
+// round moon cake turning slowly on its stand. Little marks of light ride round the top of the
+// cake, and each comes round to the nozzle exactly on a beat; tap as it does and a glowing rosette
+// blooms there. Eight rosettes make a cake: its candles light, it floats up into the sky to be a
+// new moon, and a fresh one is set down. A mark you miss just fades; nothing is lost.
+//
+// The five questions:
+// 1. On the beat: a mark appears on the cake's rim a quarter turn before the nozzle (at the back,
+//    where Mallow leans over the cake), due there four beats later, always on a whole beat and at least two beats after the last.
+// 2. Movement: the cake turns at one steady speed, a full turn every sixteen beats; its angle is a
+//    function of the beat position, so every mark rides round to the nozzle on its beat.
+// 3. The player pipes. Every press is a note (api.eng.tap) and a squeeze of the bag.
+// 4. Clean within ±0.3 beat of a mark's beat (wider with assist, for marks not yet shown), perfect
+//    within ±0.1.
+// 5. The look: a night sky over a bank of clouds, the cakes she's baked hung up as moons, drifting
+//    cloud puffs, and the cake on its porcelain stand: frosted, ribboned, shell-piped, sprinkled,
+//    turning, lit by its rosettes, with a soft halo turning behind it. Now and then something
+//    happens in the sky: a shooting star, a balloon, cloud birds, a cloud bunny peeking over the
+//    bank, a sugar star spinning on its thread, a flurry of sugar snow. The timing cue is a ring of
+//    little lights closing on the nozzle, gold on the beat.
+// Fidget (F): every press pipes a rosette right at the nozzle, and eight make a cake as usual. Hold
+// then let go for a shake of sprinkles; a full charge brings a shower of sugar stars.
+(() => {
+  "use strict";
+
+  const S = CozySkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const FLAT = 0.42;
+  const TURN = TAU / 16; // the cake's turn a beat
+  const NOZZLE = -Math.PI / 2; // the back of the cake, where Mallow stands
+  const ROSES = ["#ffb3cf", "#c8b4ff", "#9cf0d0", "#ffd58a", "#8fd8e8", "#ffbf9e"];
+  const CAKES = [
+    { side: ["#f6c4d8", "#c2789e"], top: "#f2b6cc", drip: "#ffd6e4", rim: "#e48cb0" },
+    { side: ["#c8eedd", "#6eae98"], top: "#a8e0c8", drip: "#d8f6e8", rim: "#78c4a6" },
+    { side: ["#ddd0fa", "#8c78c8"], top: "#c4b2f0", drip: "#e8e0ff", rim: "#9e88dc" },
+    { side: ["#f8dcb0", "#c09458"], top: "#f0cc8e", drip: "#fff0cc", rim: "#d4a660" }
+  ];
+  const MOODS = [
+    { top: "#140a2a", mid: "#2c1a4c", low: "#5a3a6e", clouds: ["#c8b4ff", "#ff9fc0", "#8fd8e8", "#ffbf9e", "#c8b4ff"], band: "#e8dcff", seed: 11, puff: "#d8c8ff" },
+    { top: "#0a1428", mid: "#183a52", low: "#3a6e78", clouds: ["#9cf0d0", "#8fd8e8", "#c8b4ff", "#9cf0d0", "#ffd58a"], band: "#d8fff0", seed: 21, puff: "#c8f2e8" },
+    { top: "#170a2c", mid: "#3e1e5a", low: "#7a3a78", clouds: ["#ff9fc0", "#c8b4ff", "#ffbf9e", "#ff9fc0", "#8fd8e8"], band: "#ffd9ec", seed: 33, puff: "#ffd0e4" },
+    { top: "#160c22", mid: "#46283e", low: "#8a5a4e", clouds: ["#ffd58a", "#ffbf9e", "#ff9fc0", "#ffd58a", "#c8b4ff"], band: "#fff0d0", seed: 45, puff: "#ffe4c4" }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let markT = null; // the tracker; markT.list is { phi (angle on the cake), at, kind, window, state: "wait" | "rose" | "fade" | "gone", doneAt }
+  let sparks = [], sprinkles = [], moons = [], lifting = null;
+  let cake = 0, piped = 0; // which cake, and its rosettes so far
+  let lastKind = 0;
+  let clock = 0, lastTier = 1, squeezeAt = -9, missAt = -99, hits = 0, candles = -99, setDown = -99;
+  let sky = { from: 1, to: 1, t: 1 };
+  let bg = null, spinAt = -99, spinI = 0; // the background happenings, and a sugar star set spinning
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    // smaller on short screens (the pocket's frames), so everyone fits under the bar
+    const k = H < 520 ? clamp(H / 420, 0.55, 0.9) : clamp(Math.min(W / 360, H / 640), 0.9, 1.9);
+    const R = Math.min(W * 0.33, 116 * k);
+    L = { k, R, cx: W / 2, cy: H * (H > W ? 0.6 : H < 520 ? 0.64 : 0.58), side: R * 0.5, rim: R * 0.8 };
+    L.nx = L.cx;
+    L.ny = L.cy - L.rim * FLAT;
+    L.sheep = 36 * k;
+    L.mx = L.cx + L.sheep * 0.15;
+    L.my = L.ny - L.sheep * 2.25;
+  }
+
+  const rot = (now) => now * TURN;
+  // Where a point on the cake's top is now: x, y on screen, and how near the front it is (0..1)
+  function onTop(phi, r, now) {
+    const a = phi + rot(now);
+    return [L.cx + Math.cos(a) * r, L.cy + Math.sin(a) * r * FLAT, (Math.sin(a) + 1) / 2];
+  }
+
+  // ---- Sprites ------------------------------------------------------------------------------
+  // A crescent: a disc with a bite taken out, cut on its own little canvas
+  function crescent(g, x, y, r, color) {
+    const c = document.createElement("canvas");
+    const sc = g.getTransform().a, n = Math.ceil(r * 2.2 * sc);
+    c.width = c.height = n;
+    const q = c.getContext("2d");
+    q.scale(sc, sc);
+    q.fillStyle = color;
+    q.beginPath();
+    q.arc(r * 1.1, r * 1.1, r, 0, TAU);
+    q.fill();
+    q.globalCompositeOperation = "destination-out";
+    q.beginPath();
+    q.arc(r * 1.1 + r * 0.5, r * 1.1 - r * 0.25, r * 0.88, 0, TAU);
+    q.fill();
+    g.drawImage(c, x - r * 1.1, y - r * 1.1, r * 2.2, r * 2.2);
+  }
+
+  function skyLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "frost" + tier, W, H, (g) => {
+      S.dreamSky(g, W, H, m);
+      const k = L.k;
+      // a crescent moon, high on the left
+      const mx = W * 0.18, my = H * 0.17, mr = 22 * k;
+      g.globalCompositeOperation = "lighter";
+      const gr = g.createRadialGradient(mx, my, 0, mx, my, mr * 4);
+      gr.addColorStop(0, "rgba(255,242,226,0.16)");
+      gr.addColorStop(1, "rgba(255,242,226,0)");
+      g.fillStyle = gr;
+      g.fillRect(mx - mr * 4, my - mr * 4, mr * 8, mr * 8);
+      g.globalCompositeOperation = "source-over";
+      crescent(g, mx, my, mr, "#fff4e6");
+      // the bank of clouds the bakery sits on, in soft layers
+      // each layer is a row of puffs: lit from above, sinking into dusk below
+      const r = S.rng(m.seed);
+      for (let layer = 0; layer < 3; layer++) {
+        const base = H * (0.68 + layer * 0.1), tint = 0.72 - layer * 0.12;
+        const puffs = [];
+        for (let x = -30; x < W + 60; x += (30 + r() * 34) * k) puffs.push([x, base - r() * 10 * k, (24 + r() * 30) * k * (1 + layer * 0.3)]);
+        g.save();
+        g.shadowColor = S.rgba(m.puff, 0.35);
+        g.shadowBlur = 18 * k;
+        const lin = g.createLinearGradient(0, base - 60 * k, 0, base + 50 * k);
+        lin.addColorStop(0, S.mix(m.puff, m.mid, tint - 0.25));
+        lin.addColorStop(0.5, S.mix(m.puff, m.mid, tint));
+        lin.addColorStop(1, layer === 2 ? S.mix(m.mid, m.top, 0.4) : S.mix(m.puff, m.mid, tint + 0.08));
+        g.fillStyle = lin;
+        g.beginPath();
+        for (const [x, y, s] of puffs) {
+          g.moveTo(x + s, y);
+          g.arc(x, y, s, Math.PI, TAU);
+        }
+        g.rect(0, base - 2, W, H - base + 2);
+        g.fill();
+        g.restore();
+      }
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // The cake: its side (frosted, with drips) baked; the top is a separate turning sprite
+  function cakeSprite(ctx, n) {
+    const c = CAKES[n % 4], R = Math.round(L.R), sh = L.side;
+    return S.sprite(ctx, "cake" + (n % 4) + R, R * 2.8, R * 2.2, R * 1.4, R * 0.7, (g) => {
+      S.blurred(g, c.drip, 26, (g) => {
+        g.fillStyle = S.rgba(c.drip, 0.22);
+        g.beginPath();
+        g.ellipse(0, sh * 0.5, R, R * FLAT + sh * 0.5, 0, 0, TAU);
+        g.fill();
+      });
+      // the stand: a porcelain cake plate with a lace edge, on a stem and a round foot
+      const py = sh + 5, pr = R * 1.14;
+      g.fillStyle = "#d8c8e8";
+      g.beginPath();
+      g.ellipse(0, py + R * 0.62, R * 0.38, R * 0.1, 0, 0, TAU);
+      g.fill();
+      let st = g.createLinearGradient(-R * 0.12, 0, R * 0.12, 0);
+      st.addColorStop(0, "#c8b4dc");
+      st.addColorStop(0.4, "#fbf4ff");
+      st.addColorStop(1, "#b8a2d0");
+      g.fillStyle = st;
+      g.beginPath();
+      g.moveTo(-R * 0.1, py + R * 0.2);
+      g.quadraticCurveTo(-R * 0.06, py + R * 0.42, -R * 0.24, py + R * 0.6);
+      g.lineTo(R * 0.24, py + R * 0.6);
+      g.quadraticCurveTo(R * 0.06, py + R * 0.42, R * 0.1, py + R * 0.2);
+      g.fill();
+      g.fillStyle = "#e6d8f2";
+      g.beginPath();
+      g.ellipse(0, py + R * 0.06, pr, pr * FLAT, 0, 0, TAU);
+      g.fill();
+      st = g.createLinearGradient(0, py - pr * FLAT, 0, py + pr * FLAT);
+      st.addColorStop(0, "#fdf8ff");
+      st.addColorStop(1, "#d8c6ea");
+      g.fillStyle = st;
+      g.beginPath();
+      g.ellipse(0, py, pr, pr * FLAT, 0, 0, TAU);
+      g.fill();
+      // lace scallops along the front edge
+      g.fillStyle = "#f6eefc";
+      for (let i = 0; i <= 22; i++) {
+        const a = (i / 22) * Math.PI;
+        g.beginPath();
+        g.arc(Math.cos(a) * pr, py + R * 0.06 + Math.sin(a) * pr * FLAT, R * 0.05, 0, TAU);
+        g.fill();
+      }
+      g.strokeStyle = "rgba(255,255,255,0.8)";
+      g.lineWidth = 1.2;
+      g.beginPath();
+      g.ellipse(0, py, pr * 0.97, pr * FLAT * 0.97, 0, Math.PI * 1.1, Math.PI * 1.5);
+      g.stroke();
+      // the side of the cake
+      const lin = g.createLinearGradient(-R, 0, R, 0);
+      lin.addColorStop(0, c.side[1]);
+      lin.addColorStop(0.4, c.side[0]);
+      lin.addColorStop(1, c.side[1]);
+      g.fillStyle = lin;
+      g.beginPath();
+      g.ellipse(0, sh, R, R * FLAT, 0, 0, Math.PI);
+      g.lineTo(-R, 0);
+      g.ellipse(0, 0, R, R * FLAT, 0, Math.PI, 0, true);
+      g.closePath();
+      g.fill();
+      // soft light from above, shadow toward the plate
+      const shade = g.createLinearGradient(0, R * FLAT * 0.3, 0, sh + R * FLAT);
+      shade.addColorStop(0, "rgba(255,255,255,0.16)");
+      shade.addColorStop(1, "rgba(70,30,80,0.22)");
+      g.fillStyle = shade;
+      g.beginPath();
+      g.ellipse(0, sh, R, R * FLAT, 0, 0, Math.PI);
+      g.lineTo(-R, 0);
+      g.ellipse(0, 0, R, R * FLAT, 0, Math.PI, 0, true);
+      g.closePath();
+      g.fill();
+      // a satin ribbon round the middle, with a sheen
+      g.strokeStyle = S.mix(c.rim, "#7a4a8a", 0.15);
+      g.lineWidth = sh * 0.16;
+      g.beginPath();
+      g.ellipse(0, sh * 0.62, R, R * FLAT, 0, 0.02, Math.PI - 0.02);
+      g.stroke();
+      g.strokeStyle = "rgba(255,255,255,0.35)";
+      g.lineWidth = sh * 0.04;
+      g.beginPath();
+      g.ellipse(0, sh * 0.58, R * 0.995, R * FLAT, 0, Math.PI * 0.3, Math.PI * 0.62);
+      g.stroke();
+      // a string of sugar pearls along the base
+      for (let i = 0; i <= 26; i++) {
+        const a = (i / 26) * Math.PI, x = Math.cos(a) * R * 0.99, y = sh + Math.sin(a) * R * FLAT * 0.99;
+        const pg = g.createRadialGradient(x - 1, y - 1, 0, x, y, R * 0.045);
+        pg.addColorStop(0, "#ffffff");
+        pg.addColorStop(1, c.drip);
+        g.fillStyle = pg;
+        g.beginPath();
+        g.arc(x, y, R * 0.04, 0, TAU);
+        g.fill();
+      }
+      // icing drips from the top edge
+      g.fillStyle = c.drip;
+      g.beginPath();
+      g.ellipse(0, 0, R, R * FLAT, 0, 0, Math.PI);
+      const r = S.rng(5);
+      for (let i = 16; i >= 0; i--) {
+        const a = (i / 16) * Math.PI, x = Math.cos(a) * R, y = Math.sin(a) * R * FLAT;
+        const d = (0.2 + r() * 0.45) * sh;
+        g.lineTo(x + 3, y);
+        g.quadraticCurveTo(x + 4, y + d, x, y + d);
+        g.quadraticCurveTo(x - 4, y + d, x - 3, y);
+      }
+      g.closePath();
+      g.fill();
+    });
+  }
+  function topSprite(ctx, n) {
+    const c = CAKES[n % 4], R = Math.round(L.R);
+    return S.sprite(ctx, "top" + (n % 4) + R, R * 2 + 4, R * 2 + 4, R + 2, R + 2, (g) => {
+      const gr = g.createRadialGradient(-R * 0.3, -R * 0.3, R * 0.1, 0, 0, R);
+      gr.addColorStop(0, c.drip);
+      gr.addColorStop(0.75, c.top);
+      gr.addColorStop(1, c.rim);
+      g.fillStyle = gr;
+      g.beginPath();
+      g.arc(0, 0, R, 0, TAU);
+      g.fill();
+      // faint piped rings, a shell border, and sprinkles over the middle (they show the turn)
+      g.strokeStyle = S.rgba("#ffffff", 0.22);
+      g.lineWidth = R * 0.02;
+      for (const f of [0.42, 0.72]) {
+        g.beginPath();
+        g.arc(0, 0, R * f, 0, TAU);
+        g.stroke();
+      }
+      for (let i = 0; i < 30; i++) {
+        const a = (i / 30) * TAU, x = Math.cos(a) * R * 0.92, y = Math.sin(a) * R * 0.92;
+        g.fillStyle = c.rim;
+        g.beginPath();
+        g.ellipse(x, y, R * 0.09, R * 0.065, a + Math.PI / 2, 0, TAU);
+        g.fill();
+        g.fillStyle = S.mix(c.drip, "#ffffff", 0.3);
+        g.beginPath();
+        g.ellipse(x - Math.cos(a) * R * 0.02, y - Math.sin(a) * R * 0.02, R * 0.045, R * 0.03, a + Math.PI / 2, 0, TAU);
+        g.fill();
+      }
+      const r = S.rng(9 + n);
+      for (let i = 0; i < 46; i++) {
+        const a = r() * TAU, d = Math.sqrt(r()) * R * 0.62;
+        g.save();
+        g.translate(Math.cos(a) * d, Math.sin(a) * d);
+        g.rotate(r() * TAU);
+        g.fillStyle = ROSES[i % ROSES.length];
+        g.fillRect(-R * 0.035, -R * 0.01, R * 0.07, R * 0.022);
+        g.restore();
+      }
+      // a sugar moon in the middle
+      crescent(g, 0, 0, R * 0.15, "#fff6d8");
+    });
+  }
+  function roseSprite(ctx, kind) {
+    const c = ROSES[kind], R = Math.round(16 * L.k);
+    return S.sprite(ctx, "rose" + kind + R, R * 5, R * 5, R * 2.5, R * 2.5, (g) => {
+      S.blurred(g, c, 14, (g) => {
+        g.fillStyle = S.rgba(c, 0.6);
+        g.beginPath();
+        g.arc(0, 0, R, 0, TAU);
+        g.fill();
+      });
+      // a swirl of frosting: ridged petals round a spiral, seen from a little above
+      g.save();
+      g.scale(1, 0.75);
+      for (let i = 0; i < 8; i++) {
+        g.save();
+        g.rotate((i / 8) * TAU);
+        const lin = g.createLinearGradient(0, 0, 0, -R);
+        lin.addColorStop(0, S.mix(c, "#ffffff", 0.2));
+        lin.addColorStop(1, S.mix(c, "#7a4a7a", 0.25));
+        g.fillStyle = lin;
+        S.petal(g, R * 1.05, R * 0.42);
+        g.fill();
+        g.restore();
+      }
+      g.strokeStyle = S.mix(c, "#ffffff", 0.6);
+      g.lineWidth = 1.4;
+      g.beginPath();
+      for (let t = 0; t < 2.4 * TAU; t += 0.3) {
+        const rr = R * 0.08 + (t / (2.4 * TAU)) * R * 0.55;
+        g.lineTo(Math.cos(t) * rr, Math.sin(t) * rr);
+      }
+      g.stroke();
+      g.restore();
+      g.fillStyle = "rgba(255,255,255,0.8)";
+      g.beginPath();
+      g.arc(-R * 0.25, -R * 0.25, R * 0.12, 0, TAU);
+      g.fill();
+    });
+  }
+  function beadSprite(ctx, kind) {
+    const c = ROSES[kind], R = Math.round(6.5 * L.k);
+    return S.sprite(ctx, "bead" + kind + R, R * 3, R * 3, R * 1.5, R * 1.5, (g) => {
+      g.fillStyle = S.mix(c, "#3a1f3f", 0.55);
+      g.beginPath();
+      g.arc(0, 0, R * 1.25, 0, TAU);
+      g.fill();
+      const gr = g.createRadialGradient(-R * 0.3, -R * 0.3, 0, 0, 0, R);
+      gr.addColorStop(0, "#ffffff");
+      gr.addColorStop(1, c);
+      g.fillStyle = gr;
+      g.beginPath();
+      g.arc(0, 0, R, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // Mallow: a puff of cloud with a little hat, tiny curled horns, and stubby legs; face is live
+  function sheepSprite(ctx) {
+    const R = Math.round(L.sheep);
+    return S.sprite(ctx, "mallow" + R, R * 4, R * 4.4, R * 2, R * 2.3, (g) => {
+      S.blurred(g, "#e8dcff", 20, (g) => {
+        g.fillStyle = "rgba(232,220,255,0.45)";
+        g.beginPath();
+        g.arc(0, 0, R * 1.05, 0, TAU);
+        g.fill();
+      });
+      g.fillStyle = "#c8b8e0";
+      for (const s of [-1, 1]) g.fillRect(s * R * 0.38 - R * 0.09, R * 0.7, R * 0.18, R * 0.42);
+      const puffs = [[0, 0, 0.82], [-0.6, -0.25, 0.48], [0.6, -0.25, 0.48], [-0.55, 0.35, 0.5], [0.55, 0.35, 0.5], [0, -0.62, 0.5], [-0.3, -0.55, 0.4], [0.3, -0.55, 0.4], [0, 0.55, 0.5]];
+      for (const [x, y, s] of puffs) {
+        const gr = g.createRadialGradient(x * R - s * R * 0.3, y * R - s * R * 0.35, 0, x * R, y * R, s * R);
+        gr.addColorStop(0, "#ffffff");
+        gr.addColorStop(1, "#e2d6f4");
+        g.fillStyle = gr;
+        g.beginPath();
+        g.arc(x * R, y * R, s * R, 0, TAU);
+        g.fill();
+      }
+      // floppy ears, pink inside
+      for (const s of [-1, 1]) {
+        g.save();
+        g.translate(s * R * 0.78, -R * 0.12);
+        g.rotate(s * 0.55);
+        g.fillStyle = "#e4d4f4";
+        g.beginPath();
+        g.ellipse(0, R * 0.12, R * 0.17, R * 0.3, 0, 0, TAU);
+        g.fill();
+        g.fillStyle = "#ffc4d8";
+        g.beginPath();
+        g.ellipse(0, R * 0.15, R * 0.09, R * 0.19, 0, 0, TAU);
+        g.fill();
+        g.restore();
+      }
+      // her face patch: a soft lavender oval
+      g.fillStyle = "#f4ecff";
+      g.beginPath();
+      g.ellipse(0, R * 0.08, R * 0.5, R * 0.4, 0, 0, TAU);
+      g.fill();
+      // little curled horns
+      g.strokeStyle = "#b89ad0";
+      g.lineWidth = R * 0.12;
+      g.lineCap = "round";
+      for (const s of [-1, 1]) {
+        g.beginPath();
+        g.arc(s * R * 0.62, -R * 0.42, R * 0.16, s > 0 ? -2.4 : -0.8, s > 0 ? 0.9 : 3.9, s < 0);
+        g.stroke();
+      }
+      // the baker's hat: a soft puffed cap with a band
+      g.fillStyle = "#ffffff";
+      for (const [x, y, s] of [[-0.25, -1.05, 0.3], [0.25, -1.05, 0.3], [0, -1.22, 0.32]]) {
+        g.beginPath();
+        g.arc(x * R, y * R, s * R, 0, TAU);
+        g.fill();
+      }
+      g.fillStyle = "#ffb3cf";
+      g.fillRect(-R * 0.42, -R * 0.92, R * 0.84, R * 0.16);
+    });
+  }
+
+  // A soft halo of rays behind the cake, turning slowly
+  function haloSprite(ctx) {
+    const R = Math.round(L.R * 2.2);
+    return S.sprite(ctx, "halo" + R, R * 2, R * 2, R, R, (g) => {
+      for (let i = 0; i < 14; i++) {
+        g.save();
+        g.rotate((i / 14) * TAU);
+        const lin = g.createLinearGradient(0, 0, 0, -R);
+        lin.addColorStop(0, "rgba(255,240,230,0.5)");
+        lin.addColorStop(1, "rgba(255,240,230,0)");
+        g.fillStyle = lin;
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.lineTo(-R * 0.09, -R);
+        g.lineTo(R * 0.09, -R);
+        g.closePath();
+        g.fill();
+        g.restore();
+      }
+    });
+  }
+
+  // ---- Background happenings: occasional, varied, and up in the sky away from the cake ---------
+  const side = () => (Math.random() < 0.5 ? -1 : 1);
+  const HAPPENINGS = [
+    // a shooting star
+    { dur: 1.4, init: () => ({ x: W * (0.2 + Math.random() * 0.5), y: H * (0.06 + Math.random() * 0.1), dir: side() }),
+      draw: (ctx, u, p) => S.shootingStar(ctx, p.x, p.y, p.dir * W * 0.4, H * 0.1, u, 3 * L.k) },
+    // a striped balloon drifts across, its little passenger asleep in the basket
+    { dur: 20, init: () => ({ dir: side(), y: H * (0.2 + Math.random() * 0.08), a: ROSES[Math.floor(Math.random() * 6)], b: "#fff2e2" }),
+      draw(ctx, u, p, t) {
+        const x = p.dir > 0 ? -40 + u * (W + 80) : W + 40 - u * (W + 80), y = p.y + Math.sin(t * 0.6) * 8 * L.k, r = 21 * L.k;
+        S.glow(ctx, x, y, r * 2.6, p.a, 0.2);
+        ctx.save();
+        ctx.beginPath();
+        ctx.ellipse(x, y, r, r * 1.15, 0, 0, TAU);
+        ctx.clip();
+        for (let i = -3; i <= 3; i++) {
+          ctx.fillStyle = i % 2 ? p.a : p.b;
+          ctx.beginPath();
+          ctx.ellipse(x + i * r * 0.32, y, r * 0.16, r * 1.2, 0, 0, TAU);
+          ctx.fill();
+        }
+        ctx.restore();
+        ctx.strokeStyle = "rgba(255,240,230,0.5)";
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(x - r * 0.6, y + r * 0.9);
+        ctx.lineTo(x - r * 0.3, y + r * 1.6);
+        ctx.moveTo(x + r * 0.6, y + r * 0.9);
+        ctx.lineTo(x + r * 0.3, y + r * 1.6);
+        ctx.stroke();
+        ctx.fillStyle = "#c89a7a";
+        ctx.fillRect(x - r * 0.35, y + r * 1.6, r * 0.7, r * 0.45);
+        ctx.fillStyle = "#fbf6ff";
+        ctx.beginPath();
+        ctx.arc(x, y + r * 1.5, r * 0.28, 0, TAU);
+        ctx.fill();
+        S.face(ctx, x, y + r * 1.5, r * 0.2, "sleep", 0, "#ff9fc0");
+      } },
+    // three cloud birds glide over in a line, flapping slowly
+    { dur: 9, init: () => ({ dir: side(), y: H * (0.1 + Math.random() * 0.12) }),
+      draw(ctx, u, p, t) {
+        for (let j = 0; j < 3; j++) {
+          const x = (p.dir > 0 ? -30 + u * (W + 60) : W + 30 - u * (W + 60)) - p.dir * j * 22 * L.k, y = p.y + j * 9 * L.k + Math.sin(t * 2 + j) * 3 * L.k;
+          const f = Math.sin(t * 5 + j * 0.8) * 0.6, s = 7 * L.k;
+          S.glow(ctx, x, y, s * 2.4, "#fff2e2", 0.25);
+          ctx.strokeStyle = "#fbf2ff";
+          ctx.lineWidth = 2 * L.k;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(x - s, y - s * f);
+          ctx.quadraticCurveTo(x - s * 0.4, y - s * 0.5, x, y);
+          ctx.quadraticCurveTo(x + s * 0.4, y - s * 0.5, x + s, y - s * f);
+          ctx.stroke();
+          ctx.lineCap = "butt";
+        }
+      } },
+    // a cloud bunny peeks up over the cloud bank at one side, blinks, and sinks back
+    { dur: 6, layer: 1, init: () => ({ x: W * (Math.random() < 0.5 ? 0.1 : 0.9) }),
+      draw(ctx, u, p, t) {
+        const up = Math.sin(clamp(u * 1.1, 0, 1) * Math.PI), r = 13 * L.k, y = H * 0.7 + r * 1.6 - up * r * 2.2;
+        S.glow(ctx, p.x, y, r * 2.5, "#fff2e2", 0.2 * up);
+        ctx.fillStyle = "#f8f0ff";
+        for (const s of [-1, 1]) {
+          ctx.save();
+          ctx.translate(p.x + s * r * 0.4, y - r * 0.8);
+          ctx.rotate(s * (0.2 + Math.sin(t * 3) * 0.08));
+          ctx.beginPath();
+          ctx.ellipse(0, -r * 0.5, r * 0.22, r * 0.6, 0, 0, TAU);
+          ctx.fill();
+          ctx.restore();
+        }
+        ctx.beginPath();
+        ctx.arc(p.x, y, r, 0, TAU);
+        ctx.fill();
+        S.face(ctx, p.x, y + r * 0.05, r * 0.5, frac(t / 1.6) < 0.08 ? "blink" : u > 0.3 && u < 0.7 ? "happy" : "idle", 0, "#ff9fc0");
+      } },
+    // one of the sugar stars on the mobile spins round on its thread and twinkles
+    { dur: 2.5, init: () => ((spinAt = clock), (spinI = Math.floor(Math.random() * Math.max(5, Math.round(W / 80)))), {}), draw() {} },
+    // a flurry of sugar snow at one side
+    { dur: 5, init: () => ({ x: W * (Math.random() < 0.5 ? 0.15 : 0.85), seed: Math.random() * 99 }),
+      draw(ctx, u, p, t) {
+        const r = S.rng(Math.floor(p.seed));
+        for (let j = 0; j < 16; j++) {
+          const x = p.x + (r() - 0.5) * W * 0.3 + Math.sin(t * 1.5 + j) * 10 * L.k, y = -10 + ((r() + t * 0.18) % 1) * H * 0.6;
+          S.twinkle(ctx, x, y, (4 + r() * 4) * L.k, ROSES[j % 6], Math.sin(u * Math.PI) * 0.8);
+        }
+      } }
+  ];
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n && sparks.length < 160; i++) {
+      const a = -Math.PI * (0.05 + Math.random() * 0.9), v = 40 + Math.random() * 90, life = 0.6 + Math.random() * 0.5;
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? color : "#fff2e2", star: i % 4 === 0 });
+    }
+  }
+  function pipe(api, mk, perfect, ghost) {
+    const now = api.eng.beatPos();
+    mk.state = "rose";
+    mk.doneAt = now;
+    squeezeAt = clock;
+    // only one rosette to a spot: an old one there floats off as sparkles
+    for (const o of markT.list) {
+      if (o !== mk && o.state === "rose" && Math.abs(Math.atan2(Math.sin(o.phi - mk.phi), Math.cos(o.phi - mk.phi))) < TURN * 0.8) {
+        o.state = "fade";
+        o.doneAt = now;
+        o.popped = true;
+      }
+    }
+    const [x, y] = onTop(mk.phi, L.rim, now);
+    burst(x, y, ROSES[mk.kind], perfect ? 14 : 8);
+    if (perfect && !ghost) api.ring(x, y, api.color(), 34 * L.k);
+    if (++piped >= 8) finish(api, now);
+  }
+  // Eight rosettes: the candles light, and the cake floats up to be a moon; a fresh one is set down
+  function finish(api, now) {
+    candles = clock;
+    lifting = { t0: clock, cake, roses: markT.list.filter((m) => m.state === "rose").map((m) => ({ phi: m.phi, kind: m.kind })), rot: rot(now) };
+    for (const m of markT.list) if (m.state === "rose") m.state = "gone";
+    cake++;
+    piped = 0;
+    setDown = clock;
+    if (api.started && api.style !== "fidget") api.callout("A new moon", W / 2, H * 0.24, "#ffd58a", 1.1);
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // The shell's tracker spawns, judges, scores and plays autopilot; Frost says what a mark is.
+  // A rosette stays on the cake until it lifts; a missed or popped one fades for a beat and a half.
+  function setup(api) {
+    markT = api.track({
+      spawn(at) {
+        if (!W) return null;
+        let kind = Math.floor(Math.random() * ROSES.length);
+        if (kind === lastKind) kind = (kind + 1) % ROSES.length;
+        lastKind = kind;
+        // placed on the cake so the turn brings it to the nozzle at beat `at`
+        return { phi: NOZZLE - rot(at), kind, doneAt: -99 };
+      },
+      note: (mk) => mk.kind / ROSES.length,
+      hit(mk, { perfect, ghost }) {
+        pipe(api, mk, perfect, ghost);
+        if (!ghost && ++hits === 16) api.hint("sprinkles", 'Hold <span class="pb-kbd">Space</span>, let go: sprinkles');
+      },
+      miss(mk, counted) {
+        mk.state = "fade";
+        mk.doneAt = api.eng.beatPos();
+        missAt = clock;
+        if (counted) api.hint("pipe", "Tap as a mark comes round to the nozzle");
+      },
+      empty: () => burst(L.nx, L.ny - 14 * L.k, "#fff2e2", 3),
+      keep: (mk, now) => mk.state === "rose" || (mk.state === "fade" && now - mk.doneAt <= 1.5),
+      ready: false, // Fidget pipes at the nozzle, below
+      cue: false, // drawn in the garden's look, at the nozzle
+      perfect: PERFECT
+    });
+    bg = S.happenings(HAPPENINGS);
+  }
+
+  function onFire(api) {
+    if (api.style !== "fidget") {
+      markT.fire();
+      squeezeAt = clock;
+      return;
+    }
+    // a rosette right at the nozzle, whatever's there; the soonest mark melts away
+    const now = api.eng.beatPos(), w = markT.next();
+    if (w) markT.list.splice(markT.list.indexOf(w), 1);
+    const kind = w ? w.kind : Math.floor(Math.random() * ROSES.length);
+    api.eng.tap({ height: kind / ROSES.length });
+    const mk = { phi: NOZZLE - rot(now), at: now, kind, window: 0, state: "wait", doneAt: -99 };
+    markT.list.push(mk);
+    pipe(api, mk, false, true);
+  }
+
+  // A hold then release: a shake of sprinkles over the cake; a full charge, sugar stars from the sky
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const n = Math.round(10 + c * 20);
+    for (let i = 0; i < n && sprinkles.length < 120; i++) {
+      const wide = c >= 1;
+      sprinkles.push({ x: wide ? Math.random() * W : L.cx + (Math.random() - 0.5) * L.R * 1.6, y: wide ? -20 - Math.random() * H * 0.5 : L.cy - L.R * (0.9 + Math.random() * 0.8), vy: 60 + Math.random() * 90, spin: Math.random() * TAU, kind: i % ROSES.length, star: wide, t: 0 });
+    }
+    squeezeAt = clock;
+    if (c >= 1) {
+      api.callout("Sugar stars", W / 2, H * 0.3, "#ffd58a", 1.2);
+      api.eng.chime();
+    }
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    if (bg) bg.update(dt);
+    const drag = Math.pow(0.25, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 30 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    for (let i = sprinkles.length - 1; i >= 0; i--) {
+      const p = sprinkles[i];
+      p.t += dt;
+      p.y += p.vy * dt;
+      if (p.y > (p.star ? H : L.cy + L.R * 0.3) || p.t > 6) sprinkles.splice(i, 1);
+    }
+    if (lifting && clock - lifting.t0 > 4.5) {
+      if (moons.length >= 5) moons.shift();
+      moons.push({ cake: lifting.cake, slot: lifting.cake % 5, born: clock });
+      lifting = null;
+    }
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // ---- The look ---------------------------------------------------------------------------------
+  // A baked cake hung in the sky: a small glowing disc in the cake's colours, sprinkles and all
+  const moonSlot = (i) => [W * (0.3 + 0.13 * i) + (i % 2) * 8, H * (0.12 + (i % 2) * 0.07)];
+
+  // Over the bakery: sugar stars and little cookies hanging on threads, turning and twinkling
+  function starSprite(ctx, color) {
+    const R = Math.round(9 * L.k);
+    return S.sprite(ctx, "sugar" + color + R, R * 4, R * 4, R * 2, R * 2, (g) => {
+      S.blurred(g, color, 12, (g) => {
+        g.fillStyle = S.mix(color, "#ffffff", 0.35);
+        g.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const a = -Math.PI / 2 + (i / 10) * TAU, r = i % 2 ? R * 0.48 : R;
+          g.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        g.closePath();
+        g.fill();
+      });
+      g.fillStyle = "rgba(255,255,255,0.65)";
+      g.beginPath();
+      g.arc(-R * 0.2, -R * 0.2, R * 0.16, 0, TAU);
+      g.fill();
+    });
+  }
+  function drawMobile(ctx, now) {
+    const n = Math.max(5, Math.round(W / 80));
+    for (let i = 0; i < n; i++) {
+      const x = (i + 0.5) * (W / n), len = (40 + ((i * 37) % 5) * 14) * L.k + 30;
+      const sw = Math.sin(now * Math.PI * 0.5 + i * 1.1) * 0.07;
+      const ex = x + Math.sin(sw) * len, ey = Math.cos(sw) * len;
+      ctx.strokeStyle = "rgba(255,226,236,0.22)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      const c = ROSES[i % ROSES.length], tw = (Math.floor(now) + i) % 4 === 0 ? 1 - frac(now) : 0;
+      S.glow(ctx, ex, ey, 18 * L.k, c, 0.18 + 0.3 * tw);
+      ctx.save();
+      ctx.translate(ex, ey);
+      const spin = i === spinI && clock - spinAt < 2.5 ? ease((clock - spinAt) / 2.5) : 0;
+      if (spin > 0 && spin < 1) S.twinkle(ctx, ex, ey, 22 * L.k, c, Math.sin(spin * Math.PI));
+      ctx.rotate(Math.sin(clock * 0.7 + i) * 0.4);
+      ctx.scale(Math.cos(spin * TAU * 3), 1);
+      S.draw(ctx, starSprite(ctx, c), 0, 0);
+      ctx.restore();
+    }
+  }
+
+  function drawCake(ctx, n, cx, cy, s, now, roses, r0, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    S.draw(ctx, cakeSprite(ctx, n), 0, 0);
+    ctx.save();
+    ctx.scale(1, FLAT);
+    ctx.rotate(r0);
+    S.draw(ctx, topSprite(ctx, n), 0, 0);
+    ctx.restore();
+    for (const r of roses) {
+      const a = r.phi + r0;
+      S.draw(ctx, roseSprite(ctx, r.kind), Math.cos(a) * L.rim, Math.sin(a) * L.rim * FLAT);
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const m = MOODS[(api.tier - 1) % 4];
+    const pulse = 1 - frac(now);
+    // drifting cloud puffs and motes of sugar in the air
+    for (let i = 0; i < 4; i++) {
+      const x = ((i * 0.31 + clock * 0.006 * (1 + i * 0.3)) % 1.3) * W * 1.1 - W * 0.15, y = H * (0.28 + 0.09 * i);
+      S.glow(ctx, x, y, (60 + i * 14) * L.k, m.puff, 0.1);
+      S.glow(ctx, x + 40 * L.k, y + 6, (44 + i * 10) * L.k, m.puff, 0.08);
+    }
+    S.motes(ctx, W, H * 0.7, clock, ["#fff2e2", "#ffd58a", m.puff], { n: 14, size: 5, rise: 5, sway: 20, alpha: 0.5, seed: 17 });
+    bg.draw(ctx, 0);
+    drawMobile(ctx, now);
+    bg.draw(ctx, 1);
+    // the moons she's baked, hung in the sky and breathing on the beat
+    for (const mo of moons) {
+      const [x, y] = moonSlot(mo.slot);
+      const b = ease((clock - mo.born) / 0.8);
+      const c = CAKES[mo.cake % 4];
+      S.glow(ctx, x, y, 34 * L.k * (1 + 0.1 * pulse), c.drip, 0.35 * b);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(0.16 * b, 0.16 * b);
+      ctx.rotate(clock * 0.1);
+      S.draw(ctx, topSprite(ctx, mo.cake), 0, 0);
+      ctx.restore();
+    }
+    // a cake lifting off to join them
+    if (lifting) {
+      const u = (clock - lifting.t0) / 4.5;
+      const rise = ease(clamp((u - 0.2) / 0.8, 0, 1));
+      const [tx, ty] = moonSlot(lifting.cake % 5);
+      const x = L.cx + (tx - L.cx) * rise, y = L.cy + (ty - L.cy) * rise - Math.sin(rise * Math.PI) * H * 0.08;
+      const s = 1 - 0.84 * rise;
+      S.glow(ctx, x, y, L.R * 2 * s, CAKES[lifting.cake % 4].drip, 0.5 * (1 - u * 0.5));
+      drawCake(ctx, lifting.cake, x, y, s, now, lifting.roses, lifting.rot + (clock - lifting.t0) * 0.6, 1 - rise * 0.2);
+      // its candles, lit
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * TAU + lifting.rot;
+        const cxp = x + Math.cos(a) * L.R * 0.35 * s, cyp = y + Math.sin(a) * L.R * 0.35 * FLAT * s - 14 * L.k * s;
+        S.glow(ctx, cxp, cyp, 14 * L.k * s * (0.9 + 0.2 * Math.sin(clock * 9 + i)), "#ffd58a", 0.9);
+      }
+      for (let i = 0; i < 3; i++) S.twinkle(ctx, x + Math.sin(clock * 3 + i * 2) * L.R * 0.6 * s, y + Math.cos(clock * 2 + i) * L.R * 0.3 * s, 10 * L.k, ROSES[i], 0.8);
+    }
+
+    ctx.save();
+    ctx.translate(L.cx, L.cy - L.R * 0.1);
+    ctx.scale(1, 0.8);
+    ctx.rotate(clock * 0.05);
+    S.add(ctx, haloSprite(ctx), 0, 0, 1, 0.1 + 0.04 * pulse);
+    ctx.restore();
+    drawMallow(ctx, now);
+    // the cake, set down with a little squash
+    const land = clamp((clock - setDown) / 0.45, 0, 1);
+    const sq = land < 1 ? Math.sin(land * Math.PI) * 0.06 : 0;
+    const drop = (1 - ease(land)) * -40 * L.k;
+    S.glow(ctx, L.cx, L.cy + L.side, L.R * 2.1, CAKES[cake % 4].drip, 0.18 + 0.08 * pulse);
+    ctx.save();
+    ctx.translate(L.cx, L.cy + drop);
+    ctx.scale(1 + sq, 1 - sq);
+    ctx.translate(-L.cx, -L.cy);
+    drawCake(ctx, cake, L.cx, L.cy, 1, now, [], rot(now), land < 1 ? ease(land * 2) : 1);
+    ctx.restore();
+    // rosettes and marks on the top, the far ones first
+    const items = markT.list.slice().sort((a, b) => Math.sin(a.phi + rot(now)) - Math.sin(b.phi + rot(now)));
+    for (const mk of items) {
+      const [x, y, front] = onTop(mk.phi, L.rim, now);
+      const yy = y + drop;
+      const c = ROSES[mk.kind];
+      if (mk.state === "rose") {
+        const grow = ease((now - mk.doneAt) / 0.35);
+        S.glow(ctx, x, yy, 22 * L.k, c, (0.25 + 0.2 * pulse) * grow);
+        ctx.save();
+        ctx.translate(x, yy);
+        const sc = (0.75 + 0.25 * front) * (0.4 + 0.6 * grow);
+        ctx.scale(sc, sc);
+        S.draw(ctx, roseSprite(ctx, mk.kind), 0, 0);
+        ctx.restore();
+        continue;
+      }
+      if (mk.state === "fade") {
+        const u = clamp((now - mk.doneAt) / 1.5, 0, 1);
+        if (!mk.popped) S.glow(ctx, x, yy, 8 * L.k, c, (1 - u) * 0.4);
+        else S.twinkle(ctx, x, yy - u * 40 * L.k, 9 * L.k, c, 1 - u);
+        continue;
+      }
+      // a waiting mark: a bead of light, and a ring closing on it as it nears the nozzle
+      const left = mk.at - now;
+      S.glow(ctx, x, yy, (14 + 5 * pulse) * L.k, c, 0.6);
+      S.draw(ctx, beadSprite(ctx, mk.kind), x, yy, 0.8 + 0.2 * front);
+      if (mk === markT.next()) S.cue(ctx, api, L.nx, L.ny + drop, left, { size: 13 * L.k, flat: 0.6, color: c, perfect: PERFECT });
+    }
+
+    // candles on the fresh cake as the old one lifts
+    if (clock - candles < 0.8) {
+      const u = (clock - candles) / 0.8;
+      S.glow(ctx, L.cx, L.cy, L.R * 1.8 * ease(u), "#ffd58a", (1 - u) * 0.6);
+    }
+
+    for (const p of sprinkles) {
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, ROSES[p.kind], 0.9);
+      else {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.spin + p.t * 6);
+        ctx.fillStyle = ROSES[p.kind];
+        ctx.fillRect(-3 * L.k, -1 * L.k, 6 * L.k, 2 * L.k);
+        ctx.restore();
+      }
+    }
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, p.color, a);
+      else S.glow(ctx, p.x, p.y, 5 * L.k, p.color, a * 0.9);
+    }
+    const ch = api.started ? api.charge : 0;
+    if (ch > 0) {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = ch >= 1 ? "#ffd58a" : "#e8dcff";
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(L.mx, L.my, L.sheep * 1.7, -Math.PI / 2, -Math.PI / 2 + ch * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+  }
+
+  // Mallow behind the cake, leaning over its far side with the piping bag; she squeezes on a tap
+  function drawMallow(ctx, now) {
+    const R = L.sheep;
+    const bob = Math.sin(now * Math.PI * 0.5) * 2 * L.k;
+    const x = L.mx, y = L.my + bob;
+    const sq = clock - squeezeAt < 0.3 ? Math.sin(((clock - squeezeAt) / 0.3) * Math.PI) : 0;
+    S.glow(ctx, x, y, R * 2.6, "#e8dcff", 0.16);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1 + sq * 0.05, 1 - sq * 0.05);
+    S.draw(ctx, sheepSprite(ctx), 0, 0);
+    const next = markT.list.find((mk) => mk.state === "wait");
+    const left = next ? next.at - now : 9;
+    const blink = frac(now / 4 + 0.2) < 0.04;
+    const mood = sq > 0 ? "happy" : clock - missAt < 0.5 ? "o" : left < 1.5 ? (blink ? "blink" : "idle") : "sleep";
+    const look = next && left < 2 ? clamp((onTop(next.phi, L.rim, now)[0] - x) / (L.R * 0.6), -1, 1) : 0;
+    S.face(ctx, 0, R * 0.1, R * 0.42, mood, look, "#ff9fc0");
+    ctx.restore();
+    // the piping bag, held in both hooves, its nozzle on the cake's far rim
+    const bx = x - R * 0.05, by = y + R * 0.88;
+    const tx = L.nx, ty = L.ny - 6 * L.k + sq * 3 * L.k;
+    const ang = Math.atan2(ty - by, tx - bx), len = Math.hypot(tx - bx, ty - by);
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.rotate(ang);
+    const w = R * 0.36 * (1 - sq * 0.25);
+    const lin = ctx.createLinearGradient(0, -w, 0, w);
+    lin.addColorStop(0, "#fffafd");
+    lin.addColorStop(1, "#e2d0ec");
+    ctx.fillStyle = lin;
+    ctx.beginPath();
+    ctx.moveTo(0, -w);
+    ctx.quadraticCurveTo(len * 0.55, -w * 0.85, len - 6 * L.k, -2.2 * L.k);
+    ctx.lineTo(len - 6 * L.k, 2.2 * L.k);
+    ctx.quadraticCurveTo(len * 0.55, w * 0.85, 0, w);
+    ctx.quadraticCurveTo(-w * 0.7, 0, 0, -w);
+    ctx.fill();
+    // the frosting inside, the colour of the next rosette
+    ctx.fillStyle = S.rgba(ROSES[next ? next.kind : 0], 0.75);
+    ctx.beginPath();
+    ctx.moveTo(w * 0.5, -w * 0.55);
+    ctx.quadraticCurveTo(len * 0.55, -w * 0.5, len - 6 * L.k, -1.4 * L.k);
+    ctx.lineTo(len - 6 * L.k, 1.4 * L.k);
+    ctx.quadraticCurveTo(len * 0.55, w * 0.5, w * 0.5, w * 0.55);
+    ctx.closePath();
+    ctx.fill();
+    // a ribbon tie at the top
+    ctx.fillStyle = "#ffb3cf";
+    ctx.fillRect(w * 0.15, -w * 0.95, w * 0.22, w * 1.9);
+    ctx.strokeStyle = "rgba(255,255,255,0.45)";
+    ctx.lineWidth = 1.2;
+    for (const f of [0.3, 0.55]) {
+      ctx.beginPath();
+      ctx.moveTo(len * f - w * 0.3, -w * (1 - f * 0.8));
+      ctx.lineTo(len * f + w * 0.3, w * (1 - f * 0.8));
+      ctx.stroke();
+    }
+    const nz = ctx.createLinearGradient(0, -3 * L.k, 0, 3 * L.k);
+    nz.addColorStop(0, "#ffffff");
+    nz.addColorStop(1, "#a8a0c4");
+    ctx.fillStyle = nz;
+    ctx.beginPath();
+    ctx.moveTo(len - 8 * L.k, -3.4 * L.k);
+    ctx.lineTo(len, -1.6 * L.k);
+    ctx.lineTo(len, 1.6 * L.k);
+    ctx.lineTo(len - 8 * L.k, 3.4 * L.k);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#fbf6ff";
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.arc(bx + s * R * 0.3, by + R * 0.05, R * 0.18, 0, TAU);
+      ctx.fill();
+    }
+    S.glow(ctx, tx, ty + 3 * L.k, 10 * L.k * (1 + sq), "#fff2e2", 0.45 + sq * 0.5);
+  }
+
+  SpaceShell.mount({
+    skin: S,
+    setup,
+    key: "cozy-frost",
+    title: "Frost",
+    hint: "Tap as each mark comes round to the nozzle",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Warm oven", "Sugar sky", "Moon bakery"],
+    fidgetPoint: () => ({ x: L.nx, y: L.ny }),
+    resize: layout,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

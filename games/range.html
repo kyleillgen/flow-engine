@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="The lodge's gallery booth: painted wooden cut-outs ride two rails under a striped awning and a string of bulbs. Tap as each one reaches the brass mark and it flips over with a bell. A rhythm micro-game that finds your tempo.">
+<title>Range</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/hunt/hunt-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Range: the gallery booth at the back of the lodge. Painted wooden cut-outs on posts (a rabbit,
+// a fox, a pinecone, a bullseye) ride two rails, the top one to the right and the bottom one to
+// the left, under a striped awning and a string of bulbs. Each one reaches the brass mark in the
+// middle of its rail on a whole beat. The sights glide between the two marks by themselves; tap
+// as the target crosses and it flips over to show a gold star on its back, with a ring of the
+// bell. Now and then a gold target comes along, worth a bonus. One you miss rides on, upright.
+//
+// A target's place on its rail is a function of the beat position: one slot a beat, crossing
+// the mark on its beat. Clean is ±0.3 beat (wider with assist, for ones not yet spawned),
+// perfect ±0.1.
+// Fidget (F): every press flips the nearest target; if none is near, a gold star flips up at
+// the mark. Hold then let go: a confetti popper over the counter; a full charge sets the bulbs
+// chasing and throws a shower of it. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = HuntSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const SIGHT = "#ff8a3d";
+  const GOLD = "#ffd76a";
+  const PAINT = ["#e8463a", "#3a8ad8", "#4ab06a", "#f0a030", "#b05ad0"];
+  const SHAPES = ["rabbit", "fox", "cone", "bull"];
+  const CONFETTI = ["#e8463a", "#ffd76a", "#3a8ad8", "#4ab06a", "#fff1dc"];
+  // The booth by tier: lantern-lit, warmer, then the bulbs change colour
+  const MOODS = [
+    { wall: ["#6a3e22", "#3a2012"], plank: "#2a160c", stripe: "#c8382e", stripe2: "#f2e2c0", bulbs: ["#ffd08a", "#ffb547"] },
+    { wall: ["#704224", "#3e2214"], plank: "#2c170c", stripe: "#2e7a4a", stripe2: "#f2e2c0", bulbs: ["#ffd08a", "#b4e07a"] },
+    { wall: ["#5e3a2a", "#341c14"], plank: "#26140c", stripe: "#3a5aa8", stripe2: "#f2e2c0", bulbs: ["#ffd08a", "#ff9a6b"] },
+    { wall: ["#4a3034", "#28161c"], plank: "#1e0e12", stripe: "#8a2e5a", stripe2: "#f6e6c8", bulbs: ["#ffe7a8", "#ff8fd8"] }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let track = null; // api.track(): track.list holds { at, rail, shape, paint, gold, window, state: "wait" | "tag" | "gone", tagAt }
+  let sparks = [], pops = [], confetti = [];
+  let lastRail = 1, sinceGold = 0;
+  let clock = 0, lastTier = 1, hits = 0, bell = -99, chase = 0;
+  let sky = { from: 1, to: 1, t: 1 };
+  let prevSpot = null; // where the sights last settled: { x, y, at }
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    // a short frame (the pocket) gets a shallower awning, smaller targets and the rails lower down
+    const short = H < 480;
+    const t = clamp(Math.min(W, H) * 0.085, short ? 22 : 30, 60);
+    const top = short ? Math.max(52, H * 0.22) : Math.max(96, H * 0.2);
+    const [r0, r1] = short ? [0.42, 0.76] : [0.33, 0.62];
+    L = { t, k: t / 40, slot: clamp(W * 0.21, 84, 230), awning: top, rails: [{ y: top + (H - top) * r0, dir: 1 }, { y: top + (H - top) * r1, dir: -1 }], counter: H * 0.86 };
+  }
+
+  const markOf = (rail) => ({ x: W / 2, y: L.rails[rail].y - L.t * 1.25 });
+  // A target's place: one slot a beat along its rail, at the mark on its beat
+  function placeOf(m, now) {
+    const r = L.rails[m.rail];
+    return { x: W / 2 + r.dir * (now - m.at) * L.slot, y: r.y - L.t * 1.25 };
+  }
+  // How far it has flipped (0 up .. 1 over), from the tag on
+  const flipOf = (m, now) => (m.state === "tag" ? smooth(clamp((now - m.tagAt) / 0.45, 0, 1)) : 0);
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  // A painted wooden cut-out on a post, front or back (a gold star), in units of t
+  function targetSprite(ctx, shape, paint, back, t) {
+    t = Math.round(t);
+    return S.sprite(ctx, `tgt${shape}${paint}${back ? "b" : "f"}${t}`, t * 2.6, t * 3.2, t * 1.3, t * 1.5, (g) => {
+      g.scale(t / 40, t / 40);
+      g.lineJoin = g.lineCap = "round";
+      // the post
+      g.fillStyle = "#5a3a22";
+      g.fillRect(-3, 20, 6, 30);
+      const fill = back ? "#d8b47a" : paint;
+      g.fillStyle = fill;
+      g.strokeStyle = "#f6e6c8";
+      g.lineWidth = 3;
+      g.beginPath();
+      if (shape === "bull") {
+        g.arc(0, 0, 34, 0, TAU);
+      } else if (shape === "cone") {
+        g.ellipse(0, 4, 22, 32, 0, 0, TAU);
+      } else if (shape === "rabbit") {
+        g.ellipse(0, 10, 24, 22, 0, 0, TAU);
+        g.moveTo(-6, -8);
+        g.ellipse(-9, -26, 7, 22, -0.15, 0, TAU);
+        g.moveTo(14, -8);
+        g.ellipse(9, -26, 7, 22, 0.15, 0, TAU);
+      } else {
+        // fox: a round face with pointed ears
+        g.moveTo(-28, -30);
+        g.lineTo(-10, -16);
+        g.lineTo(10, -16);
+        g.lineTo(28, -30);
+        g.lineTo(26, 0);
+        g.quadraticCurveTo(20, 22, 0, 30);
+        g.quadraticCurveTo(-20, 22, -26, 0);
+        g.closePath();
+      }
+      g.fill();
+      g.stroke();
+      if (back) {
+        // the back: a gold star, painted
+        g.fillStyle = GOLD;
+        g.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 7 : 17;
+          g.lineTo(Math.cos(a) * r, Math.sin(a) * r + (shape === "rabbit" ? 10 : 2));
+        }
+        g.closePath();
+        g.fill();
+        return;
+      }
+      g.fillStyle = "#f6e6c8";
+      g.strokeStyle = "#2a1810";
+      g.lineWidth = 2.5;
+      if (shape === "bull") {
+        for (const [r, c] of [[24, "#f6e6c8"], [15, paint], [7, "#f6e6c8"]]) {
+          g.fillStyle = c;
+          g.beginPath();
+          g.arc(0, 0, r, 0, TAU);
+          g.fill();
+        }
+      } else if (shape === "cone") {
+        // scales
+        g.strokeStyle = S.mix(paint, "#2a1810", 0.5);
+        g.lineWidth = 2;
+        for (let row = -2; row <= 2; row++)
+          for (let col = -1; col <= 1; col++) {
+            g.beginPath();
+            g.arc(col * 12 + (row % 2 ? 6 : 0), row * 12 + 6, 7, 0.1 * Math.PI, 0.9 * Math.PI);
+            g.stroke();
+          }
+      } else {
+        // a friendly face
+        const y = shape === "rabbit" ? 6 : 0;
+        if (shape === "fox") {
+          g.beginPath();
+          g.moveTo(-18, 6);
+          g.quadraticCurveTo(0, 30, 18, 6);
+          g.quadraticCurveTo(0, 16, -18, 6);
+          g.fill();
+        } else {
+          g.beginPath();
+          g.ellipse(0, y + 12, 11, 8, 0, 0, TAU);
+          g.fill();
+        }
+        g.fillStyle = "#2a1810";
+        for (const s of [-1, 1]) {
+          g.beginPath();
+          g.arc(s * 9, y - 2, 3.2, 0, TAU);
+          g.fill();
+        }
+        g.beginPath();
+        g.arc(0, y + 8, 2.6, 0, TAU);
+        g.fill();
+      }
+    });
+  }
+
+  // The booth, baked per tier: plank wall, a lantern's warm pool, two rails, the counter
+  function boothLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "range" + tier, W, H, (g) => {
+      const lin = g.createLinearGradient(0, 0, 0, H);
+      lin.addColorStop(0, m.wall[1]);
+      lin.addColorStop(0.5, m.wall[0]);
+      lin.addColorStop(1, m.wall[1]);
+      g.fillStyle = lin;
+      g.fillRect(0, 0, W, H);
+      const r = S.rng(tier * 9);
+      const pw = 34;
+      for (let x = -((W / 2) % pw); x < W; x += pw) {
+        g.fillStyle = "rgba(0,0,0,0.28)";
+        g.fillRect(x, 0, 2, H);
+        g.fillStyle = `rgba(255,220,170,${0.02 + r() * 0.04})`;
+        g.fillRect(x + 2, 0, pw - 2, H);
+        // knots and grain
+        g.strokeStyle = "rgba(0,0,0,0.12)";
+        g.lineWidth = 1;
+        for (let i = 0; i < 3; i++) {
+          const gx = x + 6 + r() * (pw - 12);
+          g.beginPath();
+          g.moveTo(gx, r() * H);
+          g.lineTo(gx + (r() - 0.5) * 4, r() * H);
+          g.stroke();
+        }
+      }
+      // warm pools of light from lanterns either side
+      g.globalCompositeOperation = "lighter";
+      for (const lx of [W * 0.12, W * 0.88]) {
+        const rg = g.createRadialGradient(lx, H * 0.45, 0, lx, H * 0.45, Math.max(W, H) * 0.45);
+        rg.addColorStop(0, "rgba(255,190,110,0.22)");
+        rg.addColorStop(1, "rgba(255,190,110,0)");
+        g.fillStyle = rg;
+        g.fillRect(0, 0, W, H);
+      }
+      g.globalCompositeOperation = "source-over";
+      // the rails: a brass bar with a slot, and a shadow under
+      for (const rail of L.rails) {
+        g.fillStyle = "rgba(0,0,0,0.35)";
+        g.fillRect(0, rail.y + 6, W, 10);
+        const bl = g.createLinearGradient(0, rail.y - 6, 0, rail.y + 6);
+        bl.addColorStop(0, "#e8c27a");
+        bl.addColorStop(0.5, "#a8783a");
+        bl.addColorStop(1, "#5a3a1a");
+        g.fillStyle = bl;
+        g.fillRect(0, rail.y - 6, W, 12);
+        g.fillStyle = "#1a0e08";
+        g.fillRect(0, rail.y - 1.5, W, 3);
+      }
+      // the counter
+      const cl = g.createLinearGradient(0, L.counter, 0, H);
+      cl.addColorStop(0, "#8a5a32");
+      cl.addColorStop(0.08, "#5a3418");
+      cl.addColorStop(1, "#2a160a");
+      g.fillStyle = cl;
+      g.fillRect(0, L.counter, W, H - L.counter);
+      g.fillStyle = "rgba(255,220,160,0.5)";
+      g.fillRect(0, L.counter, W, 2);
+      // the awning: stripes with a scalloped edge
+      const sw = clamp(W / 10, 36, 64);
+      for (let i = 0, x = 0; x < W; i++, x += sw) {
+        g.fillStyle = i % 2 ? m.stripe2 : m.stripe;
+        g.fillRect(x, 0, sw, L.awning);
+        g.beginPath();
+        g.arc(x + sw / 2, L.awning, sw / 2, 0, Math.PI);
+        g.fill();
+      }
+      const sh = g.createLinearGradient(0, 0, 0, L.awning);
+      sh.addColorStop(0, "rgba(0,0,0,0.35)");
+      sh.addColorStop(1, "rgba(0,0,0,0)");
+      g.fillStyle = sh;
+      g.fillRect(0, 0, W, L.awning);
+      g.fillStyle = "rgba(0,0,0,0.3)";
+      g.fillRect(0, L.awning + sw / 2, W, 6);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  const settle = (m) => {
+    const p = markOf(m.rail);
+    if (!prevSpot || m.at >= prevSpot.at) prevSpot = { x: p.x, y: p.y, at: m.at };
+  };
+
+  // ---- Now and then, behind the play -----------------------------------------------------------
+  // One small thing at a time, every few seconds, a different one each time; none of it is a
+  // target and none of it crosses where the sights go
+  const across = (u, e, pad) => (e.dir > 0 ? -pad + u * (W + 2 * pad) : W + pad - u * (W + 2 * pad));
+  const moodNow = () => MOODS[(lastTier - 1) % 4];
+  const amb = S.ambience([
+    // a moth visits the bulbs
+    { dur: 6, draw: (ctx, u, e) => {
+      const t = u * 6, sw = clamp(W / 10, 36, 64);
+      const x = W * (0.15 + e.r * 0.7) + Math.sin(t * 2.3) * 40 * L.k, y = L.awning + sw / 2 + 18 + Math.cos(t * 3.1) * 10 * L.k;
+      ctx.globalAlpha = Math.sin(u * Math.PI);
+      S.glow(ctx, x, y, 10 * L.k, "#ffd08a", 0.25);
+      S.critter(ctx, "moth", x, y, 6 * L.k, t, "#3a2416");
+      ctx.globalAlpha = 1;
+    } },
+    // the lodge cat strolls along the counter
+    { dur: 10, draw: (ctx, u, e) => S.critter(ctx, "cat", across(u, e, 40), L.counter - L.t * 0.28, L.t * 0.38, u * 10 * 0.8, "#1a0e08", e.dir) },
+    // a balloon slips loose at the side and floats up
+    { dur: 7, draw: (ctx, u, e) => {
+      const x = (e.dir > 0 ? W * 0.06 : W * 0.94) + Math.sin(u * 9) * 8, y = L.counter - u * (L.counter + 80), r = L.t * 0.4;
+      ctx.strokeStyle = "rgba(255,240,220,0.5)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y + r);
+      ctx.quadraticCurveTo(x + 6, y + r * 2, x, y + r * 3.2);
+      ctx.stroke();
+      ctx.fillStyle = CONFETTI[Math.floor(e.r * CONFETTI.length)];
+      ctx.beginPath();
+      ctx.ellipse(x, y, r * 0.85, r, 0, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.45)";
+      ctx.beginPath();
+      ctx.ellipse(x - r * 0.3, y - r * 0.35, r * 0.15, r * 0.25, -0.4, 0, TAU);
+      ctx.fill();
+    } },
+    // the bulbs give a little chase all by themselves
+    { dur: 2, draw: (ctx, u, e) => {
+      if (e.fired) return;
+      e.fired = true;
+      chase = Math.max(chase, 1.5);
+    } }
+  ]);
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function tag(api, m, perfect, ghost) {
+    const now = api.eng.beatPos();
+    m.state = "tag";
+    settle(m);
+    m.tagAt = now;
+    bell = clock;
+    const p = placeOf(m, now);
+    pops.push({ x: p.x, y: p.y, t: 0, size: L.t * (perfect ? 2.2 : 1.6), color: perfect || m.gold ? GOLD : "#fff1dc" });
+    for (let i = 0; i < (perfect ? 12 : 8) && sparks.length < 160; i++) {
+      const a = Math.random() * TAU, v = 50 + Math.random() * 110, life = 0.5 + Math.random() * 0.5;
+      sparks.push({ x: p.x, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life, max: life, color: i % 3 ? GOLD : "#fff1dc", star: i % 3 === 0 });
+    }
+    if (perfect && !ghost) api.ring(p.x, p.y, GOLD, L.t * 2.2);
+    return { x: p.x, y: p.y - L.t * 1.8 }; // where the shell pops the points
+  }
+  function pop(n, x, spread) {
+    for (let i = 0; i < n && confetti.length < 140; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * spread, v = 260 + Math.random() * 260;
+      confetti.push({ x, y: L.counter, vx: Math.cos(a) * v, vy: Math.sin(a) * v, rot: Math.random() * TAU, vr: (Math.random() - 0.5) * 12, life: 2.5, color: CONFETTI[i % CONFETTI.length] });
+    }
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: a target that crosses its mark `ahead` beats from now, two or more after the
+  // last. The rails alternate mostly, so the sights have somewhere to go.
+  function spawn() {
+    const rail = Math.random() < 0.7 ? 1 - lastRail : lastRail;
+    lastRail = rail;
+    const gold = ++sinceGold >= 6 && Math.random() < 0.35;
+    if (gold) sinceGold = 0;
+    return { rail, shape: SHAPES[Math.floor(Math.random() * SHAPES.length)], paint: gold ? "#e0a020" : PAINT[Math.floor(Math.random() * PAINT.length)], gold, tagAt: -99 };
+  }
+
+  // 3. A tap: the tracker tags whatever is in reach. In Fidget, with nothing within 1 beat,
+  // one springs up right in the sights instead (from the tracker's empty())
+  function springUp(api) {
+    if (track.list.length >= 16) return;
+    const now = api.eng.beatPos();
+    const sp = sights(now);
+    const rail = Math.abs(sp.y - markOf(0).y) < Math.abs(sp.y - markOf(1).y) ? 0 : 1;
+    const m = { at: now, rail, shape: "bull", paint: "#e0a020", gold: true, state: "wait", tagAt: -99, window: 0 };
+    track.list.push(m);
+    tag(api, m, false, true);
+  }
+
+  // The arrive-on-the-beat loop is the shell's: it spawns, judges, scores, misses and plays
+  // autopilot, and the game says what arrives and how a tag looks
+  function setup(api) {
+    track = api.track({
+      spawn,
+      ahead: () => Math.max(4, Math.ceil((W / 2 + L.t * 2) / L.slot)), // far enough ahead that it rides in from off screen
+      ready: (m, now) => Math.abs(m.at - now) < 1,
+      note: (m) => 0.2 + m.rail * 0.5,
+      hit: (m, { perfect, ghost }) => {
+        const at = tag(api, m, perfect, ghost);
+        if (!ghost && m.gold) {
+          const p = placeOf(m, api.eng.beatPos());
+          api.bonus(150, "Gold star", p.x, p.y - L.t * 3);
+        }
+        if (!ghost && ++hits === 16) api.hint("popper", 'Hold <span class="pb-kbd">Space</span>, let go: a confetti popper');
+        return at;
+      },
+      miss: (m, counted) => {
+        m.state = "gone";
+        settle(m);
+        if (counted) api.hint("mark", "Tap as it crosses the brass mark");
+      },
+      empty: () => {
+        if (api.style === "fidget") return springUp(api);
+        const sp = sights(api.eng.beatPos());
+        pops.push({ x: sp.x, y: sp.y, t: 0, size: L.t, color: SIGHT });
+      },
+      perfect: PERFECT,
+      cue: false, // the sights carry the timing ring, gold on the perfect beat (see draw)
+      keep: (m, now) => {
+        const p = placeOf(m, now);
+        return !(now > m.at && (p.x < -L.t * 2 || p.x > W + L.t * 2));
+      } // until it's off screen
+    });
+  }
+
+  // A hold then release: confetti pops up over the counter; full, the bulbs chase and it showers
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    pop(Math.round(14 + c * 30), W * (0.3 + Math.random() * 0.4), 0.8 + c * 0.6);
+    if (c >= 1) {
+      pop(40, W * 0.12, 0.6);
+      pop(40, W * 0.88, 0.6);
+      chase = 3;
+      api.callout("Showtime", W / 2, H * 0.3, GOLD, 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // The sights glide between the two brass marks and settle a moment before each crossing
+  function sights(now) {
+    let next = null;
+    for (const m of track.list) if (m.state === "wait" && now < m.at + m.window && (!next || m.at < next.at)) next = m;
+    const from = prevSpot || markOf(0);
+    if (!next) return { x: from.x, y: from.y, lock: 0, next: null };
+    const to = markOf(next.rail);
+    const start = Math.max(prevSpot ? prevSpot.at : -1e9, next.at - 1.8), end = next.at - 0.35;
+    const u = end > start ? smooth(clamp((now - start) / (end - start), 0, 1)) : 1;
+    return { x: from.x + (to.x - from.x) * u, y: from.y + (to.y - from.y) * u, lock: clamp(1 - Math.abs(next.at - now) / 1.2, 0, 1), next };
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    amb.update(dt);
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 30 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    const cdrag = Math.pow(0.3, dt);
+    for (let i = confetti.length - 1; i >= 0; i--) {
+      const p = confetti[i];
+      p.vx *= cdrag;
+      p.vy = p.vy * cdrag + 260 * dt;
+      p.x += p.vx * dt + Math.sin(clock * 4 + p.rot) * 20 * dt;
+      p.y += p.vy * dt;
+      p.rot += p.vr * dt;
+      if ((p.life -= dt) <= 0 || p.y > H) confetti.splice(i, 1);
+    }
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    chase = Math.max(0, chase - dt);
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const mood = MOODS[(api.tier - 1) % 4];
+    if (sky.t < 1) boothLayer(ctx, sky.from, 1);
+    boothLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    // the rail chains creep along, one link a sixteenth
+    ctx.fillStyle = "rgba(255,220,160,0.35)";
+    for (const r of L.rails) {
+      const off = (((now * L.slot * r.dir) % 16) + 16) % 16;
+      for (let x = off - 16; x < W; x += 16) ctx.fillRect(x, r.y - 1, 6, 2);
+    }
+    // the brass marks
+    for (let i = 0; i < 2; i++) {
+      const y = L.rails[i].y;
+      ctx.fillStyle = "#ffd78a";
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 7, y + 14);
+      ctx.lineTo(W / 2 + 7, y + 14);
+      ctx.lineTo(W / 2, y + 6);
+      ctx.closePath();
+      ctx.fill();
+    }
+    for (const m of track.list) {
+      const p = placeOf(m, now);
+      if (p.x < -L.t * 2 || p.x > W + L.t * 2) continue;
+      const f = flipOf(m, now);
+      // a flip over backwards: squash flat, then the back comes up
+      const back = f > 0.5;
+      const sy = Math.abs(Math.cos(f * Math.PI));
+      ctx.fillStyle = "rgba(0,0,0,0.3)";
+      ctx.fillRect(p.x - 2, L.rails[m.rail].y - 2, 10, 6);
+      ctx.save();
+      ctx.translate(p.x, L.rails[m.rail].y);
+      ctx.scale(1, Math.max(0.04, sy));
+      S.draw(ctx, targetSprite(ctx, m.shape, m.paint, back, L.t), 0, -L.t * 1.25);
+      ctx.restore();
+      if (m.gold && m.state === "wait") S.glow(ctx, p.x, p.y, L.t * 1.6, GOLD, 0.3 + 0.2 * Math.sin(now * TAU));
+      if (back && now - m.tagAt < 1.5) S.glow(ctx, p.x, p.y, L.t * 1.2, GOLD, 0.35 * (1 - (now - m.tagAt) / 1.5));
+    }
+
+    // the string of bulbs along the awning, chasing on the eighths (all of them after a showtime)
+    const sw = clamp(W / 10, 36, 64);
+    const step = Math.floor(now * 2 * (chase > 0 ? 3 : 1));
+    for (let i = 0, x = sw / 2; x < W; i++, x += sw / 2) {
+      const y = L.awning + sw / 2 + 10 + Math.sin((x / W) * Math.PI * 6) * 3;
+      const on = chase > 0 ? (i + step) % 2 === 0 : (i + step) % 4 === 0;
+      const c = mood.bulbs[i % 2];
+      S.glow(ctx, x, y, 14 * L.k, c, on ? 0.9 : 0.25);
+      ctx.fillStyle = on ? "#fff6e0" : S.mixA(c, "#2a1810", 0.5, 1);
+      ctx.beginPath();
+      ctx.arc(x, y, 3.2 * L.k, 0, TAU);
+      ctx.fill();
+    }
+    amb.draw(ctx);
+    // the bell, top centre, swinging after a tag
+    const sb = clock - bell;
+    const swing = sb < 1.2 ? Math.sin(sb * 18) * 0.5 * (1 - sb / 1.2) : 0;
+    ctx.save();
+    ctx.translate(W / 2, L.awning + sw / 2 + 4);
+    ctx.rotate(swing);
+    const bs = 14 * L.k;
+    ctx.fillStyle = "#e8b04a";
+    ctx.beginPath();
+    ctx.moveTo(-bs, bs * 1.6);
+    ctx.quadraticCurveTo(-bs, 0, 0, 0);
+    ctx.quadraticCurveTo(bs, 0, bs, bs * 1.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#8a5a1a";
+    ctx.beginPath();
+    ctx.arc(0, bs * 1.7, bs * 0.25, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    if (sb < 0.6) S.glow(ctx, W / 2, L.awning + sw / 2 + 4 + bs, bs * 4, GOLD, (1 - sb / 0.6) * 0.6);
+
+    // The sights
+    const sp = sights(now);
+    const perfectNow = sp.next && Math.abs(sp.next.at - now) < PERFECT;
+    S.reticle(ctx, sp.x, sp.y, L.t * 1.15, perfectNow ? GOLD : SIGHT, sp.lock, api.started ? 1 : 0.8);
+    if (sp.next) {
+      const left = sp.next.at - now;
+      if (left < 1.5 && left > -sp.next.window) S.softRing(ctx, sp.x, sp.y, L.t * 0.5 + Math.max(0, left) * L.t * 2, perfectNow ? GOLD : SIGHT, Math.min(1, (1.5 - left) / 0.5) * 0.8, 1.2);
+    }
+    api.drawCharge(sp.x, sp.y, L.t * 1.7, SIGHT, GOLD);
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.5);
+      S.glow(ctx, p.x, p.y, p.size * (0.6 + e), p.color, (1 - e) * 0.8);
+      S.softRing(ctx, p.x, p.y, p.size * 0.3 + p.size * 0.6 * ease(e), p.color, (1 - e) * 0.8, 1.4);
+    }
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, p.color, a);
+      else S.glow(ctx, p.x, p.y, 5 * L.k, p.color, a);
+    }
+    for (const p of confetti) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.globalAlpha = Math.min(1, p.life);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(-4 * L.k, -2 * L.k, 8 * L.k, 4 * L.k * Math.abs(Math.cos(p.rot * 2)));
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  SpaceShell.mount({
+    skin: S,
+    key: "range",
+    title: "Range",
+    hint: "Tap as each target crosses the brass mark",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Sharp eye", "Crack shot", "Lodge legend"],
+    fidgetPoint: (api) => {
+      const sp = sights(api.eng.beatPos());
+      return { x: sp.x, y: sp.y };
+    },
+    resize: layout,
+    setup,
+    onFire: () => track.fire(),
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

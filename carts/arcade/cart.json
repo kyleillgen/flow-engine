@@ -1,0 +1,20 @@
+{
+  "id": "arcade",
+  "name": "Arcade",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "A late-night arcade cabinet: a brick-breaker, a maze, a highway, a rock field and a claw machine, on one button.",
+  "colors": ["#3df5ff", "#ff4f9a"],
+  "files": [
+    "shell/space-shell.js",
+    "skins/arcade/arcade-skin.js",
+    "skins/pinball/fonts/oswald-latin.woff2"
+  ],
+  "games": [
+    { "file": "games/bonk.html", "label": "Bonk", "hint": "Tap as Pip lands on Slab" },
+    { "file": "games/lamp.html", "label": "Lamp", "hint": "Tap as Kip reaches a lantern to light the way" },
+    { "file": "games/hop.html", "label": "Hop", "hint": "Tap as the gap reaches the coin" },
+    { "file": "games/rocks.html", "label": "Rocks", "hint": "Tap as each Grump touches the ring" },
+    { "file": "games/claw.html", "label": "Claw", "hint": "Tap as Mitt stops over the wiggling plushie" }
+  ]
+}

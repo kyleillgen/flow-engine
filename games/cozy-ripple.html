@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Lumi the glowing axolotl watches dewdrops fall from a willow into a moonlit pond. Tap as a drop meets the water and its ripples light up into a turning mandala. A rhythm micro-game that finds your tempo.">
+<title>Ripple</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/cozy/cozy-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Ripple: a moonlit pond under a willow. Lumi, a pale-pink axolotl with six frilly glowing gills,
+// floats in the middle with her chin on the water. Dewdrops gather on the willow's tips and fall;
+// each meets the water exactly on a beat. Tap as it does and its ripples light up, a ring of light
+// joins the mandala turning slowly round Lumi, and every eighth ring a glow-koi rises to circle her.
+// A drop you miss just plops; nothing is lost.
+//
+// The five questions:
+// 1. On the beat: a drop starts gathering on a willow tip, due on the water four beats later,
+//    always on a whole beat and at least two beats after the last.
+// 2. Movement: two beats swelling on its tip, then two beats falling; its height is a function of
+//    the beat position.
+// 3. The player taps. Every press is a note (api.eng.tap) and a flick of Lumi's gills.
+// 4. Clean within ±0.3 beat of a drop's beat (wider with assist, for drops not yet gathering),
+//    perfect within ±0.1.
+// 5. The look: a baked night pond with a willow, reeds and a moon on the water, lily pads, the
+//    mandala, glow-koi, fireflies, and the drops' reflections rising to meet them. Now and then
+//    something happens round the pond: a shooting star, a dragonfly, a fish leaping at the edge,
+//    a paper boat drifting by the bank, fireflies in a spiral. The timing cue is a ring of little
+//    lights closing on the next drop's spot on the water, gold on the beat.
+// Fidget (F): every press lets the next drop go at once and it lands with a ripple. Hold then let
+// go for a bubble; a full charge sends a moon ripple across the whole pond and the koi dance.
+(() => {
+  "use strict";
+
+  const S = CozySkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const FLAT = 0.38; // the pond seen from a little above: circles on it are this flat
+  const LUMI = "#ffc7d9";
+  const DROPS = ["#9cf0d0", "#8fd8e8", "#c8b4ff", "#ffb3cf", "#ffd58a"];
+  const KOI = ["#ffbf9e", "#fff2e2", "#ffd58a", "#ff9fc0", "#9cf0d0", "#c8b4ff"];
+  const MOODS = [
+    { top: "#120a26", mid: "#2a1a48", low: "#4a2e62", clouds: ["#c8b4ff", "#ff9fc0", "#8fd8e8", "#c8b4ff", "#ffb3cf"], band: "#e8dcff", seed: 3, water: ["#2a2050", "#120c28"], leaf: "#9cf0d0" },
+    { top: "#081628", mid: "#123a4c", low: "#205a62", clouds: ["#9cf0d0", "#8fd8e8", "#c8b4ff", "#9cf0d0", "#ffd58a"], band: "#d8fff0", seed: 13, water: ["#123a4a", "#071824"], leaf: "#9cf0d0" },
+    { top: "#170a2c", mid: "#3a1a52", low: "#6a2e6a", clouds: ["#ff9fc0", "#c8b4ff", "#ffbf9e", "#ff9fc0", "#8fd8e8"], band: "#ffd9ec", seed: 23, water: ["#3a1a50", "#180a26"], leaf: "#ffb3cf" },
+    { top: "#140c24", mid: "#3a2440", low: "#7a4a4e", clouds: ["#ffd58a", "#ffbf9e", "#ff9fc0", "#ffd58a", "#c8b4ff"], band: "#fff0d0", seed: 37, water: ["#3a2440", "#160c1c"], leaf: "#ffd58a" }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let dropT = null; // the tracker; dropT.list is { x, y (landing, on the pond), at, kind, window, state: "wait" | "lit" | "missed", landAt, sway }
+  let ripples = [], koi = [], sparks = [], bubbles = [];
+  let layers = 0, mandalaFlare = 0, mandalaGone = 0; // rings of light round Lumi (0..8)
+  let lastX = 0.5;
+  let clock = 0, lastTier = 1, flick = -9, wiggle = -9, missAt = -99, hits = 0, moonRipple = -9;
+  let sky = { from: 1, to: 1, t: 1 };
+  let bg = null; // the background happenings
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    // smaller on short screens (the pocket's frames), so everyone fits under the bar
+    const k = H < 520 ? clamp(H / 420, 0.55, 0.9) : clamp(Math.min(W / 360, H / 640), 0.9, 1.9);
+    const bank = Math.round(H * (H > W ? 0.4 : 0.42));
+    L = { k, bank, tip: Math.max(H < 520 ? 56 : 96, H * 0.17), lumiX: W / 2, lumiY: H * (H > W ? 0.63 : 0.64), head: 30 * k };
+    L.ring0 = 46 * k;
+    if (!koi.length) {
+      addKoi();
+      addKoi();
+    }
+    L.ringStep = Math.min(17 * k, (Math.min(W * 0.46, (H - 30 - L.lumiY) / FLAT) - L.ring0) / 8);
+  }
+
+  // A drop's height: two beats gathering on its tip, then two beats falling
+  function dropY(d, now) {
+    const u = clamp((now - (d.at - 2)) / 2, 0, 1);
+    return L.tip + (d.y - L.tip) * (0.3 * u + 0.7 * u * u);
+  }
+  const swell = (d, now) => clamp(1 - (d.at - 2 - now) / 2, 0.15, 1);
+
+  // ---- Sprites ------------------------------------------------------------------------------
+  function sceneLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "ripple" + tier, W, H, (g) => {
+      S.dreamSky(g, W, H, m);
+      const k = L.k, bank = L.bank;
+      // the moon, low over the far bank
+      const mx = W * 0.3, my = bank - 70 * k, mr = 24 * k;
+      g.globalCompositeOperation = "lighter";
+      let gr = g.createRadialGradient(mx, my, 0, mx, my, mr * 5);
+      gr.addColorStop(0, "rgba(255,242,226,0.18)");
+      gr.addColorStop(1, "rgba(255,242,226,0)");
+      g.fillStyle = gr;
+      g.fillRect(mx - mr * 5, my - mr * 5, mr * 10, mr * 10);
+      g.globalCompositeOperation = "source-over";
+      g.fillStyle = "#fff6ec";
+      g.beginPath();
+      g.arc(mx, my, mr, 0, TAU);
+      g.fill();
+      // the water: deep, with the sky's colour caught near the bank
+      let lin = g.createLinearGradient(0, bank, 0, H);
+      lin.addColorStop(0, S.mix(m.water[0], m.low, 0.5));
+      lin.addColorStop(0.25, m.water[0]);
+      lin.addColorStop(1, m.water[1]);
+      g.fillStyle = lin;
+      g.fillRect(0, bank, W, H - bank);
+      // the moon's path on the water
+      g.globalCompositeOperation = "lighter";
+      const r = S.rng(m.seed);
+      for (let i = 0; i < 60; i++) {
+        const u = r(), y = bank + 4 + u * u * (H - bank) * 0.9, w = (6 + u * 46 + r() * 24) * k;
+        const x = mx + (r() - 0.5) * (10 + u * 50) * k;
+        gr = g.createRadialGradient(x, y, 0, x, y, w / 2);
+        gr.addColorStop(0, S.rgba("#fff2e2", 0.16 * (1 - u) + 0.03));
+        gr.addColorStop(1, S.rgba("#fff2e2", 0));
+        g.fillStyle = gr;
+        g.save();
+        g.translate(x, y);
+        g.scale(1, 0.08);
+        g.translate(-x, -y);
+        g.fillRect(x - w / 2, y - w / 2, w, w);
+        g.restore();
+      }
+      // the stars, caught faintly in the water
+      for (let i = 0; i < (W * (H - bank)) / 1800; i++) {
+        g.fillStyle = ["#ffffff", "#ffe9f6", "#e3f9ff"][i % 3];
+        g.globalAlpha = 0.08 + r() * 0.25;
+        g.fillRect(r() * W, bank + 8 + r() * (H - bank), 1.4, 0.8);
+      }
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = "source-over";
+      // the far bank: a dark ridge of grass with reeds and a few round shrubs
+      g.fillStyle = S.mix(m.water[1], "#000000", 0.2);
+      g.beginPath();
+      g.moveTo(0, bank + 4);
+      for (let x = 0; x <= W + 8; x += 8) g.lineTo(x, bank - 6 * k - Math.sin(x * 0.013 + m.seed) * 5 * k - Math.sin(x * 0.041) * 3 * k);
+      g.lineTo(W, bank + 4);
+      g.fill();
+      g.strokeStyle = S.rgba(m.leaf, 0.2);
+      g.lineWidth = 1;
+      g.stroke();
+      g.strokeStyle = S.mix(m.water[1], "#000000", 0.1);
+      g.lineCap = "round";
+      for (let i = 0; i < W / 9; i++) {
+        const x = r() * W, h = (10 + r() * 22) * k;
+        g.lineWidth = 1 + r() * 1.2;
+        g.beginPath();
+        g.moveTo(x, bank + 2);
+        g.quadraticCurveTo(x + (r() - 0.5) * 8, bank - h * 0.6, x + (r() - 0.5) * 10, bank - h);
+        g.stroke();
+        if (r() < 0.12) {
+          g.fillStyle = S.mix(m.water[1], "#3a2030", 0.4);
+          g.fillRect(x - 1.5, bank - h - 6 * k, 3, 7 * k);
+        }
+      }
+      // the willow: fronds hanging from the top in soft curtains, tipped with light
+      const fronds = Math.round(W / 14);
+      for (let i = 0; i < fronds; i++) {
+        const x = (i + r()) * (W / fronds), len = L.tip * (0.6 + r() * 0.55);
+        g.strokeStyle = S.mix(m.mid, "#000000", 0.35);
+        g.lineWidth = 1;
+        g.beginPath();
+        g.moveTo(x, -4);
+        g.quadraticCurveTo(x + 6 * k, len * 0.5, x + (r() - 0.3) * 8 * k, len);
+        g.stroke();
+        for (let j = 0; j < 7; j++) {
+          const u = 0.2 + (j / 7) * 0.8, lx = x + 6 * k * u * 1.2, ly = len * u;
+          g.fillStyle = j > 4 ? S.mixA(m.leaf, m.mid, 0.4, 0.55) : S.mix(m.mid, "#000000", 0.3);
+          g.beginPath();
+          g.ellipse(lx + (j % 2 ? 3 : -3) * k, ly, 1.6 * k, 4.5 * k, j % 2 ? -0.5 : 0.5, 0, TAU);
+          g.fill();
+        }
+      }
+      // a soft dark canopy along the very top
+      lin = g.createLinearGradient(0, 0, 0, L.tip * 0.7);
+      lin.addColorStop(0, S.mixA(m.top, "#000000", 0.4, 0.95));
+      lin.addColorStop(1, S.mixA(m.top, "#000000", 0.4, 0));
+      g.fillStyle = lin;
+      g.fillRect(0, 0, W, L.tip * 0.7);
+      // lily pads, still on the water
+      const pads = [[0.12, 0.55, 1], [0.86, 0.5, 0.8], [0.2, 0.86, 1.25], [0.82, 0.8, 1.1], [0.62, 0.47, 0.6]];
+      for (const [px, py, s] of pads) {
+        const x = px * W, y = bank + py * (H - bank), R = 26 * k * s;
+        g.save();
+        g.translate(x, y);
+        g.scale(1, FLAT * 1.1);
+        g.fillStyle = "rgba(0,0,0,0.25)";
+        g.beginPath();
+        g.arc(2, 6, R, 0, TAU);
+        g.fill();
+        lin = g.createLinearGradient(-R, -R, R, R);
+        lin.addColorStop(0, "#5aa88a");
+        lin.addColorStop(1, "#2a5a50");
+        g.fillStyle = lin;
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.arc(0, 0, R, 0.25, TAU - 0.05);
+        g.closePath();
+        g.fill();
+        g.strokeStyle = "rgba(200,255,230,0.25)";
+        g.lineWidth = 1.5;
+        for (let v = 0; v < 6; v++) {
+          g.beginPath();
+          g.moveTo(0, 0);
+          g.lineTo(Math.cos(0.5 + v) * R * 0.85, Math.sin(0.5 + v) * R * 0.85);
+          g.stroke();
+        }
+        g.restore();
+        if (s > 1) {
+          // a pink water lily on the bigger pads
+          g.save();
+          g.translate(x - R * 0.2, y - 4 * k);
+          for (let p = 0; p < 7; p++) {
+            g.save();
+            g.rotate(-1.1 + (p / 6) * 2.2);
+            const pl = g.createLinearGradient(0, 0, 0, -12 * k);
+            pl.addColorStop(0, "#d86aa0");
+            pl.addColorStop(1, "#ffe0ec");
+            g.fillStyle = pl;
+            S.petal(g, 12 * k, 4.5 * k);
+            g.fill();
+            g.restore();
+          }
+          g.restore();
+        }
+      }
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // Lumi's head: a wide soft round, pale pink, with a glow; gills and face are live
+  function headSprite(ctx) {
+    const R = Math.round(L.head);
+    return S.sprite(ctx, "lumi" + R, R * 4, R * 3.4, R * 2, R * 1.7, (g) => {
+      S.blurred(g, LUMI, 24, (g) => {
+        g.fillStyle = S.rgba(LUMI, 0.5);
+        g.beginPath();
+        g.ellipse(0, 0, R * 1.2, R * 0.9, 0, 0, TAU);
+        g.fill();
+      });
+      const body = g.createRadialGradient(-R * 0.3, -R * 0.4, R * 0.1, 0, 0, R * 1.25);
+      body.addColorStop(0, "#fff6fa");
+      body.addColorStop(0.5, LUMI);
+      body.addColorStop(1, "#e08aae");
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, 0, R * 1.2, R * 0.9, 0, 0, TAU);
+      g.fill();
+      // freckles of light on her crown
+      g.fillStyle = "rgba(255,255,255,0.6)";
+      for (const [x, y] of [[-0.35, -0.6], [0.3, -0.65], [0, -0.75], [-0.6, -0.4], [0.62, -0.38]]) {
+        g.beginPath();
+        g.arc(x * R, y * R, R * 0.05, 0, TAU);
+        g.fill();
+      }
+      g.fillStyle = "rgba(255,255,255,0.7)";
+      g.beginPath();
+      g.ellipse(-R * 0.55, -R * 0.35, R * 0.16, R * 0.08, -0.5, 0, TAU);
+      g.fill();
+    });
+  }
+
+  function koiSprite(ctx, color) {
+    const k = L.k;
+    return S.sprite(ctx, "koi" + color + k, 60 * k, 36 * k, 30 * k, 18 * k, (g) => {
+      g.scale(k, k);
+      S.blurred(g, color, 10, (g) => {
+        g.fillStyle = S.rgba(color, 0.7);
+        g.beginPath();
+        g.ellipse(2, 0, 12, 5, 0, 0, TAU);
+        g.fill();
+      });
+      // body, pointing right, tail fanning to the left
+      g.fillStyle = S.mix(color, "#ffffff", 0.3);
+      g.beginPath();
+      g.moveTo(14, 0);
+      g.bezierCurveTo(12, -6, -2, -6.5, -10, -1.5);
+      g.lineTo(-10, 1.5);
+      g.bezierCurveTo(-2, 6.5, 12, 6, 14, 0);
+      g.fill();
+      g.fillStyle = S.rgba(color, 0.75);
+      g.beginPath();
+      g.moveTo(-9, 0);
+      g.quadraticCurveTo(-18, -9, -21, -6);
+      g.quadraticCurveTo(-16, 0, -21, 6);
+      g.quadraticCurveTo(-18, 9, -9, 0);
+      g.fill();
+      for (const s of [-1, 1]) {
+        g.beginPath();
+        g.ellipse(4, s * 5.5, 4, 1.6, s * 0.6, 0, TAU);
+        g.fill();
+      }
+      g.fillStyle = S.rgba("#ff8a6a", 0.5);
+      g.beginPath();
+      g.ellipse(4, -1, 3.5, 2.5, 0, 0, TAU);
+      g.fill();
+    });
+  }
+
+  function dropSprite(ctx, color) {
+    const R = Math.round(7.5 * L.k);
+    return S.sprite(ctx, "drop" + color + R, R * 6, R * 7, R * 3, R * 4, (g) => {
+      S.blurred(g, color, 12, (g) => {
+        g.fillStyle = S.rgba(color, 0.6);
+        g.beginPath();
+        g.moveTo(0, -R * 1.8);
+        g.bezierCurveTo(R * 0.4, -R * 0.9, R, -R * 0.4, R, R * 0.2);
+        g.arc(0, R * 0.2, R, 0, Math.PI);
+        g.bezierCurveTo(-R, -R * 0.4, -R * 0.4, -R * 0.9, 0, -R * 1.8);
+        g.fill();
+      });
+      const gr = g.createRadialGradient(-R * 0.3, -R * 0.1, R * 0.1, 0, R * 0.2, R * 1.2);
+      gr.addColorStop(0, "#ffffff");
+      gr.addColorStop(1, S.mix(color, "#ffffff", 0.3));
+      g.fillStyle = gr;
+      g.beginPath();
+      g.moveTo(0, -R * 1.8);
+      g.bezierCurveTo(R * 0.4, -R * 0.9, R, -R * 0.4, R, R * 0.2);
+      g.arc(0, R * 0.2, R, 0, Math.PI);
+      g.bezierCurveTo(-R, -R * 0.4, -R * 0.4, -R * 0.9, 0, -R * 1.8);
+      g.fill();
+    });
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function ripple(x, y, color, big, lit) {
+    if (ripples.length < 24) ripples.push({ x, y, color, t: 0, big, lit });
+  }
+  function land(api, d, perfect, ghost) {
+    d.state = "lit";
+    d.landAt = api.eng.beatPos();
+    const c = DROPS[d.kind];
+    ripple(d.x, d.y, c, perfect ? 1.4 : 1, true);
+    for (let i = 0; i < (perfect ? 14 : 9) && sparks.length < 160; i++) {
+      const a = -Math.PI * (0.05 + Math.random() * 0.9), v = 50 + Math.random() * 90, life = 0.6 + Math.random() * 0.5;
+      sparks.push({ x: d.x, y: d.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? c : "#fff2e2", star: i % 4 === 0 });
+    }
+    flick = clock;
+    if (perfect && !ghost) api.ring(d.x, d.y, api.color(), 40 * L.k);
+    if (++layers >= 8) mandala();
+  }
+  function addKoi() {
+    if (koi.length >= 7) koi.splice(2, 1);
+    koi.push({ color: KOI[koi.length % KOI.length], r: 0.8 + Math.random() * 0.5, phase: Math.random() * TAU, dir: Math.random() < 0.5 ? 1 : -1, born: clock, speed: 0.25 + Math.random() * 0.15 });
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // The shell's tracker spawns, judges, scores and plays autopilot; Ripple says what a drop is
+  function setup(api) {
+    dropT = api.track({
+      spawn() {
+        if (!W) return null;
+        // somewhere on the pond, not on Lumi and not on top of the last drop
+        let x, y, tries = 0;
+        do {
+          x = 0.14 + Math.random() * 0.72;
+          y = L.bank + 34 * L.k + Math.random() * (H - L.bank - 80 * L.k);
+          tries++;
+        } while (tries < 12 && (Math.abs(x - lastX) < 0.18 || Math.hypot(x * W - L.lumiX, (y - L.lumiY) / FLAT) < 90 * L.k));
+        lastX = x;
+        return { x: x * W, y, kind: Math.floor(Math.random() * DROPS.length), landAt: -99, sway: Math.random() * TAU };
+      },
+      note: (d) => d.kind / DROPS.length,
+      hit(d, { perfect, ghost }) {
+        land(api, d, perfect, ghost);
+        if (!ghost && ++hits === 16) api.hint("bubble", 'Hold <span class="pb-kbd">Space</span>, let go: a bubble');
+      },
+      miss(d, counted) {
+        d.landAt = d.at;
+        ripple(d.x, d.y, "#fff2e2", 0.6, false);
+        missAt = clock;
+        // a miss dims the outermost ring of light
+        if (counted) {
+          layers = Math.max(0, layers - 1);
+          api.hint("drop", "Tap as a drop meets the water");
+        }
+      },
+      empty() {
+        if (api.style === "fidget") ripple(L.lumiX, L.lumiY, LUMI, 1, true);
+      },
+      cue: false, // drawn in the garden's look, on the water
+      perfect: PERFECT
+    });
+    bg = S.happenings(HAPPENINGS);
+  }
+
+  // ---- Background happenings: occasional, varied, and off to the pond's edges --------------------
+  const side = () => (Math.random() < 0.5 ? -1 : 1);
+  const HAPPENINGS = [
+    // a shooting star over the far bank
+    { dur: 1.4, init: () => ({ x: W * (0.2 + Math.random() * 0.4), y: L.bank * (0.25 + Math.random() * 0.25), dir: side() }),
+      draw: (ctx, u, p) => S.shootingStar(ctx, p.x, p.y, p.dir * W * 0.4, L.bank * 0.25, u, 3 * L.k) },
+    // a dragonfly darts along the bank, hovering twice
+    { dur: 6, layer: 1, init: () => ({ dir: side(), y: L.bank + 16 * L.k, c: DROPS[Math.floor(Math.random() * DROPS.length)] }),
+      draw(ctx, u, p, t) {
+        // three darts with hovers between
+        const legs = [0, 0.3, 0.62, 1.05], seg = Math.min(2, Math.floor(u * 3)), v = u * 3 - seg;
+        const pos = legs[seg] + (legs[seg + 1] - legs[seg]) * ease(clamp((v - 0.45) / 0.55, 0, 1));
+        const x = p.dir > 0 ? -20 + pos * (W + 40) : W + 20 - pos * (W + 40);
+        const y = p.y + Math.sin(t * 5) * 3 * L.k - seg * 6 * L.k, s = 12 * L.k, f = Math.abs(Math.sin(t * 40));
+        S.glow(ctx, x, y, 18 * L.k, p.c, 0.35);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(p.dir, 1);
+        ctx.fillStyle = "rgba(230,250,255,0.5)";
+        for (const [wx, a] of [[0.3, -0.5], [-0.2, -0.65]]) {
+          for (const sy of [-1, 1]) {
+            ctx.beginPath();
+            ctx.ellipse(wx * s, sy * s * 0.15, s * 0.9, s * 0.22 * (0.4 + 0.6 * f), sy * a, 0, TAU);
+            ctx.fill();
+          }
+        }
+        ctx.fillStyle = p.c;
+        ctx.fillRect(-s * 1.4, -s * 0.09, s * 1.6, s * 0.18);
+        ctx.beginPath();
+        ctx.arc(s * 0.35, 0, s * 0.22, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+      } },
+    // a little fish leaps out at the pond's edge and plops back in
+    { dur: 2.2, init: () => ({ x: Math.random() < 0.5 ? W * 0.07 : W * 0.93, y: L.bank + (H - L.bank) * (0.35 + Math.random() * 0.4), c: Math.random() < 0.5 ? "#ffbf9e" : "#c8b4ff" }),
+      draw(ctx, u, p) {
+        const dir = p.x < W / 2 ? 1 : -1, jump = clamp(u / 0.55, 0, 1);
+        if (jump < 1) {
+          const x = p.x + dir * (jump - 0.5) * 34 * L.k, y = p.y - Math.sin(jump * Math.PI) * 46 * L.k;
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(dir * (jump - 0.5) * 2.2);
+          ctx.scale(dir, 1);
+          S.glow(ctx, 0, 0, 16 * L.k, p.c, 0.5);
+          ctx.fillStyle = p.c;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 7 * L.k, 3.2 * L.k, 0, 0, TAU);
+          ctx.moveTo(-5 * L.k, 0);
+          ctx.lineTo(-11 * L.k, -4 * L.k);
+          ctx.lineTo(-11 * L.k, 4 * L.k);
+          ctx.fill();
+          ctx.restore();
+        }
+        // a ring where it jumps out, and one where it plops back
+        for (const [at, x] of [[0, p.x - dir * 17 * L.k], [0.55, p.x + dir * 17 * L.k]]) {
+          const v = (u - at) / 0.45;
+          if (v <= 0 || v >= 1) continue;
+          ctx.save();
+          ctx.translate(x, p.y);
+          ctx.scale(1, FLAT);
+          S.softRing(ctx, 0, 0, ease(v) * 26 * L.k, "#fff2e2", (1 - v) * 0.6, 1);
+          ctx.restore();
+        }
+      } },
+    // a paper boat with a tiny lantern drifts along by the bank, its sailor asleep
+    { dur: 24, init: () => ({ dir: side(), c: DROPS[Math.floor(Math.random() * DROPS.length)] }),
+      draw(ctx, u, p, t) {
+        const x = p.dir > 0 ? -30 + u * (W + 60) : W + 30 - u * (W + 60), y = L.bank + 16 * L.k + Math.sin(t * 1.3) * 1.5 * L.k, s = 14 * L.k;
+        S.glow(ctx, x, y + s * 0.4, s * 3, "#ffd58a", 0.25);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(Math.sin(t * 1.1) * 0.06);
+        ctx.fillStyle = "#f6ecf4";
+        ctx.beginPath();
+        ctx.moveTo(-s * 1.4, -s * 0.2);
+        ctx.lineTo(s * 1.4, -s * 0.2);
+        ctx.lineTo(s * 0.9, s * 0.45);
+        ctx.lineTo(-s * 0.9, s * 0.45);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "#e2d2ea";
+        ctx.beginPath();
+        ctx.moveTo(-s * 0.7, -s * 0.2);
+        ctx.lineTo(0, -s * 1.3);
+        ctx.lineTo(s * 0.7, -s * 0.2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+        S.face(ctx, x, y + s * 0.08, s * 0.32, "sleep", 0, "#ff9fc0");
+        S.glow(ctx, x + s * 1.1, y - s * 0.6, 7 * L.k * (0.9 + 0.1 * Math.sin(t * 9)), "#ffd58a", 0.9);
+        // its reflection
+        S.glow(ctx, x, y + s * 1.2, s * 1.6, "#ffd58a", 0.12);
+      } },
+    // fireflies gather into a spiral by the reeds, then scatter
+    { dur: 6, layer: 1, init: () => ({ x: W * (Math.random() < 0.5 ? 0.12 : 0.88), seed: Math.random() * TAU }),
+      draw(ctx, u, p, t) {
+        const y0 = L.bank - 10 * L.k, gather = Math.sin(u * Math.PI);
+        for (let j = 0; j < 9; j++) {
+          const a = t * 1.6 + (j / 9) * TAU + p.seed, r = (6 + j * 3) * L.k * (0.5 + gather) + (1 - gather) * 36 * L.k;
+          S.glow(ctx, p.x + Math.cos(a) * r, y0 + Math.sin(a) * r * 0.6 - gather * j * 3 * L.k, 11 * L.k, j % 2 ? "#ffd58a" : "#9cf0d0", Math.min(1, gather * 2));
+        }
+      } }
+  ];
+
+  function onFire(api) {
+    dropT.fire();
+    if (api.style === "fidget") wiggle = clock;
+    else flick = clock;
+  }
+
+  // A hold then release: Lumi blows a bubble; a full charge sends a moon ripple across the pond
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    if (bubbles.length < 6) bubbles.push({ t: 0, size: 0.5 + c * 0.7, x: L.lumiX + (Math.random() - 0.5) * 10 });
+    wiggle = clock;
+    if (c >= 1) {
+      moonRipple = clock;
+      for (const f of koi) f.spin = clock;
+      api.callout("Moon ripple", W / 2, H * 0.3, "#c8b4ff", 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // Eight rings round her: the mandala flares and a glow-koi rises to join her
+  function mandala() {
+    mandalaFlare = 1.4;
+    mandalaGone = layers;
+    layers = 0;
+    addKoi();
+    wiggle = clock;
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    if (bg) bg.update(dt);
+    for (let i = ripples.length - 1; i >= 0; i--) if ((ripples[i].t += dt) > 2.2) ripples.splice(i, 1);
+    for (let i = bubbles.length - 1; i >= 0; i--) if ((bubbles[i].t += dt) > 2.4) bubbles.splice(i, 1);
+    const drag = Math.pow(0.25, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 60 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    mandalaFlare = Math.max(0, mandalaFlare - dt * 0.8);
+  }
+
+  // ---- The look ---------------------------------------------------------------------------------
+  // The mandala: rings of light round Lumi on the water, each a different pattern, turning in turn
+  const PATTERNS = ["dots", "petals", "dots", "stars", "petals", "dots", "stars", "petals"];
+  function drawMandala(ctx, now, count, a) {
+    if (count <= 0 || a <= 0.01) return;
+    const pulse = 1 - frac(now);
+    for (let i = 0; i < count; i++) {
+      const r = L.ring0 + i * L.ringStep;
+      const color = DROPS[i % DROPS.length];
+      const turn = now * (i % 2 ? -0.06 : 0.05) * Math.PI + i;
+      const n = 10 + i * 4;
+      const wave = 0.6 + 0.4 * Math.max(0, Math.cos((now - i * 0.25) * Math.PI)); // light runs outward on the beat
+      ctx.save();
+      ctx.translate(L.lumiX, L.lumiY);
+      ctx.scale(1, FLAT);
+      S.softRing(ctx, 0, 0, r, color, a * 0.35 * wave, 1);
+      ctx.restore();
+      for (let j = 0; j < n; j++) {
+        const t = turn + (j / n) * TAU;
+        const x = L.lumiX + Math.cos(t) * r, y = L.lumiY + Math.sin(t) * r * FLAT;
+        const p = PATTERNS[i];
+        if (p === "stars" && j % 2 === 0) S.twinkle(ctx, x, y, (5 + pulse * 2) * L.k, color, a * wave);
+        else if (p === "petals") S.glow(ctx, x, y, 6 * L.k, color, a * 0.8 * wave);
+        else S.glow(ctx, x, y, 3.5 * L.k, "#fff2e2", a * 0.7 * wave);
+      }
+    }
+  }
+
+  function drawCandle(ctx, x, y, i) {
+    const k = L.k, flick = 0.85 + 0.15 * Math.sin(clock * 9 + i * 2);
+    S.glow(ctx, x, y + 4 * k, 34 * k, "#ffd58a", 0.16);
+    ctx.save();
+    ctx.translate(x, y + 6 * k);
+    ctx.scale(1, FLAT * 1.4);
+    S.softRing(ctx, 0, 0, 18 * k, "#ffd58a", 0.25, 1);
+    ctx.restore();
+    for (let p = 0; p < 6; p++) {
+      ctx.save();
+      ctx.translate(x, y + 4 * k);
+      ctx.rotate(-1.2 + (p / 5) * 2.4);
+      ctx.fillStyle = p % 2 ? "#ffc7d9" : "#ff9fc0";
+      S.petal(ctx, 11 * k, 4 * k);
+      ctx.fill();
+      ctx.restore();
+    }
+    S.glow(ctx, x, y - 5 * k, 12 * k * flick, "#ffd58a", 0.9);
+    S.glow(ctx, x, y - 5 * k, 4 * k, "#fff6e0", 1);
+  }
+
+  function drawLumi(ctx, now, next) {
+    const R = L.head;
+    const bob = Math.sin(now * Math.PI) * 2.5 * L.k;
+    const wig = clock - wiggle < 0.5 ? Math.sin((clock - wiggle) * 30) * (0.5 - (clock - wiggle)) * 0.2 : 0;
+    const x = L.lumiX, y = L.lumiY - R * 0.35 + bob;
+    // her body under the water, a faint pink shape with little hands
+    ctx.globalAlpha = 0.35;
+    S.glow(ctx, x, L.lumiY + R * 0.9, R * 2.4, LUMI, 0.5);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(255,199,217,0.22)";
+    ctx.beginPath();
+    ctx.ellipse(x, L.lumiY + R * 0.75, R * 0.75, R * 1.05, 0, 0, TAU);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x, L.lumiY + R * 1.6);
+    ctx.quadraticCurveTo(x + Math.sin(clock * 2) * R * 0.6, L.lumiY + R * 2.4, x + Math.sin(clock * 2 + 1) * R * 0.3, L.lumiY + R * 2.9);
+    ctx.lineTo(x, L.lumiY + R * 1.6);
+    ctx.fill();
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(x + s * R * 0.75, L.lumiY + R * 0.45, R * 0.28, R * 0.14, s * 0.5, 0, TAU);
+      ctx.fill();
+    }
+    // the water line round her neck
+    ctx.save();
+    ctx.translate(x, L.lumiY + R * 0.3);
+    ctx.scale(1, FLAT);
+    S.softRing(ctx, 0, 0, R * 1.15 + Math.sin(now * Math.PI) * 2, "#fff2e2", 0.35, 1);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(wig);
+    // gills: three frilly fronds a side, lighting up in turn on the beat; a tap flicks them
+    const fl = clock - flick < 0.35 ? 1 - (clock - flick) / 0.35 : 0;
+    for (const s of [-1, 1]) {
+      for (let i = 0; i < 3; i++) {
+        const base = [-0.85, -0.55, -0.2][i];
+        const ang = s * (0.55 + i * 0.42) - Math.PI / 2 + s * fl * 0.25 + Math.sin(clock * 2.4 + i + s) * 0.06;
+        const len = R * (0.95 - i * 0.12) * (1 + fl * 0.15);
+        const bx = s * R * 0.92, by = base * R * 0.5;
+        const ex = bx + Math.cos(ang) * len, ey = by + Math.sin(ang) * len;
+        const on = (Math.floor(now) % 3 === i) || fl > 0;
+        const tipC = ["#ff9fc0", "#c8b4ff", "#ffd58a"][i];
+        ctx.strokeStyle = "#f7a8c4";
+        ctx.lineWidth = R * 0.14;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        // frills along the frond
+        ctx.fillStyle = "#ffb8d0";
+        for (let f = 1; f <= 4; f++) {
+          const u = f / 5, fx = bx + (ex - bx) * u, fy = by + (ey - by) * u;
+          ctx.beginPath();
+          ctx.ellipse(fx, fy, R * 0.16, R * 0.07, ang + Math.PI / 2, 0, TAU);
+          ctx.fill();
+        }
+        S.glow(ctx, ex, ey, R * (on ? 0.75 : 0.45), tipC, on ? 0.95 : 0.5);
+      }
+    }
+    S.draw(ctx, headSprite(ctx), 0, 0);
+    const coming = next && next.at - now < 1.6;
+    const blink = frac(now / 3 + 0.4) < 0.05;
+    const mood = clock - flick < 0.4 && clock - missAt > 0.3 ? "happy" : clock - missAt < 0.5 ? "o" : coming ? (blink ? "blink" : "idle") : blink ? "blink" : "idle";
+    const look = coming ? clamp((next.x - x) / (W * 0.3), -1, 1) : Math.sin(clock * 0.4) * 0.4;
+    S.face(ctx, 0, R * 0.05, R * 0.62, mood, look, "#ff7fae");
+    ctx.restore();
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    if (sky.t < 1) sceneLayer(ctx, sky.from, 1);
+    sceneLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const m = MOODS[(api.tier - 1) % 4];
+    // a slow shimmer on the moon's path
+    for (let i = 0; i < 5; i++) {
+      const u = frac(clock * 0.07 + i / 5);
+      S.glow(ctx, W * 0.3 + Math.sin(clock * 0.8 + i) * 20 * L.k, L.bank + 20 + u * (H - L.bank) * 0.6, (20 + u * 30) * L.k, "#fff2e2", 0.12 * (1 - u));
+    }
+    bg.draw(ctx, 0);
+    S.motes(ctx, W, L.bank + 30, clock, ["#ffd58a", "#fff2c0", m.leaf], { n: 12, size: 6, rise: 4, sway: 26, alpha: 0.55, seed: 21 });
+
+    // lotus candles drifting slowly across the pond, each a little flame on a pink cup of petals
+    for (let i = 0; i < 3; i++) {
+      const span = W + 120 * L.k;
+      const x = (((clock * (6 + i * 2) * L.k + i * span * 0.37) % span) + span) % span - 60 * L.k;
+      const y = L.bank + (H - L.bank) * (0.3 + 0.24 * i) + Math.sin(clock * 0.7 + i) * 3;
+      if (Math.hypot(x - L.lumiX, (y - L.lumiY) / FLAT) < 60 * L.k) continue;
+      drawCandle(ctx, x, y, i);
+    }
+    // the mandala, flaring and fading after a phrase
+    drawMandala(ctx, now, layers, 0.9);
+    if (mandalaFlare > 0) {
+      const u = 1 - mandalaFlare / 1.4;
+      ctx.save();
+      drawMandala(ctx, now, mandalaGone, (1 - u) * 1.2);
+      ctx.restore();
+      S.glow(ctx, L.lumiX, L.lumiY, (L.ring0 + 8 * L.ringStep) * (0.6 + u), api.color(), (1 - u) * 0.3);
+    }
+
+    // glow-koi circling her under the water
+    for (const f of koi) {
+      const born = clamp((clock - f.born) / 1.5, 0, 1);
+      const spin = f.spin && clock - f.spin < 2 ? ease((clock - f.spin) / 2) * TAU : 0;
+      const t = f.phase + clock * f.speed * f.dir + spin * f.dir;
+      const r = (L.ring0 + 2 * L.ringStep) * f.r * (0.4 + 0.6 * born);
+      const x = L.lumiX + Math.cos(t) * r, y = L.lumiY + Math.sin(t) * r * FLAT + 8 * L.k;
+      const heading = Math.atan2(Math.cos(t) * r * FLAT * f.dir, -Math.sin(t) * r * f.dir);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(heading);
+      const swish = 1 + Math.sin(clock * 6 + f.phase) * 0.06;
+      ctx.scale(1.35 * swish, 1.35 * (0.6 + 0.4 * Math.abs(Math.cos(heading))));
+      ctx.globalAlpha = 0.95 * born;
+      S.draw(ctx, koiSprite(ctx, f.color), 0, 0);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+      S.glow(ctx, x, y, 30 * L.k, f.color, (0.3 + 0.1 * Math.sin(clock * 2 + f.phase)) * born);
+    }
+
+    for (const r of ripples) {
+      const u = r.t / 2.2;
+      for (let j = 0; j < (r.lit ? 3 : 2); j++) {
+        const v = u * 1.4 - j * 0.18;
+        if (v <= 0 || v > 1) continue;
+        ctx.save();
+        ctx.translate(r.x, r.y);
+        ctx.scale(1, FLAT);
+        S.softRing(ctx, 0, 0, ease(v) * 70 * L.k * r.big, r.color, (1 - v) * (r.lit ? 0.9 : 0.35), r.lit ? 1.6 : 1);
+        ctx.restore();
+      }
+      if (r.lit && u < 0.4) S.glow(ctx, r.x, r.y, 30 * L.k * r.big, r.color, (0.4 - u) * 1.6);
+    }
+    if (clock - moonRipple < 2.5) {
+      const u = (clock - moonRipple) / 2.5;
+      ctx.save();
+      ctx.translate(L.lumiX, L.lumiY);
+      ctx.scale(1, FLAT);
+      for (let j = 0; j < 3; j++) S.softRing(ctx, 0, 0, ease(u - j * 0.1) * W * 0.9, ["#c8b4ff", "#ffb3cf", "#9cf0d0"][j], (1 - u) * 0.8, 2.5);
+      ctx.restore();
+    }
+
+    // the drops: gathering on their tips, falling, and the spot on the water they're coming to
+    const next = dropT.list.find((d) => d.state === "wait");
+    for (const d of dropT.list) {
+      if (d.state !== "wait") continue;
+      const c = DROPS[d.kind];
+      const y = dropY(d, now), s = swell(d, now);
+      const left = d.at - now;
+      const sway = Math.sin(clock * 1.3 + d.sway) * 4 * L.k * (y <= L.tip + 1 ? 1 : 0);
+      // its own willow frond, from the canopy down to the tip
+      ctx.strokeStyle = S.mixA(m.leaf, "#2a1a40", 0.6, 0.6);
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(d.x - 6 * L.k, -2);
+      ctx.quadraticCurveTo(d.x + 4 * L.k, L.tip * 0.5, d.x + sway, L.tip - 6 * L.k);
+      ctx.stroke();
+      // the spot on the water: the timing cue for the next drop, a faint ring for any after it
+      if (d === next) S.cue(ctx, api, d.x, d.y, left, { size: 14 * L.k, flat: FLAT, color: c, perfect: PERFECT });
+      if (left < 2.4) {
+        if (d !== next) {
+          ctx.save();
+          ctx.translate(d.x, d.y);
+          ctx.scale(1, FLAT);
+          S.softRing(ctx, 0, 0, (10 + Math.max(0, left) * 16) * L.k, c, Math.min(1, (2.4 - left) / 0.8) * 0.4, 1.1);
+          ctx.restore();
+        }
+        // its reflection rising to meet it
+        S.glow(ctx, d.x, d.y + (d.y - y) * 0.15, 10 * L.k * (1.2 - Math.min(1, left / 2.4)), c, 0.4 * (1 - Math.min(1, left / 2.4)));
+      }
+      S.glow(ctx, d.x + sway, y, 16 * L.k * s, c, 0.4 * s);
+      ctx.save();
+      ctx.translate(d.x + sway, y);
+      ctx.scale(s, s);
+      S.draw(ctx, dropSprite(ctx, c), 0, 0);
+      ctx.restore();
+    }
+
+    for (const b of bubbles) {
+      const u = b.t / 2.4;
+      const x = b.x + Math.sin(b.t * 3) * 8 * L.k, y = L.lumiY - L.head * 1.2 - ease(u) * L.head * 4 * b.size;
+      const r = L.head * 0.4 * b.size * (0.5 + 0.5 * ease(u * 3));
+      S.softRing(ctx, x, y, r, "#c8b4ff", (1 - u) * 0.8, 1.2);
+      S.glow(ctx, x - r * 0.3, y - r * 0.3, r * 0.5, "#ffffff", (1 - u) * 0.5);
+    }
+    drawLumi(ctx, now, next);
+    bg.draw(ctx, 1);
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, p.color, a);
+      else S.glow(ctx, p.x, p.y, 5 * L.k, p.color, a * 0.9);
+    }
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = c >= 1 ? "#ffd58a" : LUMI;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(L.lumiX, L.lumiY - L.head * 0.35, L.head * 1.9, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+  }
+
+  SpaceShell.mount({
+    key: "cozy-ripple",
+    title: "Ripple",
+    hint: "Tap as a drop meets the water",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Dewfall", "Moonwater", "Koi dream"],
+    fidgetPoint: () => ({ x: L.lumiX, y: L.lumiY }),
+    resize: layout,
+    skin: S,
+    setup,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+bin/
+flow-pocket.exe
+resources/games/
+resources/js/
+*.log
+.storage/
+.tmp/
+# copied in by setup.mjs
+resources/engine/
+resources/shell/
+resources/skins/
+resources/carts/

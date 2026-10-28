@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Bobo hops from little moon to little moon on the beat. Tap as he lands and the sleepy moon wakes up glowing. A rhythm micro-game that finds your tempo.">
+<meta property="og:title" content="Skip · Flow Engine">
+<meta property="og:description" content="Bobo hops from little moon to little moon on the beat. Tap as he lands and the sleepy moon wakes up glowing.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/games/skip.html">
+<meta name="twitter:card" content="summary_large_image">
+<title>Skip</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/neon/neon-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Skip: Bobo, a round little alien with a glowing antenna, hops across a sky of sleepy moons.
+// Each moon arrives on a whole beat; tap as he lands on it and the moon wakes up with a smile
+// and a string of fairy lights. A moon you miss just sleeps on; Bobo lands anyway, nothing is
+// lost. He travels by himself, so the one thing to do is the timing.
+//
+// Bobo's flight is a function of the beat position: he leaves one moon on a whole beat and lands
+// on the next on a whole beat, up to two beats in the air, hopping in place while he waits.
+// Clean is ±0.3 beat (wider with assist, for moons not yet spawned), perfect ±0.1.
+// Fidget (F): every press wakes the next moon at once and Bobo does a flip. Hold then let go
+// for a moonshot loop; a full charge sends a shower of shooting stars. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = NeonSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const INK = "#2a1640";
+  const BOBO = "#7fe9ff";
+  // Moon colours: rose, mint, lilac, honey, ice, peach
+  const MOONS = ["#ff9ccf", "#8dffc4", "#bba6ff", "#ffc46b", "#9fe8ff", "#ffb38a"];
+  const MOODS = [
+    { top: "#090824", mid: "#1d1648", low: "#4a2a6e", clouds: ["#7fe9ff", "#ff8fd8", "#b69cff", "#7fe9ff", "#ffd2f0"], band: "#d4c4ff", seed: 5 },
+    { top: "#04122a", mid: "#0f3550", low: "#24706e", clouds: ["#8dffc4", "#7fe9ff", "#c8fff0", "#8dffc4", "#b69cff"], band: "#c8fff0", seed: 17 },
+    { top: "#150826", mid: "#3b1450", low: "#8a3472", clouds: ["#ff8fd8", "#c49cff", "#ff9a8a", "#ff8fd8", "#7fe9ff"], band: "#ffd0f0", seed: 29 },
+    { top: "#160b22", mid: "#46223f", low: "#a95a4a", clouds: ["#ffc46b", "#ff8fd8", "#ffe0a0", "#ffb38a", "#c49cff"], band: "#ffe8c8", seed: 43 }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let moons = []; // { x (world), y, r, kind, at, state: "wait" | "lit" | "sleep", litAt, window, seed, lights }
+  let motes = [], pops = [], shooters = [];
+  let beatsSince = 99, lastAt = -99;
+  let clock = 0, lastTier = 1, warp = 0, hits = 0;
+  let flip = null; // { t0, turns } Bobo's flips, in clock seconds
+  let loop = null; // { t0, dur, h } a moonshot
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // The timing ring warms toward gold in the last third of a beat and is full gold, with a glow,
+  // inside the perfect window. Only while timing counts (not in Fidget).
+  const GOLD = "#ffd76a";
+  let timed = true;
+  const gilt = (left) => (!timed ? 0 : Math.abs(left) < PERFECT ? 1 : 0.55 * clamp(1 - (Math.abs(left) - PERFECT) / 0.3, 0, 1));
+  function cueRing(ctx, x, y, r, color, a, w, left) {
+    const g = gilt(left);
+    S.softRing(ctx, x, y, r, g ? S.mix(color, GOLD, g) : color, a, w * (1 + g * 0.8));
+    if (g >= 1) S.glow(ctx, x, y, r * 2.4, GOLD, 0.4 * a);
+  }
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const r = clamp(Math.min(W, H) * 0.075, 22, 48);
+    L = { r, bobo: r * 0.46, k: r / 34, gap: clamp(W * 0.36, 150, 380), top: Math.max(110, H * 0.36), low: H * 0.72 };
+    if (!moons.length) moons.push(newMoon(0, -1e6, 0));
+    for (const m of moons) m.r = r * m.size;
+    moons[0].state = "lit";
+  }
+  function newMoon(x, at, kind) {
+    const size = 0.85 + Math.random() * 0.45;
+    return { x, y: L.top + Math.random() * (L.low - L.top), r: L.r * size, size, kind, at, state: "wait", litAt: -99, window: 0.3, seed: Math.random() * 100, ring: Math.random() < 0.35 };
+  }
+
+  // Where Bobo is at beat position `now`, and how he's moving
+  function boboAt(now) {
+    let a = moons[0], b = null;
+    for (const m of moons) {
+      if (m.at <= now) a = m;
+      else {
+        b = m;
+        break;
+      }
+    }
+    const perch = (m) => m.y - m.r - L.bobo * 0.9;
+    if (!b) return { x: a.x, y: perch(a) - Math.abs(Math.sin(Math.PI * frac(now))) * L.r * 0.35, air: false, from: a, to: null };
+    const fly = Math.min(2, b.at - a.at);
+    const t0 = b.at - fly;
+    if (now < t0) return { x: a.x, y: perch(a) - Math.abs(Math.sin(Math.PI * frac(now))) * L.r * 0.35, air: false, from: a, to: b };
+    const u = (now - t0) / fly;
+    const arc = L.r * (1.6 + fly * 1.2) + Math.abs(perch(b) - perch(a)) * 0.3;
+    return { x: a.x + (b.x - a.x) * smooth(u), y: perch(a) + (perch(b) - perch(a)) * u - arc * 4 * u * (1 - u), air: true, u, from: a, to: b };
+  }
+  const nextWaiting = () => moons.find((m) => m.state === "wait");
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  function moonSprite(ctx, kind, r) {
+    const c = MOONS[kind];
+    const R = Math.round(r);
+    return S.sprite(ctx, "moon" + kind + "_" + R, R * 2 + 40, R * 2 + 40, R + 20, R + 20, (g) => {
+      S.blurred(g, c, 16, (g) => {
+        g.fillStyle = S.rgba(c, 0.5);
+        g.beginPath();
+        g.arc(0, 0, R, 0, TAU);
+        g.fill();
+      });
+      const body = g.createRadialGradient(-R * 0.4, -R * 0.45, R * 0.05, 0, 0, R);
+      body.addColorStop(0, S.mix(c, "#ffffff", 0.6));
+      body.addColorStop(0.45, c);
+      body.addColorStop(1, S.mix(c, "#2a1248", 0.55));
+      g.fillStyle = body;
+      g.beginPath();
+      g.arc(0, 0, R, 0, TAU);
+      g.fill();
+      // soft craters, and a rim of light on top
+      g.save();
+      g.clip();
+      for (const [x, y, s] of [[-0.35, 0.3, 0.18], [0.4, -0.1, 0.12], [0.15, 0.55, 0.1], [-0.55, -0.25, 0.08]]) {
+        g.fillStyle = S.mixA(c, "#3a1a5a", 0.5, 0.35);
+        g.beginPath();
+        g.arc(x * R, y * R, s * R, 0, TAU);
+        g.fill();
+      }
+      g.restore();
+      S.haloed(g, S.mix(c, "#ffffff", 0.4), (g, col, core) => {
+        g.strokeStyle = col;
+        g.lineWidth = core ? 0.9 : 2;
+        g.beginPath();
+        g.arc(0, 0, R, Math.PI * 1.05, Math.PI * 1.95);
+        g.stroke();
+      });
+    });
+  }
+  function boboSprite(ctx) {
+    const R = Math.round(L.bobo);
+    return S.sprite(ctx, "bobo" + R, R * 2 + 36, R * 2 + 36, R + 18, R + 18, (g) => {
+      S.blurred(g, BOBO, 12, (g) => {
+        g.fillStyle = S.rgba(BOBO, 0.6);
+        g.beginPath();
+        g.arc(0, 0, R, 0, TAU);
+        g.fill();
+      });
+      const body = g.createRadialGradient(-R * 0.35, -R * 0.4, R * 0.1, 0, 0, R);
+      body.addColorStop(0, "#e9fdff");
+      body.addColorStop(0.5, BOBO);
+      body.addColorStop(1, "#2f6c9e");
+      g.fillStyle = body;
+      g.beginPath();
+      g.arc(0, 0, R, 0, TAU);
+      g.fill();
+      g.fillStyle = "rgba(255,255,255,0.8)";
+      g.beginPath();
+      g.ellipse(-R * 0.4, -R * 0.5, R * 0.18, R * 0.11, -0.6, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // A face in units of r: mood "sleep" | "idle" | "o" | "happy" | "whee"
+  function face(ctx, x, y, r, mood, look, cheek) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(r / 10, r / 10);
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1;
+    ctx.fillStyle = cheek;
+    ctx.globalAlpha = mood === "happy" || mood === "whee" ? 0.8 : 0.45;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(s * 5.6, 2.6, 1.9, 1.1, 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = ctx.fillStyle = INK;
+    for (const s of [-1, 1]) {
+      const ex = s * 3.2 + look * 0.8;
+      ctx.beginPath();
+      if (mood === "sleep") {
+        ctx.arc(ex, -0.4, 1.5, Math.PI * 0.15, Math.PI * 0.85);
+        ctx.stroke();
+      } else if (mood === "happy") {
+        ctx.arc(ex, 0.8, 1.6, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      } else {
+        const big = mood === "o" ? 1.3 : 1;
+        ctx.ellipse(ex, 0, 1.3 * big, 1.7 * big, 0, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(ex - 0.45, -0.6, 0.5, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = INK;
+      }
+    }
+    ctx.beginPath();
+    if (mood === "o") {
+      ctx.ellipse(look * 0.5, 3.3, 0.8, 1, 0, 0, TAU);
+      ctx.fill();
+    } else if (mood === "happy" || mood === "whee") {
+      ctx.arc(look * 0.5, 2.6, 1.5, 0, Math.PI);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.arc(look * 0.5, 2.2, 1.2, Math.PI * 0.2, Math.PI * 0.8);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "skip" + tier, W, H, (g) => S.dreamSky(g, W, H, MOODS[(tier - 1) % 4]));
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function wake(api, m, perfect, ghost) {
+    m.state = "lit";
+    m.litAt = api.eng.beatPos();
+    const c = MOONS[m.kind];
+    pops.push({ m, t: 0, size: m.r * (perfect ? 3 : 2.2), color: c });
+    const n = perfect ? 16 : 10;
+    for (let i = 0; i < n && motes.length < 220; i++) {
+      const a = (i / n) * TAU + Math.random() * 0.3, v = 60 + Math.random() * 90, life = 0.8 + Math.random() * 0.6;
+      motes.push({ m, x: Math.cos(a) * m.r, y: Math.sin(a) * m.r, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 30, life, max: life, color: i % 3 ? c : "#ffffff", r: 3 + Math.random() * 3, star: i % 4 === 0 });
+    }
+    if (perfect && !ghost) api.ring(m.x - camX(api), m.y, api.color(), m.r * 2.4);
+  }
+  let camCache = { at: -1, x: 0 };
+  function camX(api) {
+    const now = api.eng.beatPos();
+    if (camCache.at !== now) camCache = { at: now, x: boboAt(now).x - W * 0.36 };
+    return camCache.x;
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: a new moon, landed on `ahead` beats from now and at least two after the last
+  function onBeat(n, api) {
+    if (++beatsSince < Math.max(2, api.eng.paceBeats()) || !W) return;
+    beatsSince = 0;
+    const at = Math.max(n + 4, lastAt + 2);
+    lastAt = at;
+    const prev = moons[moons.length - 1];
+    let kind = Math.floor(Math.random() * MOONS.length);
+    if (kind === prev.kind) kind = (kind + 1) % MOONS.length;
+    const m = newMoon(prev.x + L.gap * (0.8 + Math.random() * 0.4), at, kind);
+    m.window = 0.3 + 0.15 * api.eng.assist;
+    moons.push(m);
+  }
+
+  // 3. A tap: the moon Bobo is landing on wakes up
+  function onFire(api) {
+    const now = api.eng.beatPos();
+    if (api.style === "fidget") {
+      const m = nextWaiting();
+      if (m) wake(api, m, false, true);
+      flip = { t0: clock, turns: 1 };
+      api.eng.tap({ height: m ? m.kind / MOONS.length : 0.5 });
+      return;
+    }
+    let m = null;
+    for (const x of moons) if (x.state === "wait" && Math.abs(now - x.at) < x.window && (!m || Math.abs(now - x.at) < Math.abs(now - m.at))) m = x;
+    api.eng.tap({ height: m ? m.kind / MOONS.length : 0.8 });
+    if (!m) {
+      const b = boboAt(now);
+      pops.push({ m: null, x: b.x, y: b.y, t: 0, size: L.bobo * 2, color: BOBO });
+      return;
+    }
+    const perfect = Math.abs(now - m.at) < PERFECT;
+    wake(api, m, perfect, false);
+    // 4. Score it
+    api.hit(perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 1.5);
+    if (++hits === 16) api.hint("moonshot", 'Hold <span class="pb-kbd">Space</span>, let go: a moonshot');
+  }
+
+  // A hold then release: Bobo loops up high; a full charge also sends shooting stars over the sky
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    loop = { t0: clock, dur: 0.5 + c * 0.5, h: L.r * (2 + c * 3) };
+    flip = { t0: clock, turns: c >= 1 ? 2 : 1 };
+    if (c >= 1) {
+      for (let i = 0; i < 9; i++) shooters.push({ x: W * (0.2 + Math.random()), y: H * Math.random() * 0.4, t: -i * 0.09, color: MOONS[i % MOONS.length] });
+      api.callout("Shooting stars", W / 2, H * 0.3, "#ffc46b", 1.2);
+      api.eng.chime();
+      warp = 1;
+    }
+  }
+
+  function autopilot(dt, api) {
+    const now = api.eng.beatPos();
+    for (const m of moons) if (m.state === "wait" && now >= m.at) wake(api, m, false, true);
+  }
+
+  // 2. Movement and misses
+  // ---- Asides: now and then something happens far off ---------------------------------------
+  // Slow and faint, behind everything and never on the beat, so it never gets in the way of the
+  // timing, and never gold, which means "tap now". One at a time, every 14 to 30 seconds,
+  // and never the same one twice running.
+  let aside = null, asideIn = 8 + Math.random() * 6, asideLast = -1;
+  const fadeIO = (u) => Math.min(1, u * 5, (1 - u) * 5);
+  // x across the screen at progress u, coming in from the side a.dir says, m of a width off each edge
+  const across = (a, u, m) => (a.dir > 0 ? -W * m + u * W * (1 + 2 * m) : W * (1 + m) - u * W * (1 + 2 * m));
+  function asides(dt) {
+    if (aside) {
+      if ((aside.t += dt) >= aside.dur) {
+        aside = null;
+        asideIn = 14 + Math.random() * 16;
+      }
+      return;
+    }
+    if ((asideIn -= dt) > 0) return;
+    let i = Math.floor(Math.random() * ASIDES.length);
+    if (i === asideLast) i = (i + 1) % ASIDES.length;
+    asideLast = i;
+    aside = Object.assign({ i, t: 0, dir: Math.random() < 0.5 ? -1 : 1, y: 0.06 + Math.random() * 0.14, x0: 0.15 + Math.random() * 0.55 }, ASIDES[i].start);
+  }
+  function drawAside(ctx) {
+    if (!aside) return;
+    const u = aside.t / aside.dur;
+    ASIDES[aside.i].draw(ctx, aside, u, fadeIO(u), Math.min(W, H) / 500);
+  }
+  const ASIDES = [
+    { // a comet, slow, its tail of light behind it
+      start: { dur: 11 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + u * 0.05);
+        for (let j = 9; j >= 0; j--) S.glow(ctx, x - a.dir * j * 13 * k, y - j * 0.8 * k, (16 - j) * k, "#ff9ccf", f * 0.2 * (1 - j / 11));
+        S.twinkle(ctx, x, y, 9 * k, "#ffffff", f * 0.7);
+      }
+    },
+    { // three shooting stars, one after another
+      start: { dur: 3.4 },
+      draw(ctx, a, u, f, k) {
+        ["#8dffc4", "#bba6ff", "#9fe8ff"].forEach((c, n) => {
+          const v = (u * 3.4 - n * 0.8) / 0.9;
+          if (v < 0 || v > 1) return;
+          const x0 = W * (0.15 + 0.22 * n + a.y), y0 = H * (0.05 + 0.05 * n);
+          for (let j = 0; j < 7; j++) {
+            const w = Math.max(0, v - j * 0.035);
+            S.glow(ctx, x0 + a.dir * w * W * 0.3, y0 + w * H * 0.12, (6 - j * 0.6) * k, c, (1 - v) * 0.55 * (1 - j / 7));
+          }
+        });
+      }
+    },
+    { // a little satellite crossing very slowly, blinking
+      start: { dur: 18 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.05), y = H * (a.y + 0.03 * Math.sin(u * 3));
+        S.glow(ctx, x, y, 5 * k, "#dff6ff", f * 0.5);
+        if ((a.t * 1.3) % 1 < 0.12) S.glow(ctx, x, y, 9 * k, "#ff9ccf", f * 0.7);
+      }
+    },
+    { // a ringed planet, far off, slowly passing
+      start: { dur: 24 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.1), y = H * (a.y + 0.08), r = 18 * k;
+        S.glow(ctx, x, y, r * 2.6, "#ffb38a", f * 0.14);
+        ctx.globalAlpha = f * 0.3;
+        ctx.fillStyle = "#ffb38a";
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(-0.25 * a.dir);
+        ctx.scale(1, 0.3);
+        S.softRing(ctx, 0, 0, r * 1.75, "#9fe8ff", f * 0.5, 1.4);
+        ctx.restore();
+      }
+    },
+    { // space geese in a loose V, drifting over
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + 0.04) + Math.sin(a.t * 0.8) * 8 * k;
+        for (let i = 0; i < 7; i++) {
+          const row = Math.ceil(i / 2), side = i % 2 ? 1 : -1;
+          const bx = x - a.dir * row * 15 * k, by = y + side * row * 8 * k + Math.sin(a.t * 3 + i) * 2 * k;
+          S.glow(ctx, bx, by, 6 * k, "#d6c8ff", f * 0.45);
+          S.glow(ctx, bx, by, 2.5 * k, "#ffffff", f * 0.5);
+        }
+      }
+    }
+  ];
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    asides(dt);
+    for (const m of moons) {
+      if (m.state === "wait" && now > m.at + m.window) {
+        m.state = "sleep";
+        if (api.miss()) api.hint("land", "Tap as Bobo lands on the moon");
+      }
+    }
+    const cam = camX(api);
+    while (moons.length > 2 && moons[1].x - cam < -W * 0.4 && moons[1].at < now) moons.shift();
+    const drag = Math.pow(0.15, dt);
+    for (let i = motes.length - 1; i >= 0; i--) {
+      const p = motes[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 20 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) motes.splice(i, 1);
+    }
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    for (let i = shooters.length - 1; i >= 0; i--) if ((shooters[i].t += dt) > 1.2) shooters.splice(i, 1);
+    if (flip && clock - flip.t0 > 0.45 * flip.turns) flip = null;
+    if (loop && clock - loop.t0 > loop.dur) loop = null;
+    if (api.tier !== lastTier) {
+      if (api.tier > lastTier) warp = 1;
+      sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    }
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    warp = Math.max(0, warp - dt * 0.9);
+  }
+
+  // 5. The look
+  function drawMoon(ctx, m, now, cam, b) {
+    const x = m.x - cam, y = m.y + Math.sin(now * Math.PI * 0.5 + m.seed) * 3;
+    if (x < -m.r * 4 || x > W + m.r * 4) return;
+    const c = MOONS[m.kind];
+    const lit = m.state === "lit";
+    const sinceLit = now - m.litAt;
+    S.glow(ctx, x, y, m.r * (lit ? 3.2 : 2), c, lit ? 0.3 + 0.1 * (1 - frac(now)) : 0.1);
+    if (m.ring) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(-0.3);
+      ctx.scale(1, 0.28);
+      S.softRing(ctx, 0, 0, m.r * 1.6, S.mix(c, "#ffffff", 0.3), lit ? 0.7 : 0.3, 1.4);
+      ctx.restore();
+    }
+    const squash = lit && sinceLit < 0.3 ? Math.sin((sinceLit / 0.3) * Math.PI) * 0.1 : 0;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1 + squash, 1 - squash);
+    S.draw(ctx, moonSprite(ctx, m.kind, m.r), 0, 0);
+    ctx.restore();
+    // fairy lights round a moon that's awake, twinkling in turn on the beat
+    if (lit) {
+      const n = 9;
+      for (let i = 0; i < n; i++) {
+        const a = Math.PI * 0.95 + (i / (n - 1)) * Math.PI * 1.1 + Math.sin(now * 0.5) * 0.05;
+        const on = (Math.floor(now * 2) + i) % 3 === 0;
+        const grow = clamp(sinceLit * 3 - i * 0.15, 0, 1);
+        S.glow(ctx, x + Math.cos(a) * m.r * 1.12, y + Math.sin(a) * m.r * 1.12, (on ? 7 : 4) * L.k * grow, MOONS[(m.kind + i) % MOONS.length], on ? 1 : 0.6);
+      }
+    }
+    // The face: asleep until Bobo is coming, then watching him; a beaming smile once woken
+    const coming = b.to === m && m.state === "wait" && m.at - now < 1.6;
+    const mood = lit ? "happy" : coming ? "o" : "sleep";
+    const look = clamp((b.x - m.x) / (W * 0.4), -1, 1);
+    face(ctx, x, y + m.r * 0.15, m.r * 0.55, mood, look, "#ff6fa8");
+    if (m.state === "sleep" && !api_reduced) {
+      // a little "z" drifting up
+      const z = frac(now * 0.5 + m.seed);
+      ctx.globalAlpha = (1 - z) * 0.7;
+      ctx.fillStyle = "#e3f4ff";
+      ctx.font = `600 ${Math.round(11 + z * 6)}px Oswald, Impact, sans-serif`;
+      ctx.fillText("z", x + m.r * 0.6 + z * 10, y - m.r * 0.7 - z * 26);
+      ctx.globalAlpha = 1;
+    }
+    // The landing cue: a ring closing on the moon's top as Bobo comes in
+    if (m.state === "wait") {
+      const left = m.at - now;
+      if (left < 2 && left > -m.window) {
+        const r = L.bobo + Math.max(0, left) * L.r * 1.4;
+        cueRing(ctx, x, y - m.r - L.bobo * 0.9, r, c, Math.min(1, (2 - left) / 0.6), 1.5, left);
+      }
+    }
+  }
+  let api_reduced = false;
+
+  function draw(ctx, api) {
+    timed = api.style !== "fidget";
+    api_reduced = api.reduced;
+    const now = api.eng.beatPos();
+    const cam = camX(api);
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const mood = MOODS[(api.tier - 1) % 4];
+    S.glow(ctx, W * 0.3 + Math.sin(clock * 0.05) * W * 0.1, H * 0.3, W * 0.7, mood.clouds[0], 0.08);
+    S.stars(ctx, W, H, warp);
+    drawAside(ctx);
+    S.motes(ctx, W, H, clock, [mood.clouds[1], mood.clouds[2], "#fff1d6"], { n: 12, size: 8, rise: 5, sway: 16, par: -cam * 0.03 % W, alpha: 0.25, seed: 4 });
+    // far moons drifting slowly, out of focus
+    for (let i = 0; i < 5; i++) {
+      const fx = ((((i * 0.27 + 0.1) * W * 1.6 - cam * 0.12) % (W * 1.6)) + W * 1.6) % (W * 1.6) - W * 0.3;
+      S.glow(ctx, fx, H * (0.2 + 0.13 * i), L.r * (1.2 + (i % 3) * 0.5), MOONS[(i + api.tier) % MOONS.length], 0.12);
+    }
+    for (const s of shooters) {
+      if (s.t < 0) continue;
+      const trail = [];
+      for (let j = 0; j < 8; j++) trail.push([s.x - (s.t - j * 0.03) * W * 0.9, s.y + (s.t - j * 0.03) * H * 0.35]);
+      S.streak(ctx, trail, 3, s.color);
+    }
+
+    const b = boboAt(now);
+    for (const m of moons) drawMoon(ctx, m, now, cam, b);
+
+    // Bobo: a light trail in the air, squash on landing, a flip or a moonshot loop on top
+    if (b.air) {
+      const trail = [];
+      for (let i = 0; i < 8; i++) {
+        const p = boboAt(now - i * 0.05);
+        trail.push([p.x - cam, p.y]);
+      }
+      S.streak(ctx, trail, L.bobo * 0.7, BOBO);
+    }
+    let x = b.x - cam, y = b.y, rot = 0, sx = 1, sy = 1;
+    const landed = now - (b.from ? b.from.at : -9);
+    if (!b.air && landed < 0.2) {
+      const q = Math.sin((landed / 0.2) * Math.PI);
+      sx = 1 + 0.22 * q;
+      sy = 1 - 0.2 * q;
+    } else if (b.air) {
+      const v = b.u < 0.5 ? 1 : -1;
+      sx = 1 - 0.06;
+      sy = 1 + 0.08 * v;
+    }
+    if (loop) {
+      const u = (clock - loop.t0) / loop.dur;
+      y -= Math.sin(u * Math.PI) * loop.h;
+      x += Math.sin(u * TAU) * L.r * 0.8;
+    }
+    if (flip) rot = smooth(clamp((clock - flip.t0) / (0.45 * flip.turns), 0, 1)) * TAU * flip.turns;
+    S.glow(ctx, x, y, L.bobo * 3, BOBO, 0.25 + 0.15 * pulse);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.scale(sx, sy);
+    // antenna, its bulb blinking on the beat
+    ctx.strokeStyle = "#bff6ff";
+    ctx.lineWidth = 1.6 * L.k;
+    ctx.beginPath();
+    ctx.moveTo(0, -L.bobo * 0.9);
+    ctx.quadraticCurveTo(L.bobo * 0.3 * Math.sin(clock * 3), -L.bobo * 1.4, L.bobo * 0.2, -L.bobo * 1.7);
+    ctx.stroke();
+    S.draw(ctx, boboSprite(ctx), 0, 0);
+    S.glow(ctx, L.bobo * 0.2, -L.bobo * 1.7, (5 + 4 * pulse) * L.k, "#ffd23a", 1);
+    const target = b.to || b.from;
+    face(ctx, 0, L.bobo * 0.1, L.bobo * 0.7, b.air ? "whee" : "idle", clamp((target.x - b.x) / L.gap, -1, 1), "#ff7fae");
+    ctx.restore();
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const color = c >= 1 ? "#ffc46b" : BOBO;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = color;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(x, y, L.bobo * 1.9, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.5);
+      const px = p.m ? p.m.x - cam : p.x - cam, py = p.m ? p.m.y : p.y;
+      S.glow(ctx, px, py, p.size * (0.5 + e), p.color, (1 - e) * 0.7);
+      S.softRing(ctx, px, py, p.size * 0.3 + p.size * 0.7 * ease(e), p.color, (1 - e) * 0.8, 1.4);
+    }
+    for (const p of motes) {
+      const a = p.life / p.max;
+      const px = p.m.x - cam + p.x, py = p.m.y + p.y;
+      if (p.star) S.twinkle(ctx, px, py, p.r * 2, p.color, a);
+      else S.glow(ctx, px, py, p.r * 1.6, p.color, a * 0.9);
+    }
+    S.motes(ctx, W, H, clock, [api.color(), "#ffc2ea", "#d6c8ff"], { n: 5, size: 24, rise: 12, sway: 26, par: 0, alpha: 0.1, seed: 31 });
+  }
+
+  SpaceShell.mount({
+    key: "skip",
+    title: "Skip",
+    hint: "Tap as Bobo lands on each moon",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Moonhop", "Starskip", "Comet"],
+    onPhrase: () => (warp = Math.max(warp, 0.45)),
+    fidgetPoint: (api) => {
+      const b = boboAt(api.eng.beatPos());
+      return { x: b.x - camX(api), y: b.y };
+    },
+    resize: layout,
+    onBeat,
+    onFire,
+    onRelease,
+    autopilot,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

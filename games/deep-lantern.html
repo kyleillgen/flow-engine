@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Moru the anglerfish dangles her lantern in the deep. Little ones drift in from the dark on the beat; glow as each one touches the light and it lights up and stays. A rhythm micro-game that finds your tempo.">
+<title>Lure</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/deepsea/deepsea-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Lure: Moru, a round old anglerfish, hangs in the black with her lantern held out on its rod.
+// Little ones (lanternfish, red shrimp, copepods, sea butterflies) swim in from the dark, seen at
+// first only as a pair of eyes, and touch the lantern on a whole beat. Glow as one touches it and
+// it lights up in its own colour and joins the ring of friends round the lantern; every friend
+// makes the light reach a little further into the abyss. One you miss bumps the lantern and
+// swims back into the dark. Nobody gets eaten.
+//
+// A swimmer's path is a function of the beat position: it sets off 3.5 beats before it arrives
+// and arrives on a whole beat, at least two after the last. Clean is ±0.3 beat (wider with
+// assist, for swimmers not yet spawned), perfect ±0.1.
+// Fidget (F): every press lights the next swimmer at once, wherever it is.
+// Hold then let go: the lantern flares and shows the deep around her; a full charge is an abyss
+// bloom, the friends scattering in a ring of light and drifting home. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = DeepSeaSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const TRAVEL = 3.5;
+  const LURE = "#ffb35c";
+  // The little ones: lanternfish, red shrimp, copepod, sea butterfly
+  const KINDS = [
+    { color: "#7fd8ff", len: 1 },
+    { color: "#ff6f86", len: 1.1 },
+    { color: "#8dffb8", len: 0.8 },
+    { color: "#c4a6ff", len: 0.9 }
+  ];
+  const MOODS = [
+    { top: "#00040a", mid: "#01101c", low: "#03131c", haze: ["#2a6a8a", "#1c4a6a", "#2a5a5a"], seed: 3 },
+    { top: "#00060a", mid: "#011a1a", low: "#04201c", haze: ["#2a8a7a", "#1c6a5a", "#3a7a6a"], seed: 9 },
+    { top: "#02030c", mid: "#0c0c24", low: "#140c26", haze: ["#5a4a9a", "#3a2a7a", "#4a3a8a"], seed: 21 },
+    { top: "#04040a", mid: "#160c14", low: "#28120e", haze: ["#8a5a3a", "#6a3a2a", "#5a3a4a"], vent: "#ff7a2a", seed: 33 }
+  ];
+  const MAX_FRIENDS = 12;
+
+  let W = 0, H = 0, L = {};
+  let track = null; // api.track: its list holds the swimmers { kind, at, from: [x, y], wob, state, t, seed }
+  let friends = []; // { kind, a, r, born, seed }
+  let sparks = [], pops = [];
+  let clock = 0, lastTier = 1, hits = 0, glad = -9, blink = 0;
+  let flare = null; // { t0, c }
+  let burst = null; // { t0 }
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const m = Math.min(W, H);
+    const R = clamp(m * 0.2, 44, 150);
+    const wide = W > H * 1.1;
+    const lx = wide ? W * 0.58 : W * 0.68, ly = wide ? H * 0.46 : H * 0.47;
+    L = { R, k: R / 100, lx, ly, bx: lx - R * 1.35, by: ly + R * 1.05, light: clamp(m * 0.2, 70, 190), swim: clamp(m * 0.022, 7, 15), far: Math.hypot(W, H) * 0.62, speed: clamp(W * 0.05, 14, 48) };
+  }
+  // Where the lantern is now: it bobs gently on its rod, one sway every two beats
+  const lure = (now) => [L.lx + Math.sin(now * Math.PI * 0.5) * L.R * 0.06, L.ly + Math.sin(now * Math.PI) * L.R * 0.035];
+
+  // Where a swimmer is at beat position `now`, and which way it faces
+  function swimAt(s, now) {
+    const [tx, ty] = lure(now);
+    const u = (now - (s.at - TRAVEL)) / TRAVEL;
+    if (s.state === "missed" && now > s.t) {
+      // bumped the lantern and turned back into the dark
+      const v = (now - s.t) / 2.5;
+      const dx = s.from[0] - tx, dy = s.from[1] - ty, d = Math.hypot(dx, dy) || 1;
+      const k = ease(v) * L.far * 0.5;
+      return { x: tx + (dx / d) * k + Math.sin(v * 5) * 8, y: ty + (dy / d) * k - v * 30, a: Math.atan2(dy, dx), u: 1, fade: 1 - v };
+    }
+    const w = clamp(u, 0, 1);
+    const dx = tx - s.from[0], dy = ty - s.from[1];
+    const d = Math.hypot(dx, dy) || 1;
+    const side = Math.sin(w * Math.PI) * s.wob * d * (1 - w * 0.3);
+    const x = s.from[0] + dx * w - (dy / d) * side, y = s.from[1] + dy * w + (dx / d) * side;
+    const turn = Math.cos(w * Math.PI) * s.wob * 1.6;
+    // a little swimming wiggle in its heading
+    return { x, y, a: Math.atan2(dy, dx) + turn + Math.sin(now * TAU * 1.5 + s.seed) * 0.12, u, fade: 1 };
+  }
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  // Each little one faces +x; baked lit (its glow) and dark (just a shape) at size r
+  function swimmerSprite(ctx, kind, r, lit) {
+    const c = KINDS[kind].color;
+    const R = Math.round(r);
+    return S.sprite(ctx, "sw" + kind + "_" + R + (lit ? "L" : "D"), R * 6, R * 4, R * 3, R * 2, (g) => {
+      const body = lit ? c : "#0d2230";
+      const paint = (g) => {
+        g.fillStyle = body;
+        g.beginPath();
+        if (kind === 0) {
+          // lanternfish: a slim fish with a forked tail
+          g.ellipse(0, 0, R * 1.3, R * 0.55, 0, 0, TAU);
+          g.moveTo(-R * 1.1, 0);
+          g.lineTo(-R * 2, -R * 0.6);
+          g.lineTo(-R * 1.8, 0);
+          g.lineTo(-R * 2, R * 0.6);
+          g.closePath();
+        } else if (kind === 1) {
+          // shrimp: a curled body in segments, and long feelers
+          for (let i = 0; i < 5; i++) g.ellipse(R * 0.8 - i * R * 0.45, Math.sin(i * 0.6) * R * 0.25, R * (0.5 - i * 0.06), R * (0.42 - i * 0.05), 0, 0, TAU);
+        } else if (kind === 2) {
+          // copepod: a teardrop with sweeping antennae
+          g.ellipse(R * 0.2, 0, R * 0.9, R * 0.6, 0, 0, TAU);
+          g.moveTo(-R * 0.6, 0);
+          g.lineTo(-R * 1.5, -R * 0.15);
+          g.lineTo(-R * 1.5, R * 0.15);
+          g.closePath();
+        } else {
+          // sea butterfly: a little shell and two wings
+          g.ellipse(0, 0, R * 0.55, R * 0.45, 0, 0, TAU);
+          g.ellipse(-R * 0.2, -R * 0.75, R * 0.35, R * 0.8, -0.5, 0, TAU);
+          g.ellipse(-R * 0.2, R * 0.75, R * 0.35, R * 0.8, 0.5, 0, TAU);
+        }
+        g.fill();
+        g.strokeStyle = body;
+        g.lineWidth = Math.max(1, R * 0.12);
+        g.lineCap = "round";
+        if (kind === 1 || kind === 2) {
+          g.beginPath();
+          const reach = kind === 1 ? 2.6 : 2.2;
+          g.moveTo(R * 0.9, -R * 0.2);
+          g.quadraticCurveTo(R * 2, -R * 1.3, R * (kind === 1 ? 0.5 : -0.6), -R * reach * 0.75);
+          g.moveTo(R * 0.9, R * 0.2);
+          g.quadraticCurveTo(R * 2, R * 1.3, R * (kind === 1 ? 0.5 : -0.6), R * reach * 0.75);
+          g.stroke();
+        }
+      };
+      if (lit) S.blurred(g, c, R * 1.6, paint);
+      else paint(g);
+      // photophores: a row of tiny lights along the belly
+      g.fillStyle = lit ? "#ffffff" : S.rgba(c, 0.35);
+      for (let i = 0; i < (kind === 0 ? 5 : 3); i++) {
+        g.beginPath();
+        g.arc(R * (0.8 - i * 0.42), R * (kind === 0 ? 0.3 : 0.1), Math.max(0.8, R * 0.11), 0, TAU);
+        g.fill();
+      }
+      // an eye, the one thing you can see in the dark
+      g.fillStyle = lit ? "#ffffff" : "#cfefff";
+      g.beginPath();
+      g.arc(R * (kind === 3 ? 0.25 : 0.75), -R * 0.12, Math.max(1, R * 0.16), 0, TAU);
+      g.fill();
+    });
+  }
+  // Moru's body: a big dark round fish facing right, rim-lit from the lantern's side
+  function moruSprite(ctx) {
+    const R = Math.round(L.R);
+    return S.sprite(ctx, "moru" + R, R * 3.4, R * 2.8, R * 1.7, R * 1.4, (g) => {
+      // the dorsal fin first (the tail is its own sprite, so it can beat)
+      g.fillStyle = "#0b1a26";
+      g.beginPath();
+      g.moveTo(-R * 0.3, -R * 0.82);
+      g.quadraticCurveTo(-R * 0.6, -R * 1.25, -R * 0.75, -R * 0.62);
+      g.fill();
+      // the body
+      const body = g.createRadialGradient(R * 0.35, -R * 0.35, R * 0.1, 0, 0, R);
+      body.addColorStop(0, "#22384a");
+      body.addColorStop(0.6, "#0f2030");
+      body.addColorStop(1, "#060f18");
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, 0, R * 0.98, R * 0.88, 0, 0, TAU);
+      g.fill();
+      // freckles of dim light on her skin
+      const r = S.rng(7);
+      for (let i = 0; i < 18; i++) {
+        const a = r() * TAU, d = Math.sqrt(r()) * R * 0.8;
+        g.fillStyle = S.rgba("#4fd8ff", 0.06 + r() * 0.1);
+        g.beginPath();
+        g.arc(Math.cos(a) * d, Math.sin(a) * d * 0.9, 1 + r() * R * 0.03, 0, TAU);
+        g.fill();
+      }
+      // the warm rim where the lantern lights her
+      g.save();
+      g.strokeStyle = S.rgba(LURE, 0.55);
+      g.shadowColor = LURE;
+      g.shadowBlur = 10;
+      g.lineWidth = 2;
+      g.beginPath();
+      g.ellipse(0, 0, R * 0.97, R * 0.87, 0, -Math.PI * 0.55, Math.PI * 0.15);
+      g.stroke();
+      g.restore();
+      // the big underbite and its little teeth, more charming than fierce
+      g.fillStyle = "#03080d";
+      g.beginPath();
+      g.moveTo(R * 0.35, R * 0.18);
+      g.quadraticCurveTo(R * 0.95, R * 0.12, R * 1.06, R * 0.02);
+      g.quadraticCurveTo(R * 0.95, R * 0.55, R * 0.4, R * 0.5);
+      g.closePath();
+      g.fill();
+      g.fillStyle = "#cfe3ea";
+      for (let i = 0; i < 5; i++) {
+        const x = R * (0.5 + i * 0.12), y = R * (0.15 - i * 0.02);
+        g.beginPath();
+        g.moveTo(x - R * 0.025, y);
+        g.lineTo(x, y + R * (0.08 + (i % 2) * 0.03));
+        g.lineTo(x + R * 0.025, y);
+        g.fill();
+      }
+    });
+  }
+
+  // Her tail, hinged where it meets the body, so it can sweep as she swims
+  function tailSprite(ctx) {
+    const R = Math.round(L.R);
+    return S.sprite(ctx, "moruTail" + R, R * 1.1, R * 1.7, R * 0.95, R * 0.85, (g) => {
+      g.fillStyle = "#0b1a26";
+      g.beginPath();
+      g.moveTo(R * 0.15, 0);
+      g.quadraticCurveTo(-R * 0.55, -R * 0.75, -R * 0.75, -R * 0.6);
+      g.quadraticCurveTo(-R * 0.45, 0, -R * 0.75, R * 0.6);
+      g.quadraticCurveTo(-R * 0.55, R * 0.75, R * 0.15, 0);
+      g.fill();
+      g.strokeStyle = "rgba(79,216,255,0.12)";
+      g.lineWidth = 1.2;
+      g.stroke();
+    });
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "lure" + tier, W, H, (g) => S.abyss(g, W, H, MOODS[(tier - 1) % 4]));
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function befriend(api, s, perfect, ghost) {
+    s.t = api.eng.beatPos();
+    glad = clock;
+    const [x, y] = lure(s.t);
+    // where the shell pops the points
+    s.x = x;
+    s.y = y;
+    const c = KINDS[s.kind].color;
+    friends.push({ kind: s.kind, a: Math.random() * TAU, r: L.light * (0.45 + Math.random() * 0.4), born: clock, seed: Math.random() * 100, from: [x, y] });
+    if (friends.length > MAX_FRIENDS) friends.shift();
+    pops.push({ x, y, t: 0, size: L.light * (perfect ? 0.9 : 0.6), color: c });
+    for (let i = 0; i < (perfect ? 14 : 8) && sparks.length < 160; i++) {
+      const a = (i / 14) * TAU + Math.random() * 0.4, v = 40 + Math.random() * 70, life = 0.7 + Math.random() * 0.7;
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? c : "#fff3dc" });
+    }
+    if (perfect && !ghost) api.ring(x, y, api.color(), L.light * 0.7);
+  }
+  const nextWaiting = () => track.next();
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. api.track spawns, judges, scores, misses and flies autopilot; this says who swims in.
+  // A little one sets off from the dark to arrive on beat `at`.
+  function spawn(at) {
+    if (!W) return null;
+    // from the right-hand dark: up, ahead or below, never from behind Moru
+    const th = -1.25 + Math.random() * 2.4;
+    const [tx, ty] = lure(at);
+    const prev = track.list[track.list.length - 1];
+    let kind = Math.floor(Math.random() * KINDS.length);
+    if (prev && kind === prev.kind) kind = (kind + 1) % KINDS.length;
+    return { kind, from: [tx + Math.cos(th) * L.far, ty + Math.sin(th) * L.far], wob: (Math.random() - 0.5) * 0.35, t: 0, seed: Math.random() * 10 };
+  }
+
+  // Far-off life, now and then, up in the water above her
+  const far = S.wonders({ kinds: ["leviathan", "school", "oarfish", "alarm", "eyes"], band: [0.14, 0.32], first: 10 });
+
+  function setup(api) {
+    track = api.track({
+      spawn,
+      note: (s) => s.kind / KINDS.length,
+      // Fidget lights the next one wherever it is, once it has set off from the dark
+      ready: (s, now) => now >= s.at - TRAVEL,
+      hit(s, { perfect, ghost, fidget }) {
+        // so its arrival is now
+        if (fidget) s.at = api.eng.beatPos();
+        befriend(api, s, perfect, ghost);
+        if (!ghost && ++hits === 14) api.hint("flare", 'Hold <span class="pb-kbd">Space</span>, let go: the lantern flares');
+      },
+      miss(s, counted) {
+        // it bumps the lantern and swims back into the dark
+        s.t = s.at;
+        const [x, y] = lure(api.eng.beatPos());
+        pops.push({ x, y, t: 0, size: L.light * 0.25, color: "#4a6a80" });
+        if (counted) api.hint("touch", "Glow as the little one touches the lantern");
+      },
+      empty() {
+        if (api.style === "fidget") return (glad = clock);
+        const [x, y] = lure(api.eng.beatPos());
+        pops.push({ x, y, t: 0, size: L.light * 0.35, color: LURE });
+      },
+      perfect: PERFECT,
+      keep: 3,
+      // the gold cue closes on the lantern, where the little one touches
+      cueAt: () => {
+        const [x, y] = lure(api.eng.beatPos());
+        return { x, y };
+      },
+      cueSize: L.R / 75
+    });
+  }
+
+  // 3. A press: the lantern glows; whoever is touching it lights up (the tracker scores it)
+  function onFire(api) {
+    blink = 0;
+    track.fire();
+  }
+
+  // A hold then release: the lantern flares out into the deep; a full charge is an abyss bloom
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    flare = { t0: clock, c };
+    if (c >= 1) {
+      burst = { t0: clock };
+      api.callout("Abyss bloom", W / 2, H * 0.24, LURE, 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    blink += dt;
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 12 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.7) pops.splice(i, 1);
+    if (flare && clock - flare.t0 > 1.2 + flare.c) flare = null;
+    if (burst && clock - burst.t0 > 3) burst = null;
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  function flareNow() {
+    if (!flare) return 0;
+    const u = (clock - flare.t0) / (1.2 + flare.c);
+    return Math.sin(Math.min(1, u * 4) * Math.PI * 0.5) * (1 - u) * (0.5 + flare.c);
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const [lx, ly] = lure(now);
+    const fl = flareNow();
+    const reach = L.light * (1 + friends.length * 0.045 + fl * 1.2);
+    const tierC = api.color();
+    // She swims forward through the deep: the world slides past, the far things slowest
+    const off = now * L.speed;
+    S.ridge(ctx, W, H, off * 0.12, { top: H * 0.7, amp: H * 0.14, scale: W * 0.55, seed: 2, fill: "rgba(12,34,48,0.45)", rim: "rgba(90,160,190,0.1)" });
+    far.draw(ctx, W, H, now, L.speed);
+    S.ridge(ctx, W, H, off * 0.35, { top: H * 0.84, amp: H * 0.1, scale: W * 0.3, seed: 5, fill: "#02080e", rim: S.rgba(LURE, 0.08) });
+    S.snow(ctx, W, H, now * 0.5, { n: 45, fall: 14, alpha: 0.35, drift: -L.speed * 1.6 });
+    // the lantern's light on the water, wide and faint, breathing on the beat
+    S.glow(ctx, lx, ly, reach * 2.6, LURE, 0.07 + 0.03 * pulse + fl * 0.25);
+    S.glow(ctx, lx, ly, reach * 1.3, LURE, 0.16 + fl * 0.3);
+    S.glow(ctx, lx, ly, reach * 3.2, tierC, 0.035);
+    // marine snow catches the lantern's light near it
+    S.snow(ctx, W, H, now * 0.4 + 50, { n: 25, fall: 12, alpha: 0.5, color: "#ffe2b8", drift: -L.speed * 2 });
+
+    // The friends: lit up and circling the lantern, each in its own lane and its own time
+    const bu = burst ? (clock - burst.t0) / 3 : 1;
+    for (const f of friends) {
+      const age = clock - f.born;
+      const settle = ease(age / 1.2);
+      const out = burst ? Math.sin(Math.min(1, bu * 3) * Math.PI * 0.5) * (1 - bu) * L.light * 1.6 : 0;
+      const a = f.a + clock * (0.35 + (f.seed % 1) * 0.3) * (f.seed > 50 ? 1 : -1);
+      const r = f.r * (1 + Math.sin(clock * 0.7 + f.seed) * 0.12) + out;
+      const fx = lx + Math.cos(a) * r, fy = ly + Math.sin(a) * r * 0.75;
+      const x = f.from[0] + (fx - f.from[0]) * settle, y = f.from[1] + (fy - f.from[1]) * settle;
+      const head = a + (f.seed > 50 ? Math.PI / 2 : -Math.PI / 2);
+      const c = KINDS[f.kind].color;
+      S.glow(ctx, x, y, L.swim * 3.2, c, 0.35 + 0.15 * Math.sin(clock * 2 + f.seed));
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(head);
+      if (Math.cos(head) < 0) ctx.scale(1, -1);
+      S.add(ctx, swimmerSprite(ctx, f.kind, L.swim * KINDS[f.kind].len * 0.85, true), 0, 0, 1, 0.95);
+      ctx.restore();
+    }
+
+    // Moru, gently bobbing and breathing (in front of the friends circling behind her)
+    const bx = L.bx + Math.sin(now * Math.PI * 0.5) * L.R * 0.03, by = L.by + Math.sin(now * Math.PI * 0.5 + 0.6) * L.R * 0.05;
+    const breathe = 1 + Math.sin(now * Math.PI * 0.5) * 0.015;
+    // her tail beats once a beat, sweeping her along
+    const sweep = Math.sin(now * Math.PI) * 0.32;
+    ctx.save();
+    ctx.translate(bx - L.R * 0.8, by + L.R * 0.02);
+    ctx.rotate(sweep);
+    S.draw(ctx, tailSprite(ctx), 0, 0);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.scale(breathe, 1 / breathe);
+    S.draw(ctx, moruSprite(ctx), 0, 0);
+    ctx.restore();
+    // a pectoral fin, fluttering
+    ctx.save();
+    ctx.translate(bx + L.R * 0.05, by + L.R * 0.38);
+    ctx.rotate(0.5 + Math.sin(now * Math.PI * 2) * 0.35);
+    ctx.fillStyle = "#14293a";
+    ctx.beginPath();
+    ctx.ellipse(-L.R * 0.18, 0, L.R * 0.22, L.R * 0.08, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    // her eye: watching whoever comes next, closing happily after a friend arrives
+    const nxt = nextWaiting();
+    const ex = bx + L.R * 0.5, ey = by - L.R * 0.3, er = L.R * 0.13;
+    S.glow(ctx, ex, ey, er * 3, "#4fd8ff", 0.15);
+    const happy = clock - glad < 0.6;
+    const shut = happy || frac(clock / 4.3) > 0.97;
+    ctx.fillStyle = "#cfeaf2";
+    ctx.strokeStyle = "#cfeaf2";
+    ctx.lineWidth = 2 * L.k;
+    ctx.lineCap = "round";
+    if (shut) {
+      ctx.beginPath();
+      ctx.arc(ex, ey + (happy ? er * 0.4 : 0), er * 0.8, happy ? Math.PI * 1.15 : Math.PI * 0.1, happy ? Math.PI * 1.85 : Math.PI * 0.9);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(ex, ey, er, 0, TAU);
+      ctx.fill();
+      let look = [lx - ex, ly - ey];
+      if (nxt && nxt.at - now < TRAVEL) {
+        const p = swimAt(nxt, now);
+        look = [p.x - ex, p.y - ey];
+      }
+      const d = Math.hypot(look[0], look[1]) || 1;
+      ctx.fillStyle = "#02060a";
+      ctx.beginPath();
+      ctx.arc(ex + (look[0] / d) * er * 0.4, ey + (look[1] / d) * er * 0.4, er * 0.55, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(ex - er * 0.3, ey - er * 0.35, er * 0.22, 0, TAU);
+      ctx.fill();
+    }
+    // the rod, curving from her brow to the lantern
+    const rx = bx + L.R * 0.25, ry = by - L.R * 0.82;
+    ctx.strokeStyle = "#1a3444";
+    ctx.lineWidth = 3 * L.k;
+    ctx.beginPath();
+    ctx.moveTo(rx, ry);
+    ctx.quadraticCurveTo(rx + L.R * 0.5, ry - L.R * 0.95, lx, ly - L.R * 0.08);
+    ctx.stroke();
+    ctx.strokeStyle = S.rgba(LURE, 0.35);
+    ctx.lineWidth = 1.2 * L.k;
+    ctx.stroke();
+    ctx.lineCap = "butt";
+
+    // (the landing cue is the shell's gold ring on the lantern: see cueAt)
+
+    // The little ones on their way: dark shapes with bright eyes, lit as they near the light
+    for (const s of track.list) {
+      if (s.state === "hit") continue; // a friend now, drawn in the ring
+      const p = swimAt(s, now);
+      if (p.u < 0 || p.fade <= 0) continue;
+      const d = Math.hypot(p.x - lx, p.y - ly);
+      const seen = clamp(1 - (d - reach * 0.6) / (reach * 1.1), 0, 1);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.a);
+      if (Math.cos(p.a) < 0) ctx.scale(1, -1);
+      ctx.globalAlpha = p.fade * (0.35 + 0.65 * seen);
+      S.draw(ctx, swimmerSprite(ctx, s.kind, L.swim * KINDS[s.kind].len, false), 0, 0);
+      ctx.globalAlpha = 1;
+      if (seen > 0.05) S.add(ctx, swimmerSprite(ctx, s.kind, L.swim * KINDS[s.kind].len, true), 0, 0, 1, seen * 0.35 * p.fade);
+      ctx.restore();
+    }
+
+    // The lantern itself: a warm bulb with a hot core, flaring with each press
+    const lastPop = pops.length ? pops[pops.length - 1] : null;
+    const bright = lastPop ? 1 - lastPop.t / 0.7 : 0;
+    S.glow(ctx, lx, ly, L.R * (0.5 + bright * 0.5 + fl * 0.6), LURE, 0.9);
+    S.glow(ctx, lx, ly, L.R * 0.2, "#fff3dc", 1);
+    S.twinkle(ctx, lx, ly, L.R * (0.18 + 0.08 * pulse + bright * 0.2), "#ffe2b8", 0.6 + bright * 0.4);
+
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.6);
+      S.glow(ctx, p.x, p.y, p.size * (0.5 + e), p.color, (1 - e) * 0.6);
+      S.softRing(ctx, p.x, p.y, p.size * 0.2 + p.size * 0.6 * ease(e), p.color, (1 - e) * 0.7, 1.3);
+    }
+    for (const p of sparks) S.glow(ctx, p.x, p.y, 5 * L.k + 3, p.color, (p.life / p.max) * 0.9);
+    // the nearest flecks, out of focus, rushing past
+    for (let i = 0; i < 6; i++) {
+      const span = W * 1.5, x = W + 40 - ((((i * 0.37 + 0.05) * span + off * 2.2) % span) + span) % span;
+      S.glow(ctx, x, H * (0.12 + ((i * 0.61) % 1) * 0.8), 7 + (i % 3) * 4, "#9fd8ff", 0.1);
+    }
+
+    // the hold: an arc closing round the lantern, amber at full charge
+    api.drawCharge(lx, ly, L.R * 0.42, undefined, LURE);
+  }
+
+  SpaceShell.mount({
+    key: "deep-lure",
+    title: "Lure",
+    hint: "Glow as each little one touches the lantern",
+    skin: S,
+    words: { fire: "Glow", charge: "Flare" },
+    engine: {},
+    tierNames: ["Finding your rhythm", "Lamplight", "Gathering", "Abyss bloom"],
+    fidgetPoint: () => lure(0),
+    resize: layout,
+    setup,
+    onBeat: (n) => far.beat(n),
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

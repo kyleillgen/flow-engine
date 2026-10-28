@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="A fleet of little aliens bobs to the beat. Boop each one as it drops into your sights. A rhythm micro-game that finds your tempo.">
+<meta property="og:title" content="Nova · Flow Engine">
+<meta property="og:description" content="A fleet of little aliens bobs to the beat. Boop each one as it drops into your sights. A rhythm micro-game that finds your tempo.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/games/nova.html">
+<meta name="twitter:card" content="summary_large_image">
+<title>Nova</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/neon/neon-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Nova: a fleet of little pixel aliens bobs across a dreamy sky, one step a beat. Every so
+// often one peels off and swoops down into your sights, arriving exactly on a beat; fire as the
+// ring closes and it gets booped: a happy squeeze, and it floats off home. Your ship
+// glides under the next diver by itself, so the one thing to do is the timing.
+//
+// The aliens are characters: Mochi (a sprouting jelly bean), Pip (a one-eyed antenna bean) and
+// Mew (a three-eyed star cat). They blink on the beat, hop in a wave down the rows, watch
+// whoever is diving, gasp when a friend is booped and giggle when one dodges past you.
+//
+// It runs on the space shell (shell/space-shell.js), not the pinball one: the engine underneath
+// is the same. The clean window is ±0.3 beat (wider with assist, for divers not yet launched)
+// and "perfect" is ±0.1. A diver you miss winks and swoops off; nothing is lost.
+// Fidget (F): every press fires and hits: the next diver wherever it is, or the fleet itself.
+// Hold then let go for a nova shot (a fan of beams); a full charge is a supernova that ripples
+// through the whole fleet. Trick shots never score.
+// Mothership: about once a minute of play Momo's saucer crosses the sky; six hits while it's up
+// bring it down for a bonus.
+(() => {
+  "use strict";
+
+  const S = NeonSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1; // beats
+  const INK = "#2a1640"; // eyes and mouths
+  // Three original pixel aliens, 12 x 10, two frames each (they swap on every step). The face
+  // is drawn live on top, in pixel units from the sprite's centre: eyes [x, y, size], eye radii,
+  // mouth, cheeks.
+  const KINDS = [
+    {
+      name: "mochi",
+      color: "#ff9ccf",
+      cheek: "#ff5d9e",
+      note: 0.15,
+      frames: [
+        ["......##....", ".....#......", "...######...", "..########..", ".##########.", ".##########.", "############", "############", ".##########.", "..##....##.."],
+        [".....##.....", "......#.....", "...######...", "..########..", ".##########.", ".##########.", "############", "############", ".##########.", ".##......##."]
+      ],
+      eyes: [[-1.6, 1, 1], [1.6, 1, 1]],
+      eye: [0.62, 0.95],
+      mouth: [0, 2.5],
+      cheeks: [[-3.5, 2.1], [3.5, 2.1]]
+    },
+    {
+      name: "pip",
+      color: "#86ffcb",
+      cheek: "#35d79a",
+      note: 0.3,
+      frames: [
+        [".#........#.", "..#......#..", "...######...", "..########..", ".##########.", ".##########.", ".##########.", "..########..", "...######...", "..#..##..#.."],
+        ["..#......#..", "..#......#..", "...######...", "..########..", ".##########.", ".##########.", ".##########.", "..########..", "...######...", ".#...##...#."]
+      ],
+      eyes: [[0, 0.2, 1]],
+      eye: [1.4, 1.5],
+      mouth: [0, 3.3],
+      smile: 1.1, // a wide grin under the one big eye
+      cheeks: [[-3.3, 2.2], [3.3, 2.2]]
+    },
+    {
+      name: "mew",
+      color: "#bba6ff",
+      cheek: "#ff7fc8",
+      note: 0.45,
+      frames: [
+        [".#........#.", ".##......##.", ".###....###.", ".##########.", "############", "############", "############", ".##########.", "..########..", "..#.#..#.#.."],
+        ["#..........#", ".##......##.", ".###....###.", ".##########.", "############", "############", "############", ".##########.", "..########..", ".#.#....#.#."]
+      ],
+      eyes: [[-2.1, 1.3, 1], [2.1, 1.3, 1], [0, -0.7, 0.62]],
+      eye: [0.7, 0.85],
+      mouth: [0, 2.8],
+      mew: true, // a ":3" mouth
+      cheeks: [[-3.7, 2.6], [3.7, 2.6]]
+    }
+  ];
+  // Momo, who flies the mothership: a face in the dome
+  const MOMO = { color: "#ffd9a8", cheek: "#ff7fa8", eyes: [[-2.2, 0, 1], [2.2, 0, 1]], eye: [0.7, 0.9], mouth: [0, 1.9], cheeks: [[-3.8, 1.2], [3.8, 1.2]] };
+  // The sky drifts through four moods as the tiers climb: dusk, lagoon, orchid, honey
+  const MOODS = [
+    { top: "#0a0a28", mid: "#25164c", low: "#6b2d6a", clouds: ["#ff8fd8", "#7fe9ff", "#b69cff", "#ffb38a", "#7fe9ff", "#ff8fd8"], band: "#d4c4ff", seed: 11, hill: ["#2a1848", "#120a2a"] },
+    { top: "#04142a", mid: "#123756", low: "#2d6a78", clouds: ["#8dffc4", "#7fe9ff", "#b69cff", "#8dffc4", "#ffd2f0", "#7fe9ff"], band: "#c8fff0", seed: 23, hill: ["#13304a", "#081826"] },
+    { top: "#160828", mid: "#43164f", low: "#9a3a76", clouds: ["#ff8fd8", "#c49cff", "#ff9a8a", "#ff8fd8", "#7fe9ff", "#c49cff"], band: "#ffd0f0", seed: 37, hill: ["#361648", "#160a24"] },
+    { top: "#170c26", mid: "#4f2546", low: "#b8604e", clouds: ["#ffc46b", "#ff8fd8", "#ffb38a", "#ffe0a0", "#c49cff", "#ffc46b"], band: "#ffe8c8", seed: 41, hill: ["#3a1c3a", "#1a0c1e"] }
+  ];
+  const GRID = ["#ff9ad8", "#7fe9ff", "#c4a0ff", "#ffc46b"]; // the floor, set against each tier's colour
+  const PLANET = ["#a58bff", "#ff8fd8", "#7fd8ff", "#ffb86b"];
+
+  let W = 0, H = 0;
+  let L = {}; // layout, from the window size
+  let slots = []; // the fleet: { r, c, kind, seed, state: "here" | "away" | "empty", respawnAt, inAt }
+  let divers = []; // { kind, t0, arriveAt, sx, sy, tx, side, window, state: "dive" | "hit" | "gone", fade }
+  let beams = [], bolts = [], motes = [], pops = [], boops = [], zaps = [], queue = [];
+  let beatsSince = 99;
+  let lastArrive = -99;
+  let lastTx = 0;
+  let shipX = 0, shipFrom = { x: 0, t: 0 }, aim = null, tilt = 0;
+  let warp = 0, shake = 0, clock = 0, lastTier = 1, hits = 0;
+  let sky = { from: 1, to: 1, t: 1 }; // the mood crossfading from one tier's sky to the next
+  let react = null; // the fleet's reaction to the last boop or dodge: { x, y, until, mood }
+  let saucer = null; // { t0, beats, hits, flash }
+  let saucerClock = 0, nextSaucer = 50 + Math.random() * 20; // seconds of play between visits
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // The timing ring warms toward gold in the last third of a beat and is full gold, with a glow,
+  // inside the perfect window. Only while timing counts (not in Fidget).
+  const GOLD = "#ffd76a";
+  let timed = true;
+  const gilt = (left) => (!timed ? 0 : Math.abs(left) < PERFECT ? 1 : 0.55 * clamp(1 - (Math.abs(left) - PERFECT) / 0.3, 0, 1));
+  function cueRing(ctx, x, y, r, color, a, w, left) {
+    const g = gilt(left);
+    S.softRing(ctx, x, y, r, g ? S.mix(color, GOLD, g) : color, a, w * (1 + g * 0.8));
+    if (g >= 1) S.glow(ctx, x, y, r * 2.4, GOLD, 0.4 * a);
+  }
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  // The march: a step on every beat, snapping across in a tenth of a beat, back and forth
+  const tri = (s) => {
+    const m = ((s % 12) + 12) % 12;
+    return m < 6 ? m - 3 : 9 - m;
+  };
+  function march(now) {
+    const s = Math.floor(now);
+    const e = Math.min(1, (now - s) / 0.1);
+    return (tri(s - 1) + (tri(s) - tri(s - 1)) * e) * L.step;
+  }
+  const slotPos = (sl, now) => [W / 2 + (sl.c - (L.cols - 1) / 2) * L.cell + march(now), L.fleetTop + sl.r * L.rowH + L.rowH / 2];
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const rows = H < 480 ? 2 : 3;
+    const px = clamp(Math.floor(Math.min(W / 100, H / 95)), 2, 4);
+    const cell = px * 15;
+    const cols = clamp(Math.floor((W - 110) / cell), 4, 8);
+    // A short screen (the pocket's Mini) packs everything closer, keeping the sights above the ship
+    const short = H < 300, top = short ? 46 : 58;
+    L = { rows, cols, px, cell, k: px / 3, rowH: px * 13, step: px * 3, saucerY: top + 22, fleetTop: top + (short ? 30 : 44), shipY: H - (short ? 44 : 58), horizon: Math.round(H - Math.max(78, H * 0.27)) };
+    L.fleetBottom = L.fleetTop + rows * L.rowH;
+    L.sightY = Math.min(L.shipY - 40, Math.max(L.fleetBottom + (short ? 22 : 44), Math.min(L.horizon - 12, L.shipY - 150)));
+    slots = [];
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) slots.push({ r, c, kind: rows === 2 ? [1, 0][r] : [2, 1, 0][r], seed: (r * 5 + c * 3) % 7, state: "here", respawnAt: 0, inAt: -99 });
+    if (!shipX) shipX = lastTx = W / 2;
+    shipX = clamp(shipX, W * 0.1, W * 0.9);
+    shipFrom = { x: shipX, t: api.eng.beatPos() };
+  }
+
+  // A diver's path: a cubic swoop from its place in the fleet into the sights, landing on
+  // arriveAt; after that it carries on along its heading and peels away
+  function divePos(d, now) {
+    const c1x = clamp(d.sx + d.side * W * 0.32, W * 0.06, W * 0.94), c1y = d.sy + 40;
+    const c2x = d.tx - d.side * W * 0.28, c2y = L.sightY - 150;
+    if (now <= d.arriveAt) {
+      const u = clamp((now - d.t0) / (d.arriveAt - d.t0), 0, 1);
+      const v = 1 - u;
+      return [v * v * v * d.sx + 3 * v * v * u * c1x + 3 * v * u * u * c2x + u * u * u * d.tx, v * v * v * d.sy + 3 * v * v * u * c1y + 3 * v * u * u * c2y + u * u * u * L.sightY];
+    }
+    const dx = d.tx - c2x, dy = L.sightY - c2y, n = Math.hypot(dx, dy) || 1, t = now - d.arriveAt;
+    return [d.tx + (dx / n) * t * 160 + d.side * t * t * 140, L.sightY + (dy / n) * t * 160];
+  }
+  function nextDiver() {
+    let best = null;
+    for (const d of divers) if (d.state === "dive" && (!best || d.arriveAt < best.arriveAt)) best = d;
+    return best;
+  }
+
+  // ---- Sprites, baked once per size ----------------------------------------------------------
+  // An alien's body: soft glow, the pixels filled solid, lit from above with a rim on every top
+  // edge, shaded below, and a faint seam between pixels so it still reads as pixel art
+  function alienSprite(ctx, kind, frame) {
+    const K = KINDS[kind], px = L.px, pad = 16;
+    const w = 12 * px + pad * 2, h = 10 * px + pad * 2;
+    return S.sprite(ctx, "alien" + kind + frame + px, w, h, w / 2, h / 2, (g) => {
+      const rows = K.frames[frame];
+      const on = (i, j) => j >= 0 && j < 10 && i >= 0 && i < 12 && rows[j][i] === "#";
+      const cells = (fn) => rows.forEach((row, j) => { for (let i = 0; i < 12; i++) if (row[i] === "#") fn(i, j); });
+      g.translate(-6 * px, -5 * px);
+      S.blurred(g, K.color, 14, (g) => {
+        g.globalAlpha = 0.75;
+        g.fillStyle = K.color;
+        cells((i, j) => g.fillRect(i * px, j * px, px, px));
+      });
+      // The body on its own canvas, so the shading stays inside it
+      const b = document.createElement("canvas");
+      b.width = g.canvas.width;
+      b.height = g.canvas.height;
+      const bg = b.getContext("2d");
+      bg.setTransform(g.getTransform());
+      bg.fillStyle = K.color;
+      cells((i, j) => bg.fillRect(i * px - 0.2, j * px - 0.2, px + 0.4, px + 0.4));
+      bg.globalCompositeOperation = "source-atop";
+      const lin = bg.createLinearGradient(0, 0, 0, 10 * px);
+      lin.addColorStop(0, "rgba(255,255,255,0.5)");
+      lin.addColorStop(0.4, "rgba(255,255,255,0.05)");
+      lin.addColorStop(0.7, "rgba(70,20,110,0)");
+      lin.addColorStop(1, "rgba(70,20,110,0.42)");
+      bg.fillStyle = lin;
+      bg.fillRect(0, 0, 12 * px, 10 * px);
+      bg.fillStyle = "rgba(255,255,255,0.6)";
+      cells((i, j) => !on(i, j - 1) && bg.fillRect(i * px, j * px, px, px * 0.26));
+      bg.fillStyle = "rgba(50,10,80,0.13)";
+      cells((i, j) => {
+        bg.fillRect(i * px + px * 0.9, j * px, px * 0.1, px);
+        bg.fillRect(i * px, j * px + px * 0.9, px, px * 0.1);
+      });
+      g.save();
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.drawImage(b, 0, 0);
+      g.restore();
+    });
+  }
+
+  // A face, in the alien's own pixel units (the caller has scaled to them). mood: idle, o, eep,
+  // whee, giggle, happy, wink, sleepy. lx, ly: where the eyes look (-1..1). blink: eyes shut.
+  function face(ctx, K, mood, lx, ly, blink) {
+    ctx.lineCap = "round";
+    ctx.strokeStyle = ctx.fillStyle = INK;
+    ctx.lineWidth = 0.42;
+    for (const c of K.cheeks) {
+      ctx.globalAlpha = mood === "happy" || mood === "giggle" ? 0.75 : 0.45;
+      ctx.fillStyle = K.cheek;
+      ctx.beginPath();
+      ctx.ellipse(c[0], c[1], 0.95, 0.55, 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = INK;
+    const wide = mood === "o" || mood === "eep" ? 1.18 : mood === "whee" ? 1.08 : 1;
+    K.eyes.forEach(([ex, ey, es], i) => {
+      const rx = K.eye[0] * es, ry = K.eye[1] * es;
+      if (mood === "happy" || (mood === "giggle" && i < 2)) {
+        // ^ ^
+        ctx.beginPath();
+        ctx.arc(ex, ey + ry * 0.55, rx * 1.05, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      } else if (blink || mood === "sleepy" || (mood === "wink" && i === 0)) {
+        // a closed, contented eye
+        ctx.beginPath();
+        ctx.arc(ex, ey - ry * 0.35, rx * 0.95, Math.PI * 0.15, Math.PI * 0.85);
+        ctx.stroke();
+      } else {
+        const ox = lx * rx * 0.22, oy = ly * ry * 0.18;
+        ctx.beginPath();
+        ctx.ellipse(ex + ox, ey + oy, rx * wide, ry * wide, 0, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.ellipse(ex + ox * 2 - rx * 0.3, ey + oy * 2 - ry * 0.38, rx * 0.36, ry * 0.32, 0, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.arc(ex + ox * 2 + rx * 0.35, ey + oy * 2 + ry * 0.4, rx * 0.15, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = INK;
+      }
+    });
+    const [mx, my] = K.mouth;
+    ctx.beginPath();
+    if (mood === "o" || mood === "eep") {
+      ctx.ellipse(mx, my, 0.42, mood === "eep" ? 0.42 : 0.55, 0, 0, TAU);
+      ctx.fill();
+    } else if (mood === "whee" || mood === "giggle" || mood === "happy") {
+      ctx.arc(mx, my - 0.25, 0.8, 0, Math.PI);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#ff7fae";
+      ctx.beginPath();
+      ctx.ellipse(mx, my + 0.3, 0.42, 0.22, 0, 0, TAU);
+      ctx.fill();
+    } else if (K.mew) {
+      ctx.arc(mx - 0.38, my - 0.1, 0.38, 0.1, Math.PI - 0.1);
+      ctx.moveTo(mx + 0.76, my - 0.1);
+      ctx.arc(mx + 0.38, my - 0.1, 0.38, 0.1, Math.PI - 0.1);
+      ctx.stroke();
+    } else {
+      const s = K.smile || 0.62;
+      ctx.arc(mx, my - s * 0.9, s, Math.PI * 0.25, Math.PI * 0.75);
+      ctx.stroke();
+    }
+    if (mood === "wink") {
+      // and a little tongue out
+      ctx.fillStyle = "#ff7fae";
+      ctx.beginPath();
+      ctx.ellipse(mx + 0.2, my + 0.2, 0.32, 0.4, 0, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  // An alien at (x, y): o = { k: size, sx, sy: squash, rot, a: alpha, mood, lx, ly, blink }
+  function drawAlien(ctx, kind, frame, x, y, o) {
+    const K = KINDS[kind];
+    ctx.save();
+    ctx.translate(x, y);
+    if (o.rot) ctx.rotate(o.rot);
+    ctx.scale((o.k || 1) * (o.sx || 1), (o.k || 1) * (o.sy || 1));
+    ctx.globalAlpha = o.a === undefined ? 1 : o.a;
+    S.draw(ctx, alienSprite(ctx, kind, frame), 0, 0);
+    ctx.scale(L.px, L.px);
+    face(ctx, K, o.mood || "idle", o.lx || 0, o.ly || 0, o.blink);
+    ctx.restore();
+  }
+
+  function shipSprite(ctx) {
+    const k = L.k;
+    return S.sprite(ctx, "ship" + L.px, 90 * k, 84 * k, 45 * k, 42 * k, (g) => {
+      g.scale(k, k);
+      g.lineJoin = "round";
+      const hull = () => {
+        g.beginPath();
+        g.moveTo(0, -23);
+        g.bezierCurveTo(11, -23, 15, -4, 14, 7);
+        g.bezierCurveTo(13, 14, -13, 14, -14, 7);
+        g.bezierCurveTo(-15, -4, -11, -23, 0, -23);
+        g.closePath();
+      };
+      const fin = (s) => {
+        g.beginPath();
+        g.moveTo(s * 12, -2);
+        g.quadraticCurveTo(s * 24, 4, s * 23, 15);
+        g.quadraticCurveTo(s * 17, 13, s * 11, 11);
+        g.closePath();
+      };
+      for (const s of [-1, 1]) {
+        fin(s);
+        g.fillStyle = "#5a2a6e";
+        g.fill();
+        S.haloed(g, "#ff9ccf", (g, c, core) => {
+          fin(s);
+          g.strokeStyle = c;
+          g.lineWidth = core ? 1 : 2.2;
+          g.stroke();
+        });
+      }
+      hull();
+      const body = g.createLinearGradient(0, -23, 0, 14);
+      body.addColorStop(0, "#3d2f7a");
+      body.addColorStop(1, "#1a1238");
+      g.fillStyle = body;
+      g.fill();
+      S.haloed(g, "#9ff3ff", (g, c, core) => {
+        hull();
+        g.strokeStyle = c;
+        g.lineWidth = core ? 1.2 : 2.6;
+        g.stroke();
+      });
+      // The cockpit bubble, with a glint
+      const glass = g.createRadialGradient(-2, -10, 1, 0, -6, 9);
+      glass.addColorStop(0, "#e9fdff");
+      glass.addColorStop(0.35, "#8fe6ff");
+      glass.addColorStop(1, "#3a5fb0");
+      g.fillStyle = glass;
+      g.beginPath();
+      g.ellipse(0, -6, 6.5, 8, 0, 0, TAU);
+      g.fill();
+      g.fillStyle = "rgba(255,255,255,0.85)";
+      g.beginPath();
+      g.ellipse(-2.4, -9.5, 1.6, 2.6, -0.4, 0, TAU);
+      g.fill();
+      // Running lights along the belly
+      for (const x of [-7, 0, 7]) {
+        g.fillStyle = "#ffd9a8";
+        g.beginPath();
+        g.arc(x, 7, 1.3, 0, TAU);
+        g.fill();
+      }
+    });
+  }
+  function sightSprite(ctx) {
+    return S.sprite(ctx, "sight2", 64, 64, 32, 32, (g) =>
+      S.haloed(g, "#fff0fb", (g, c, core) => {
+        g.fillStyle = c;
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * TAU + Math.PI / 4;
+          g.beginPath();
+          g.arc(Math.cos(a) * 17, Math.sin(a) * 17, core ? 1.3 : 2, 0, TAU);
+          g.fill();
+        }
+        g.strokeStyle = c;
+        g.lineWidth = core ? 0.6 : 1.1;
+        g.globalAlpha *= 0.5;
+        g.beginPath();
+        g.arc(0, 0, 17, 0, TAU);
+        g.stroke();
+      })
+    );
+  }
+  function saucerSprite(ctx) {
+    const k = L.k;
+    return S.sprite(ctx, "saucer2" + L.px, 150 * k, 80 * k, 75 * k, 44 * k, (g) => {
+      g.scale(k, k);
+      // The glass dome (Momo sits inside; the face is drawn live)
+      const dome = g.createRadialGradient(-5, -18, 2, 0, -8, 22);
+      dome.addColorStop(0, "rgba(220,250,255,0.5)");
+      dome.addColorStop(1, "rgba(127,233,255,0.08)");
+      g.fillStyle = dome;
+      g.beginPath();
+      g.ellipse(0, -6, 20, 17, 0, Math.PI, TAU);
+      g.fill();
+      S.haloed(g, "#9ff3ff", (g, c, core) => {
+        g.strokeStyle = c;
+        g.lineWidth = core ? 0.8 : 1.6;
+        g.beginPath();
+        g.ellipse(0, -6, 20, 17, 0, Math.PI, TAU);
+        g.stroke();
+      });
+      // The soft round hull
+      const hull = g.createLinearGradient(0, -8, 0, 12);
+      hull.addColorStop(0, "#5a3f9a");
+      hull.addColorStop(1, "#241544");
+      g.fillStyle = hull;
+      g.beginPath();
+      g.ellipse(0, 2, 42, 11, 0, 0, TAU);
+      g.fill();
+      S.haloed(g, "#ff9ccf", (g, c, core) => {
+        g.strokeStyle = c;
+        g.lineWidth = core ? 1.1 : 2.4;
+        g.beginPath();
+        g.ellipse(0, 2, 42, 11, 0, 0, TAU);
+        g.stroke();
+      });
+      g.fillStyle = "rgba(255,255,255,0.18)";
+      g.beginPath();
+      g.ellipse(0, -3, 34, 3, 0, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // ---- The sky's baked layer: a dreamy sky, a ringed planet and a sleepy moon -------------
+  function planet(g, tier) {
+    const c = PLANET[(tier - 1) % 4];
+    const r = Math.min(W, H) * 0.24;
+    const x = W * 0.8, y = L.horizon - r * 0.35;
+    g.globalCompositeOperation = "lighter";
+    const at = g.createRadialGradient(x, y, r * 0.8, x, y, r * 1.9);
+    at.addColorStop(0, S.rgba(c, 0.26));
+    at.addColorStop(1, S.rgba(c, 0));
+    g.fillStyle = at;
+    g.fillRect(x - r * 2, y - r * 2, r * 4, r * 4);
+    g.globalCompositeOperation = "source-over";
+    const ring = (from, to) => {
+      g.globalCompositeOperation = "lighter";
+      for (const [w, a] of [[r * 0.16, 0.08], [r * 0.07, 0.18], [1.4, 0.55]]) {
+        g.strokeStyle = S.rgba("#ffd0f0", a);
+        g.lineWidth = w;
+        g.beginPath();
+        g.ellipse(x, y, r * 1.75, r * 0.36, -0.22, from, to);
+        g.stroke();
+      }
+      g.globalCompositeOperation = "source-over";
+    };
+    ring(Math.PI, TAU); // the far half, behind the planet
+    const body = g.createRadialGradient(x - r * 0.45, y - r * 0.5, 0, x, y, r);
+    body.addColorStop(0, S.mix(c, "#ffffff", 0.45));
+    body.addColorStop(0.4, S.mix(c, "#1a0f34", 0.3));
+    body.addColorStop(0.85, S.mix(c, "#120a28", 0.8));
+    body.addColorStop(1, "#120a28");
+    g.fillStyle = body;
+    g.beginPath();
+    g.arc(x, y, r, 0, TAU);
+    g.fill();
+    g.save();
+    g.clip();
+    g.globalCompositeOperation = "lighter";
+    for (let i = -3; i <= 3; i++) {
+      g.strokeStyle = S.rgba(i & 1 ? "#ffffff" : c, 0.07);
+      g.lineWidth = r * (0.08 + (i & 1) * 0.06);
+      g.beginPath();
+      g.ellipse(x, y + i * r * 0.26, r * 1.2, r * 0.1, -0.22, 0, TAU);
+      g.stroke();
+    }
+    g.restore();
+    g.globalCompositeOperation = "source-over";
+    ring(0, Math.PI); // the near half, in front
+    // A sleepy little moon, eyes shut, smiling
+    const mx = W * 0.15, my = H * 0.5, mr = Math.max(9, r * 0.16);
+    g.globalCompositeOperation = "lighter";
+    const halo = g.createRadialGradient(mx, my, mr * 0.8, mx, my, mr * 2.8);
+    halo.addColorStop(0, "rgba(255,236,200,0.22)");
+    halo.addColorStop(1, "rgba(255,236,200,0)");
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 3, my - mr * 3, mr * 6, mr * 6);
+    g.globalCompositeOperation = "source-over";
+    const moon = g.createRadialGradient(mx - mr * 0.4, my - mr * 0.4, 0, mx, my, mr);
+    moon.addColorStop(0, "#fff6e4");
+    moon.addColorStop(1, "#e7b98f");
+    g.fillStyle = moon;
+    g.beginPath();
+    g.arc(mx, my, mr, 0, TAU);
+    g.fill();
+    g.strokeStyle = "#7a4a5a";
+    g.lineWidth = Math.max(1, mr * 0.1);
+    g.lineCap = "round";
+    for (const s of [-1, 1]) {
+      g.beginPath();
+      g.arc(mx + s * mr * 0.36, my - mr * 0.05, mr * 0.2, Math.PI * 0.15, Math.PI * 0.85);
+      g.stroke();
+    }
+    g.beginPath();
+    g.arc(mx, my + mr * 0.22, mr * 0.16, Math.PI * 0.2, Math.PI * 0.8);
+    g.stroke();
+    g.fillStyle = "rgba(255,130,160,0.45)";
+    for (const s of [-1, 1]) {
+      g.beginPath();
+      g.ellipse(mx + s * mr * 0.6, my + mr * 0.25, mr * 0.17, mr * 0.1, 0, 0, TAU);
+      g.fill();
+    }
+  }
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "nova" + tier, W, H, (g) => {
+      S.dreamSky(g, W, H, MOODS[(tier - 1) % 4]);
+      planet(g, tier);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects ---------------------------------------------------------------------------
+  // A boop: the alien squeezes happily and floats off home in a puff of soft sparkles.
+  // Nothing shatters.
+  function boop(api, x, y, kind, power) {
+    const K = KINDS[kind];
+    boops.push({ x, y, kind, t: 0, drift: (Math.random() - 0.5) * 30 });
+    const n = Math.round(12 * power);
+    for (let i = 0; i < n && motes.length < 260; i++) {
+      const a = (i / n) * TAU + Math.random() * 0.4, v = (50 + Math.random() * 90) * power, life = 0.8 + Math.random() * 0.7;
+      motes.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v * 0.8 - 30, life, max: life, color: i % 3 ? K.color : i % 2 ? "#ffffff" : K.cheek, r: 3 + Math.random() * 4, star: i % 4 === 0 });
+    }
+    pops.push({ x, y, t: 0, color: K.color, size: 38 * power });
+    if (!api.reduced && power > 1) shake = Math.max(shake, 0.03);
+    react = { x, y, until: api.eng.beatPos() + 0.9, mood: "o" };
+  }
+  function beam(x1, y1, color) {
+    beams.push({ x0: shipX, y0: L.shipY - 22 * L.k, x1, y1, t: 0, color });
+  }
+  function hit(api, d, ghost, perfect) {
+    const [x, y] = divePos(d, api.eng.beatPos());
+    d.state = "hit";
+    beam(x, y, KINDS[d.kind].color);
+    boop(api, x, y, d.kind, perfect ? 1.5 : 1);
+    if (perfect) api.ring(x, y, api.color(), 64);
+    if (!ghost) hitSaucer(api, x, y);
+  }
+  function killSlot(api, sl, withBeam) {
+    if (sl.state !== "here") return;
+    const now = api.eng.beatPos();
+    const [x, y] = slotPos(sl, now);
+    if (withBeam) beam(x, y, KINDS[sl.kind].color);
+    boop(api, x, y, sl.kind, 1);
+    sl.state = "empty";
+    sl.respawnAt = now + 3 + Math.random() * 5;
+  }
+  function hitSaucer(api, x, y) {
+    if (!saucer || !api.started || api.eng.auto) return;
+    const [sx, sy] = saucerPos(api.eng.beatPos());
+    zaps.push({ x0: x, y0: y, x1: sx, y1: sy, t: 0 });
+    saucer.flash = 1;
+    if (++saucer.hits < 6) return;
+    // Down it comes: a shower of sparkles in every colour, and the bonus
+    for (let i = 0; i < 60; i++) {
+      const a = Math.random() * TAU, v = 50 + Math.random() * 220, life = 1 + Math.random() * 0.9;
+      motes.push({ x: sx, y: sy, vx: Math.cos(a) * v, vy: Math.sin(a) * v * 0.6 - 40, life, max: life, color: KINDS[i % 3].color, r: 3 + Math.random() * 5, star: i % 3 === 0 });
+    }
+    pops.push({ x: sx, y: sy, t: 0, color: "#ffd9a8", size: 120 });
+    api.ring(sx, sy, "#ffd23a", Math.min(W, H) * 0.4);
+    api.bonus(3000, "Mothership!", W / 2, H * 0.36);
+    warp = 1;
+    saucer = null;
+  }
+  function saucerPos(now) {
+    const p = (now - saucer.t0) / saucer.beats;
+    return [-70 + p * (W + 140), L.saucerY + Math.sin(now * Math.PI) * 3];
+  }
+
+  // ---- The five questions ----------------------------------------------------------------
+  // 1. On the beat: when the pacer says so, an alien leaves the fleet. It arrives in the
+  //    sights `dive` beats later, always on a whole beat and at least two beats after the last.
+  function onBeat(n, api) {
+    if (++beatsSince < Math.max(2, api.eng.paceBeats()) || !W) return;
+    beatsSince = 0;
+    const dive = 4;
+    const arriveAt = Math.max(n + dive, lastArrive + 2);
+    lastArrive = arriveAt;
+    const ready = slots.filter((s) => s.state === "here" && n - s.inAt >= 1);
+    const sl = ready.length ? ready[Math.floor(Math.random() * ready.length)] : null;
+    const [sx, sy] = sl ? slotPos(sl, n) : [W * (0.2 + Math.random() * 0.6), -20];
+    if (sl) {
+      sl.state = "away";
+      sl.respawnAt = arriveAt + 3;
+    }
+    const tx = clamp(lastTx + (Math.random() * 2 - 1) * W * 0.32, W * 0.14, W * 0.86);
+    lastTx = tx;
+    divers.push({ kind: sl ? sl.kind : Math.floor(Math.random() * 3), t0: n, arriveAt, sx, sy, tx, side: tx > sx ? -1 : 1, window: 0.3 + 0.15 * api.eng.assist, state: "dive", fade: 1 });
+  }
+
+  // Fidget: the press always hits something. The next diver wherever it is, else the nearest
+  // alien above the ship, front row first. Mash for rapid fire.
+  function zap(api) {
+    const d = nextDiver();
+    if (d) {
+      hit(api, d, false, false);
+      return d.kind;
+    }
+    const now = api.eng.beatPos();
+    let best = null, bestCost = 1e9;
+    for (const sl of slots) {
+      if (sl.state !== "here") continue;
+      const cost = Math.abs(slotPos(sl, now)[0] - shipX) - sl.r * L.cell * 0.6;
+      if (cost < bestCost) [best, bestCost] = [sl, cost];
+    }
+    if (!best) return 1;
+    killSlot(api, best, true);
+    hitSaucer(api, shipX, L.shipY - 40);
+    return best.kind;
+  }
+
+  // 3. The player fires. Every press goes to the engine; a diver in the ring is hit.
+  function onFire(api) {
+    if (api.style === "fidget") {
+      api.eng.tap({ height: KINDS[zap(api)].note });
+      return;
+    }
+    const now = api.eng.beatPos();
+    let d = null;
+    for (const x of divers) if (x.state === "dive" && Math.abs(now - x.arriveAt) < x.window && (!d || Math.abs(now - x.arriveAt) < Math.abs(now - d.arriveAt))) d = x;
+    api.eng.tap({ height: d ? KINDS[d.kind].note : 0.75 });
+    if (!d) {
+      bolts.push({ x: shipX, y: L.shipY - 22 * L.k, t: 0 }); // a shot into the dark, still a note
+      return;
+    }
+    const perfect = Math.abs(now - d.arriveAt) < PERFECT;
+    hit(api, d, false, perfect);
+    // 4. Score it
+    api.hit(perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 1.5);
+    if (++hits === 16) api.hint("nova", 'Hold <span class="pb-kbd">Space</span>, let go: a nova shot');
+  }
+
+  // A hold then release is a trick shot, for fun only: a fan of beams into the fleet, and at
+  // full charge a supernova that ripples out through every alien from the ship
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const now = api.eng.beatPos();
+    const here = slots.filter((s) => s.state === "here");
+    const dist = (s) => Math.hypot(slotPos(s, now)[0] - shipX, slotPos(s, now)[1] - L.shipY);
+    if (c >= 1) {
+      for (const s of here) queue.push({ at: clock + dist(s) / 900, sl: s });
+      api.callout("Supernova", W / 2, H * 0.32, "#ffc46b", 1.3);
+      api.ring(shipX, L.shipY, "#ffc46b", Math.max(W, H) * 0.8);
+      api.eng.chime();
+      warp = 1;
+      return;
+    }
+    here.sort((a, b) => dist(a) - dist(b));
+    for (const s of here.slice(0, 1 + Math.round(c * 3))) killSlot(api, s, true);
+  }
+
+  function autopilot(dt, api) {
+    const now = api.eng.beatPos();
+    for (const d of divers) if (d.state === "dive" && now >= d.arriveAt) hit(api, d, true, false);
+  }
+
+  // 2. Movement, misses and effects
+  // ---- Asides: now and then something happens far off ---------------------------------------
+  // Slow and faint, behind everything and never on the beat, so it never gets in the way of the
+  // timing, and never gold, which means "tap now". One at a time, every 14 to 30 seconds,
+  // and never the same one twice running.
+  let aside = null, asideIn = 8 + Math.random() * 6, asideLast = -1;
+  const fadeIO = (u) => Math.min(1, u * 5, (1 - u) * 5);
+  // x across the screen at progress u, coming in from the side a.dir says, m of a width off each edge
+  const across = (a, u, m) => (a.dir > 0 ? -W * m + u * W * (1 + 2 * m) : W * (1 + m) - u * W * (1 + 2 * m));
+  function asides(dt) {
+    if (aside) {
+      if ((aside.t += dt) >= aside.dur) {
+        aside = null;
+        asideIn = 14 + Math.random() * 16;
+      }
+      return;
+    }
+    if ((asideIn -= dt) > 0) return;
+    let i = Math.floor(Math.random() * ASIDES.length);
+    if (i === asideLast) i = (i + 1) % ASIDES.length;
+    asideLast = i;
+    aside = Object.assign({ i, t: 0, dir: Math.random() < 0.5 ? -1 : 1, y: 0.06 + Math.random() * 0.14, x0: 0.15 + Math.random() * 0.55 }, ASIDES[i].start);
+  }
+  function drawAside(ctx) {
+    if (!aside) return;
+    const u = aside.t / aside.dur;
+    ASIDES[aside.i].draw(ctx, aside, u, fadeIO(u), Math.min(W, H) / 500);
+  }
+  const ASIDES = [
+    { // a comet, slow, its tail of light behind it
+      start: { dur: 11 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + u * 0.05);
+        for (let j = 9; j >= 0; j--) S.glow(ctx, x - a.dir * j * 13 * k, y - j * 0.8 * k, (16 - j) * k, "#9fe8ff", f * 0.2 * (1 - j / 11));
+        S.twinkle(ctx, x, y, 9 * k, "#ffffff", f * 0.7);
+      }
+    },
+    { // three shooting stars, one after another
+      start: { dur: 3.4 },
+      draw(ctx, a, u, f, k) {
+        ["#ff9ccf", "#9fe8ff", "#d6c8ff"].forEach((c, n) => {
+          const v = (u * 3.4 - n * 0.8) / 0.9;
+          if (v < 0 || v > 1) return;
+          const x0 = W * (0.15 + 0.22 * n + a.y), y0 = H * (0.05 + 0.05 * n);
+          for (let j = 0; j < 7; j++) {
+            const w = Math.max(0, v - j * 0.035);
+            S.glow(ctx, x0 + a.dir * w * W * 0.3, y0 + w * H * 0.12, (6 - j * 0.6) * k, c, (1 - v) * 0.55 * (1 - j / 7));
+          }
+        });
+      }
+    },
+    { // a little satellite crossing very slowly, blinking
+      start: { dur: 18 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.05), y = H * (a.y + 0.03 * Math.sin(u * 3));
+        S.glow(ctx, x, y, 5 * k, "#dff6ff", f * 0.5);
+        if ((a.t * 1.3) % 1 < 0.12) S.glow(ctx, x, y, 9 * k, "#ff9ccf", f * 0.7);
+      }
+    },
+    { // a far convoy of little pods in a loose V, drifting over
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + 0.04) + Math.sin(a.t * 0.8) * 8 * k;
+        for (let i = 0; i < 7; i++) {
+          const row = Math.ceil(i / 2), side = i % 2 ? 1 : -1;
+          const bx = x - a.dir * row * 15 * k, by = y + side * row * 8 * k + Math.sin(a.t * 3 + i) * 2 * k;
+          S.glow(ctx, bx, by, 6 * k, "#9ff3ff", f * 0.45);
+          S.glow(ctx, bx, by, 2.5 * k, "#ffffff", f * 0.5);
+        }
+      }
+    },
+    { // a ringed planet, far off, slowly passing
+      start: { dur: 24 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.1), y = H * (a.y + 0.08), r = 18 * k;
+        S.glow(ctx, x, y, r * 2.6, "#bba6ff", f * 0.14);
+        ctx.globalAlpha = f * 0.3;
+        ctx.fillStyle = "#bba6ff";
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(-0.25 * a.dir);
+        ctx.scale(1, 0.3);
+        S.softRing(ctx, 0, 0, r * 1.75, "#ff9ccf", f * 0.5, 1.4);
+        ctx.restore();
+      }
+    },
+    { // an aurora swells and folds, then fades
+      start: { dur: 13 },
+      draw(ctx, a, u, f, k) {
+        ["#8dffc4", "#bba6ff"].forEach((c, r) => {
+          for (let i = 0; i <= 12; i++) {
+            const v = i / 12;
+            S.glow(ctx, v * W, H * (0.1 + r * 0.06) + Math.sin(v * 6 + a.t * 0.5 + r * 2) * H * 0.03, H * 0.07, c, f * 0.15);
+          }
+        });
+      }
+    }
+  ];
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    asides(dt);
+    for (const sl of slots) {
+      if (sl.state !== "here" && now >= sl.respawnAt) {
+        sl.state = "here";
+        sl.inAt = now;
+      }
+    }
+    for (const d of divers) {
+      if (d.state === "dive" && now > d.arriveAt + d.window) {
+        d.state = "gone";
+        react = { x: d.tx, y: L.sightY, until: now + 1, mood: "giggle" }; // a friend got away: the fleet giggles
+        if (api.miss()) api.hint("sights", "Fire as the ring closes on the sights");
+      }
+      if (d.state !== "dive") d.fade -= d.state === "hit" ? 1 : dt * 0.8;
+    }
+    divers = divers.filter((d) => d.fade > 0);
+    // The ship glides under the next diver and is settled there half a beat before it lands
+    const nd = nextDiver();
+    if (nd !== aim) {
+      aim = nd;
+      shipFrom = { x: shipX, t: now };
+    }
+    const before = shipX;
+    if (nd) {
+      const u = clamp((now - shipFrom.t) / Math.max(0.3, nd.arriveAt - 0.45 - shipFrom.t), 0, 1);
+      shipX = shipFrom.x + (nd.tx - shipFrom.x) * u * u * (3 - 2 * u);
+    }
+    tilt += (clamp((shipX - before) / dt / 900, -0.35, 0.35) - tilt) * Math.min(1, dt * 10);
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (clock < queue[i].at) continue;
+      killSlot(api, queue[i].sl, false);
+      queue.splice(i, 1);
+    }
+    // Sparkles drift up and slow, like embers on a warm night
+    const drag = Math.pow(0.12, dt);
+    for (let i = motes.length - 1; i >= 0; i--) {
+      const p = motes[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag - 26 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) motes.splice(i, 1);
+    }
+    for (const list of [beams, bolts, pops, zaps]) {
+      for (let i = list.length - 1; i >= 0; i--) if ((list[i].t += dt) > 0.6) list.splice(i, 1);
+    }
+    for (let i = boops.length - 1; i >= 0; i--) if ((boops[i].t += dt) > 1.3) boops.splice(i, 1);
+    if (api.tier !== lastTier) {
+      if (api.tier > lastTier) warp = 1; // a new tier: the stars streak into hyperspace
+      sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    }
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5); // the sky drifts into the new mood
+    warp = Math.max(0, warp - dt * 0.9);
+    shake = Math.max(0, shake - dt);
+    if (saucer) {
+      saucer.flash = Math.max(0, saucer.flash - dt * 3);
+      if ((now - saucer.t0) / saucer.beats > 1.05) saucer = null;
+    } else if (api.started && !api.eng.auto && (saucerClock += dt) >= nextSaucer) {
+      saucer = { t0: now, beats: 20 / api.eng.beatSec, hits: 0, flash: 0 };
+      saucerClock = 0;
+      nextSaucer = 50 + Math.random() * 20;
+      api.callout("Mothership!", W / 2, H * 0.3, "#ffd23a", 1.2);
+    }
+  }
+
+  // 5. The look
+  const BEAM = [[18, 0.1], [7, 0.32], [2.4, 0.95]];
+  function draw(ctx, api) {
+    timed = api.style !== "fidget";
+    const now = api.eng.beatPos();
+    const k = L.k, px = L.px;
+    const frac = now - Math.floor(now);
+    const pulse = 1 - frac; // 1 on each beat, fading
+    const frame = Math.floor(now) & 1;
+    const tierC = api.color();
+    const par = W / 2 - shipX; // parallax: the world slides a little against the ship
+
+    // Far: the baked sky crossfading between moods, slow aurora, stars, drifting motes
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const mood = MOODS[(api.tier - 1) % 4];
+    S.glow(ctx, W * (0.3 + 0.15 * Math.sin(clock * 0.07)), H * (0.24 + 0.05 * Math.sin(clock * 0.05)), W * 0.75, mood.clouds[0], 0.1);
+    S.glow(ctx, W * (0.75 + 0.12 * Math.sin(clock * 0.06 + 2)), H * (0.4 + 0.06 * Math.sin(clock * 0.04 + 1)), W * 0.6, mood.clouds[1], 0.08);
+    S.stars(ctx, W, H, warp);
+    drawAside(ctx);
+    S.motes(ctx, W, H * 0.8, clock, [mood.clouds[0], mood.clouds[1], "#fff1d6"], { n: 10, size: 9, rise: 6, sway: 20, par: par * 0.05, alpha: 0.28, seed: 9 });
+    ctx.save();
+    if (shake > 0) ctx.translate((Math.random() * 2 - 1) * shake * 30, (Math.random() * 2 - 1) * shake * 30);
+
+    // Middle: two ridges of rim-lit hills on the horizon, then the misty floor
+    S.hills(ctx, "back" + api.tier, W, L.horizon + 2, 46, par * 0.04, [S.mix(mood.low, mood.hill[0], 0.3), S.mix(mood.low, mood.hill[0], 0.7)], S.mix(GRID[(api.tier - 1) % 4], "#ffffff", 0.2), 3);
+    S.hills(ctx, "front" + api.tier, W, L.horizon + 2, 24, par * 0.09, [mood.hill[0], mood.hill[1]], GRID[(api.tier - 1) % 4], 8);
+    S.grid(ctx, W, H, L.horizon, now, GRID[(api.tier - 1) % 4], 1);
+
+    // A wide soft glow behind the fleet, breathing on the beat
+    S.glow(ctx, W / 2 + march(now), L.fleetTop + (L.rows * L.rowH) / 2, W * 0.55, tierC, 0.05 + 0.05 * pulse);
+
+    if (saucer) {
+      const [x, y] = saucerPos(now);
+      S.glow(ctx, x, y, 90 * k, "#ff9ccf", 0.25);
+      // Momo in the dome, squeezing their eyes shut when hit
+      ctx.save();
+      ctx.translate(x, y - 12 * k);
+      ctx.scale(k * 2.3, k * 2.3);
+      ctx.fillStyle = MOMO.color;
+      ctx.beginPath();
+      ctx.arc(0, 1 + Math.sin(now * Math.PI) * 0.4, 6.2, 0, TAU);
+      ctx.fill();
+      face(ctx, MOMO, saucer.flash > 0.2 ? "happy" : saucer.hits > 3 ? "o" : "idle", Math.sin(now * 0.8), 0.4, (Math.floor(now) % 4 === 0 && frac < 0.15));
+      ctx.restore();
+      S.draw(ctx, saucerSprite(ctx), x, y);
+      for (let i = 0; i < 6; i++) {
+        const lit = i < saucer.hits || (Math.floor(now * 2) + i) % 3 === 0;
+        S.glow(ctx, x + (i - 2.5) * 12 * k, y + 5 * k, (lit ? 8 : 4) * k, i < saucer.hits ? "#ffd23a" : "#9ff3ff", lit ? 1 : 0.4);
+      }
+      if (saucer.flash) S.glow(ctx, x, y, 80 * k, "#ffffff", saucer.flash * 0.5);
+    }
+
+    // The fleet. Each hop lands on the beat in a wave down the rows, squashing a little; they
+    // blink on the beat, watch whoever is diving, and react together to a boop or a dodge
+    const nd = nextDiver();
+    const watch = nd ? divePos(nd, now) : [shipX, L.shipY];
+    const reacting = react && now < react.until ? react : null;
+    for (const sl of slots) {
+      if (sl.state !== "here") continue;
+      const [x0, y0] = slotPos(sl, now);
+      const lag = ((now - sl.r * 0.12) % 1 + 1) % 1;
+      const land = Math.max(0, 1 - lag / 0.3);
+      const hop = Math.sin(clamp((lag - 0.2) / 0.6, 0, 1) * Math.PI) * px * (reacting && reacting.mood === "giggle" ? 1.6 : 0.9);
+      const x = x0, y = y0 - hop;
+      const at = reacting || { x: watch[0], y: watch[1] };
+      const dx = at.x - x, dy = at.y - y, dn = Math.hypot(dx, dy) || 1;
+      const blink = (Math.floor(now) + sl.seed) % 6 === 0 && frac < 0.16;
+      const p = Math.min(1, now - sl.inAt);
+      if (p < 1) {
+        // A returning alien floats down in a soft column of light, still waking up
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = (1 - p) * 0.25;
+        ctx.fillStyle = KINDS[sl.kind].color;
+        const bw = px * 12 * (1 - p * 0.6);
+        ctx.fillRect(x - bw / 2, 0, bw, y);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = "source-over";
+        const e = ease(p * 1.4);
+        drawAlien(ctx, sl.kind, frame, x, y - (1 - e) * 30, { k: 0.4 + 0.6 * e, a: p, mood: "sleepy" });
+        continue;
+      }
+      drawAlien(ctx, sl.kind, frame, x, y, {
+        sx: 1 + 0.07 * land,
+        sy: 1 - 0.08 * land,
+        rot: (frame ? 1 : -1) * 0.04,
+        mood: reacting ? reacting.mood : "idle",
+        lx: dx / dn,
+        ly: dy / dn,
+        blink: blink && !reacting
+      });
+    }
+
+    // Divers with their light trails: "whee" on the way down, a gasp as the ring closes, a
+    // cheeky wink and tongue as they swoop past if you miss
+    for (const d of divers) {
+      if (d.state === "hit") continue;
+      const color = KINDS[d.kind].color;
+      const trail = [];
+      for (let i = 0; i < 9; i++) {
+        const at = now - i * 0.04;
+        if (at < d.t0) break;
+        trail.push(divePos(d, at));
+      }
+      const a = d.state === "gone" ? Math.max(0, d.fade) : 1;
+      ctx.globalAlpha = a;
+      S.streak(ctx, trail, px * 2.4, color);
+      ctx.globalAlpha = 1;
+      const [x, y] = trail[0] || divePos(d, now);
+      if (trail.length > 6) S.twinkle(ctx, trail[6][0], trail[6][1], 7 * k, color, 0.6 * a * pulse);
+      S.glow(ctx, x, y, 34 * k, color, 0.35 * a);
+      const [bx, by] = trail[1] || [x, y - 1];
+      const vx = x - bx, vy = y - by;
+      const left = d.arriveAt - now;
+      drawAlien(ctx, d.kind, frame, x, y, {
+        k: 1.12,
+        rot: clamp(vx * 0.03, -0.45, 0.45),
+        sx: 1 - clamp(Math.abs(vy) * 0.004, 0, 0.08),
+        sy: 1 + clamp(Math.abs(vy) * 0.006, 0, 0.12),
+        a,
+        mood: d.state === "gone" ? "wink" : left < 0.9 ? "eep" : "whee",
+        lx: d.state === "gone" ? -d.side : (shipX - x) / W,
+        ly: 1
+      });
+    }
+
+    // The sights above the ship, and the ring that closes on them as the next diver lands
+    ctx.globalCompositeOperation = "lighter";
+    const lane = ctx.createLinearGradient(0, L.sightY, 0, L.shipY);
+    lane.addColorStop(0, S.rgba("#9ff3ff", 0.14));
+    lane.addColorStop(1, S.rgba("#9ff3ff", 0));
+    ctx.fillStyle = lane;
+    ctx.fillRect(shipX - 1, L.sightY + 18, 2, L.shipY - L.sightY - 40 * k);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.save();
+    ctx.translate(shipX, L.sightY);
+    ctx.rotate(now * 0.25 * Math.PI);
+    S.add(ctx, sightSprite(ctx), 0, 0, 1 + 0.12 * pulse, 0.5 + 0.35 * pulse);
+    ctx.restore();
+    if (nd) {
+      const left = nd.arriveAt - now;
+      if (left < 2.2) {
+        const r = 16 + Math.max(0, left) * 36;
+        const a = Math.min(1, (2.2 - left) / 0.6);
+        const c = KINDS[nd.kind].color;
+        cueRing(ctx, nd.tx, L.sightY, r, c, a, 1.6, left);
+        const ang = -Math.PI / 2 + left * 1.6;
+        S.twinkle(ctx, nd.tx + Math.cos(ang) * r, L.sightY + Math.sin(ang) * r, 9, c, a);
+      }
+    }
+
+    // Beams, shots into the dark, and lightning to the mothership
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    for (const b of beams) {
+      const f = Math.max(0, 1 - b.t / 0.26);
+      if (!f) continue;
+      for (const [w, a] of BEAM) {
+        ctx.globalAlpha = a * f;
+        ctx.strokeStyle = a > 0.9 ? S.mix(b.color, "#ffffff", 0.7) : b.color;
+        ctx.lineWidth = w * (0.4 + 0.6 * f);
+        ctx.beginPath();
+        ctx.moveTo(b.x0, b.y0);
+        ctx.lineTo(b.x1, b.y1);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineCap = "butt";
+    for (const b of bolts) {
+      const f = Math.max(0, 1 - b.t / 0.4);
+      S.twinkle(ctx, b.x, b.y - b.t * 1100, 9, "#9ff3ff", f);
+    }
+    ctx.strokeStyle = "#ffe08a";
+    ctx.globalCompositeOperation = "lighter";
+    for (const z of zaps) {
+      const f = Math.max(0, 1 - z.t / 0.3);
+      ctx.globalAlpha = f;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(z.x0, z.y0);
+      for (let i = 1; i < 6; i++) ctx.lineTo(z.x0 + ((z.x1 - z.x0) * i) / 6 + (Math.random() - 0.5) * 12, z.y0 + ((z.y1 - z.y0) * i) / 6);
+      ctx.lineTo(z.x1, z.y1);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    for (const b of beams) if (b.t < 0.26) S.glow(ctx, b.x0, b.y0, 24 * k * (1 - b.t / 0.26), b.color, 1);
+
+    // The ship, its engine breathing on the beat, and the charge of a held press
+    const flick = 0.85 + 0.15 * Math.sin(clock * 31);
+    S.glow(ctx, shipX, L.shipY + 18 * k, (14 + 9 * pulse) * k * flick, "#ff9ccf", 0.9);
+    S.glow(ctx, shipX, L.shipY + 24 * k, (8 + 3 * pulse) * k, "#fff1d6", 0.6 + 0.3 * pulse);
+    S.glow(ctx, shipX, L.shipY, 46 * k, "#9ff3ff", 0.14);
+    ctx.save();
+    ctx.translate(shipX, L.shipY + Math.sin(clock * 2.2) * 1.5);
+    ctx.rotate(tilt);
+    S.draw(ctx, shipSprite(ctx), 0, 0);
+    ctx.restore();
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const color = c >= 1 ? "#ffc46b" : "#9ff3ff";
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = color;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(shipX, L.shipY, 34 * k, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+      if (c >= 1) {
+        S.glow(ctx, shipX, L.shipY, 64 * k, color, 0.35 + 0.3 * pulse);
+        S.twinkle(ctx, shipX + Math.cos(clock * 5) * 34 * k, L.shipY + Math.sin(clock * 5) * 34 * k, 12, color, 1);
+      }
+    }
+
+    // Boops: a soft flash and ring, the happy alien floating off home, sparkles
+    for (const f of pops) {
+      const e = Math.min(1, f.t / 0.5);
+      S.glow(ctx, f.x, f.y, f.size * (0.6 + e), f.color, (1 - e) * 0.8);
+      S.glow(ctx, f.x, f.y, f.size * 0.35, "#ffffff", Math.max(0, 1 - e * 2.5));
+      S.softRing(ctx, f.x, f.y, f.size * 0.4 + f.size * 0.9 * ease(e), f.color, (1 - e) * 0.8, 1.4);
+    }
+    for (const b of boops) {
+      const e = b.t / 1.3;
+      const squeeze = b.t < 0.12 ? b.t / 0.12 : Math.max(0, 1 - (b.t - 0.12) / 0.25);
+      const x = b.x + b.drift * ease(e), y = b.y - 46 * ease(e);
+      drawAlien(ctx, b.kind, 0, x, y, { k: 1 - 0.35 * e, sx: 1 + 0.18 * squeeze, sy: 1 - 0.16 * squeeze, a: 1 - e * e, mood: "happy", rot: Math.sin(b.t * 9) * 0.12 * (1 - e) });
+    }
+    for (let i = 0; i < motes.length; i++) {
+      const p = motes[i];
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, p.r * 2, p.color, a);
+      else S.glow(ctx, p.x, p.y, p.r * 1.6, p.color, a * 0.9);
+    }
+    // Near: a few big soft motes drifting past in front, out of focus
+    S.motes(ctx, W, H, clock, [tierC, "#ffc2ea", "#d6c8ff"], { n: 6, size: 26, rise: 14, sway: 30, par: par * 0.2, alpha: 0.12, seed: 21 });
+    ctx.restore();
+  }
+
+  SpaceShell.mount({
+    key: "nova",
+    title: "Nova",
+    hint: "Fire as each diver drops into your sights",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Warp", "Hyperspace", "Supernova"],
+    onPhrase: () => (warp = Math.max(warp, 0.45)),
+    fidgetPoint: () => ({ x: shipX, y: L.shipY - 24 * L.k }),
+    resize: layout,
+    onBeat,
+    onFire,
+    onRelease,
+    autopilot,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

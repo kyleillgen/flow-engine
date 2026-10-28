@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Zip the little ship sits in a field of Grumps, grumpy space rocks. Tap as each Grump touches the ring and Zip breaks it into gems. A rhythm micro-game that finds your tempo.">
+<title>Rocks</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/arcade/arcade-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Rocks: a rock blaster on one button. Zip, a tiny round ship with a bubble cockpit and a pilot
+// inside, sits in the middle of space. Grumps, space rocks with eyebrows, drift in from every
+// side, each touching Zip's ring of light on a whole beat. Zip turns to face each one by
+// itself; tap as it touches the ring and the blast breaks it into shards that turn into happy
+// little gems and fly home. Miss and the Grump only bonks the shield and drifts off, dizzy.
+//
+// Each Grump comes from api.track, on a whole beat, at least two apart, from a fresh angle. Its
+// distance is a straight line in the beat position, reaching the ring at its beat; Zip's aim
+// eases from one Grump to the next. Clean is ±0.3 beat (wider with assist, for Grumps not yet
+// scheduled), perfect ±0.1. The shell's timing ring closes on the spot where each Grump will
+// touch Zip's ring, gold on the perfect beat.
+// Fidget (F): every press blasts the nearest Grump wherever it is. Hold then let go for a spin
+// blast that clears the pebbles; a full charge is a nova. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = ArcadeSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const INK = "#1a0b2e";
+  const ROCKC = [
+    { b: "#8a7cb8", h: "#c9bff0", d: "#4a3a78" },
+    { b: "#c07a5a", h: "#ffc2a0", d: "#6a3428" },
+    { b: "#5aa8a0", h: "#b0fff0", d: "#24504c" },
+    { b: "#b06aa8", h: "#ffb0f0", d: "#5a2454" }
+  ];
+  const GEMS = ["#3df5ff", "#ff4f9a", "#7dff5a", "#ffd23d", "#9b6bff"];
+
+  // ---- Pixel art ----------------------------------------------------------------------------
+  const GRUMP = {
+    grump: ["...dbbbbd...", "..bbhhbbbbd.", ".bhhbbbbbbbd", "bhbEEbbbEEbd", "bhbbwebweebd", "bbbbeebbeebd", "bbbbbbbbbbbd", "bbbbbmmmbbbd", ".bbbmbbbmbd.", "..dbbbbbbd..", "...dddddd..."],
+    shock: ["...dbbbbd...", "..bbhhbbbbd.", ".bhbEbbbEbbd", "bhbbbbbbbbbd", "bhbwwebwwebd", "bbbweebweebd", "bbbbbbbbbbbd", "bbbbbmmbbbbd", ".bbbbmmbbbd.", "..dbbbbbbd..", "...dddddd..."],
+    dizzy: ["...dbbbbd...", "..bbhhbbbbd.", ".bhhbbbbbbbd", "bhbbbbbbbbbd", "bhbebebebebd", "bbbbebbbebbd", "bbbebebebebd", "bbbbbbbbbbbd", ".bbbmmmmbbd.", "..dbbbbbbd..", "...dddddd..."]
+  };
+  const ZIP = [
+    "....gggggg....",
+    "...gwgggggg...",
+    "..gwgsssssgg..",
+    "..ggsfffffsg..",
+    "..ggsfefefsg..",
+    "..gggfffffgg..",
+    ".hhhhhhhhhhhh.",
+    "hppppppppppppd",
+    "pLpppLppppLppd",
+    ".dddddddddddd.",
+    "...dd....dd..."
+  ];
+  const GEM = ["..h..", ".hcc.", "hcccd", ".cdd.", "..d.."];
+  const ZIP_PAL = { g: "#9fe8ff", w: "#ffffff", s: "#4a7ac8", f: "#ffd8b0", e: INK, h: "#ffe0f0", p: "#ff4f9a", d: "#7a1b48", L: "#fff1a8" };
+  const rockPal = (c) => ({ b: c.b, h: c.h, d: c.d, E: INK, w: "#ffffff", e: INK, m: INK });
+  const gemPal = (c) => ({ c, h: "#ffffff", d: S.mixHex(c, INK, 0.45) });
+
+  let W = 0, H = 0, F = null, L = {};
+  let rocks = null; // api.track: { at, ang, kind, state, t (resolved clock), window } in rocks.list
+  let gems = [], shards = [], bolts = [], pebbles = [], waves = [];
+  let lastAng = 0, clock = 0, hits = 0, frameDt = 1 / 60, flash = 0, wobble = 0;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const frac = (v) => v - Math.floor(v);
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+  const angDiff = (a, b) => ((((b - a) % TAU) + TAU * 1.5) % TAU) - TAU / 2;
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    F = S.field(W, H);
+    const k = clamp(Math.floor(Math.min(F.w, F.h) / 110), 3, 5);
+    L = { k, cx: F.x + F.w / 2, cy: F.y + F.h * 0.55, R: Math.min(F.w, F.h) * 0.2 };
+    L.far = Math.hypot(F.w, F.h) * 0.62;
+    L.v = (L.far - L.R) / 4; // px a beat
+    if (!pebbles.length) for (let i = 0; i < 6; i++) pebbles.push(newPebble(Math.random()));
+  }
+  function newPebble(r) {
+    return { x: F.x + Math.random() * F.w, y: F.y + Math.random() * F.h, vx: (Math.random() - 0.5) * 14, vy: (Math.random() - 0.5) * 14, s: 2 + Math.floor(Math.random() * 3), c: ROCKC[Math.floor(Math.random() * 4)].b, rot: Math.random() * TAU };
+  }
+
+  // A Grump's centre at beat position now: on its line in, or drifting off after a bonk
+  function grumpAt(g, now) {
+    const r = g.state === "missed" ? L.R + Math.max(0, now - g.at) * L.v * 0.6 : L.R + (g.at - now) * L.v;
+    const spin = g.state === "missed" ? (now - g.at) * 2 : 0;
+    const a = g.ang + spin * 0.15;
+    return { x: L.cx + Math.cos(a) * r, y: L.cy + Math.sin(a) * r, r };
+  }
+  // Zip's aim: holds on the last Grump, then turns to the next over the beat before it arrives
+  function aimAt(now) {
+    let prev = null, next = null;
+    for (const g of rocks.list) {
+      if (g.state === "wait" && (!next || g.at < next.at)) next = g;
+      if (g.state !== "wait" && (!prev || g.at > prev.at)) prev = g;
+    }
+    const from = prev ? prev.ang : -Math.PI / 2;
+    if (!next) return from;
+    const u = smooth(clamp((now - (next.at - 1.5)) / 1.2, 0, 1));
+    return from + angDiff(from, next.ang) * u;
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  function setup(api) {
+    // A Grump every beat or two; the tracker spawns, judges, misses and autopilots them
+    rocks = api.track({
+      spawn: () => {
+        // A fresh angle, not too close to the last, a little favouring the open sides
+        const ang = lastAng + (Math.random() < 0.5 ? 1 : -1) * (0.9 + Math.random() * 1.8);
+        lastAng = ang;
+        return { ang, kind: Math.floor(Math.random() * ROCKC.length), spin: (Math.random() - 0.5) * 0.6 };
+      },
+      note: (g) => (api.style === "fidget" ? g.kind / ROCKC.length : 0.2 + g.kind * 0.15),
+      // Fidget blasts the next Grump that's on screen, wherever it is
+      ready: (g, now) => grumpAt(g, now).r < L.far * 0.9,
+      hit: (g, { perfect, ghost }) => {
+        if (!ghost && ++hits === 16) api.hint("spin", 'Hold <span class="pb-kbd">Space</span>, let go: a spin blast');
+        return blast(api, g, perfect, ghost);
+      },
+      miss: (g, counted) => {
+        g.t = clock;
+        waves.push({ t: 0, c: "#9b6bff", small: true, ang: g.ang });
+        if (counted) api.hint("ring", "Tap as each Grump touches the ring");
+      },
+      // A tap with nothing in reach: a short purple shot, or in Fidget a long cyan one
+      empty: () =>
+        api.style === "fidget"
+          ? bolts.push({ ang: aimAt(api.eng.beatPos()), len: L.R * 2, t: 0, c: "#3df5ff" })
+          : bolts.push({ ang: aimAt(api.eng.beatPos()), len: L.R * 1.3, t: 0, c: "#9b6bff" }),
+      perfect: PERFECT,
+      // The ring closes where the Grump will touch Zip's ring
+      cueAt: (g) => ({ x: L.cx + Math.cos(g.ang) * L.R, y: L.cy + Math.sin(g.ang) * L.R }),
+      cueSize: 0.9,
+      // A missed Grump drifts off for 4 s; Zip aims from the last one resolved until the next is
+      keep: (g) => clock - g.t < 4 || !rocks.list.some((o) => o.state !== "wait" && o.at > g.at)
+    });
+  }
+
+  function blast(api, g, perfect, ghost) {
+    const now = api.eng.beatPos();
+    const p = grumpAt(g, now);
+    g.t = clock;
+    bolts.push({ ang: Math.atan2(p.y - L.cy, p.x - L.cx), len: Math.hypot(p.x - L.cx, p.y - L.cy), t: 0, c: perfect ? "#ffd23d" : "#3df5ff" });
+    const rc = ROCKC[g.kind];
+    S.shards(shards, p.x, p.y, perfect ? 22 : 14, [rc.b, rc.h, "#ffffff"], perfect ? 240 : 170, 0);
+    // The shards become gems that fly home to Zip
+    const n = perfect ? 5 : 3;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU;
+      gems.push({ x0: p.x, y0: p.y, dx: Math.cos(a) * L.k * 14, dy: Math.sin(a) * L.k * 14, c: GEMS[(g.kind + i) % GEMS.length], t: -i * 0.04 });
+    }
+    if (perfect && !ghost) api.ring(p.x, p.y, api.color(), L.k * 14);
+    wobble = 1;
+    // Where the tracker pops the points
+    return p;
+  }
+
+  function onFire(api) {
+    rocks.fire();
+  }
+
+  // A hold then release: Zip spins and fires all round, clearing the pebbles; full charge: a nova
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const n = c >= 1 ? 16 : 8;
+    for (let i = 0; i < n; i++) bolts.push({ ang: (i / n) * TAU + clock, len: L.far, t: -i * 0.012, c: GEMS[i % GEMS.length] });
+    for (const p of pebbles) {
+      S.shards(shards, p.x, p.y, 5, [p.c, "#ffffff"], 90, 0);
+      Object.assign(p, newPebble(), { x: Math.random() < 0.5 ? F.x - 10 : F.x + F.w + 10 });
+    }
+    if (c >= 1) {
+      waves.push({ t: 0, c: "#ffd23d" });
+      api.callout("Nova", W / 2, H * 0.3, "#ffd23d", 1.2);
+      api.eng.chime();
+      flash = 1;
+    }
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    frameDt = dt;
+    for (let i = gems.length - 1; i >= 0; i--) if ((gems[i].t += dt) > 0.8) gems.splice(i, 1);
+    for (let i = bolts.length - 1; i >= 0; i--) if ((bolts[i].t += dt) > 0.22) bolts.splice(i, 1);
+    for (let i = waves.length - 1; i >= 0; i--) if ((waves[i].t += dt) > 0.9) waves.splice(i, 1);
+    for (const p of pebbles) {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.rot += dt * 0.5;
+      if (p.x < F.x - 20 || p.x > F.x + F.w + 20 || p.y < F.y - 20 || p.y > F.bottom + 20) Object.assign(p, newPebble(), { x: p.vx > 0 ? F.x - 10 : F.x + F.w + 10 });
+    }
+    flash = Math.max(0, flash - dt * 1.5);
+    deep.update(dt);
+    wobble = Math.max(0, wobble - dt * 4);
+  }
+
+  // ---- The look ---------------------------------------------------------------------------
+  function backdrop(ctx, api) {
+    const hue = api.color();
+    S.layer(ctx, "rocks" + api.tier, W, H, (g) => {
+      g.fillStyle = "#06040e";
+      g.fillRect(0, 0, W, H);
+      const lin = g.createLinearGradient(0, F.y, 0, F.bottom);
+      lin.addColorStop(0, "#07051a");
+      lin.addColorStop(1, S.mix("#120826", hue, 0.1));
+      g.fillStyle = lin;
+      g.fillRect(F.x, F.y, F.w, F.h);
+      // A big pixel planet low on one side, banded, lit from the top left
+      const pr = Math.round(Math.min(F.w, F.h * 1.2) * 0.3), px = F.x + F.w - pr * 0.45, py = F.bottom - pr * 0.3, k = Math.max(3, Math.round(pr / 22));
+      g.save();
+      g.beginPath();
+      g.rect(F.x, F.y, F.w, F.h);
+      g.clip();
+      const bands = [S.mixHex(hue, "#1a0830", 0.72), S.mixHex(hue, "#1a0830", 0.82), S.mixHex("#ff4f9a", "#1a0830", 0.75), S.mixHex(hue, "#1a0830", 0.78)];
+      for (let y = -pr; y < pr; y += k)
+        for (let x = -pr; x < pr; x += k) {
+          const d = Math.hypot(x + k / 2, y + k / 2);
+          if (d > pr) continue;
+          const lit = clamp(1 - (x + y + pr) / (pr * 2.6), 0, 1);
+          g.fillStyle = S.mix(bands[Math.floor((y + pr) / (k * 5) + Math.sin(x / pr * 2) * 0.6 + 4) % 4], "#ffffff", lit * 0.18);
+          g.fillRect(px + x, py + y, k, k);
+        }
+      const rim = g.createRadialGradient(px, py, pr * 0.92, px, py, pr * 1.25);
+      rim.addColorStop(0, S.rgba(hue, 0.16));
+      rim.addColorStop(1, S.rgba(hue, 0));
+      g.fillStyle = rim;
+      g.fillRect(F.x, F.y, F.w, F.h);
+      // Stars, some with a pixel cross
+      const r = S.rng(23);
+      for (let i = 0; i < (F.w * F.h) / 1500; i++) {
+        const x = F.x + Math.floor(r() * F.w), y = F.y + Math.floor(r() * F.h), b = r();
+        g.globalAlpha = 0.25 + b * 0.6;
+        g.fillStyle = b > 0.85 ? hue : "#fff4e0";
+        g.fillRect(x, y, 1, 1);
+        if (b > 0.96) {
+          g.fillRect(x - 2, y, 5, 1);
+          g.fillRect(x, y - 2, 1, 5);
+        }
+      }
+      g.globalAlpha = 1;
+      g.restore();
+      S.mask(g, F, "#ffffff", 0.03);
+      S.sides(g, W, H, F, ["#9b6bff", "#3df5ff", "#7dff5a"]);
+    });
+  }
+
+  // Now and then, far off: a shooting star, a satellite blinking across, a space jelly drifting
+  // by, the planet's rim catching the light
+  const JELLY = ["..jjjj..", ".jhjjjj.", "jjjjjjjj", "jjjjjjjj", ".t.t.t.t", "t.t.t.t.", ".t.t.t.t"];
+  const deep = S.happenings([
+    {
+      dur: 0.9,
+      draw(ctx, e, u) {
+        const x0 = F.x + F.w * (0.1 + e.seed * 0.5), y0 = F.y + F.h * 0.08, tr = [];
+        for (let i = 0; i < 8; i++) {
+          const v = Math.max(0, u - i * 0.04);
+          tr.push([x0 + e.side * v * F.w * 0.4, y0 + v * F.h * 0.25]);
+        }
+        ctx.globalAlpha = 1 - u;
+        S.streak(ctx, tr, 2, "#fff4e0");
+      }
+    },
+    {
+      dur: 9,
+      draw(ctx, e, u) {
+        const x = e.side > 0 ? F.x - 10 + u * (F.w + 20) : F.x + F.w + 10 - u * (F.w + 20);
+        const y = F.y + F.h * (0.1 + e.seed * 0.15) + u * F.h * 0.1;
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = "#9fe8ff";
+        ctx.fillRect(Math.round(x - 3), Math.round(y), 2, 1);
+        ctx.fillRect(Math.round(x + 2), Math.round(y), 2, 1);
+        ctx.fillStyle = "#c9bff0";
+        ctx.fillRect(Math.round(x), Math.round(y - 1), 1, 3);
+        if (frac(u * 12) < 0.15) S.glow(ctx, x, y, 4, "#ff4f9a", 0.9);
+      }
+    },
+    {
+      dur: 12,
+      draw(ctx, e, u) {
+        const x = F.x + F.w * (e.side > 0 ? 0.12 : 0.88) + Math.sin(u * 6) * 8;
+        const y = F.bottom + 20 - u * (F.h + 40);
+        ctx.globalAlpha = 0.3;
+        S.draw(ctx, S.pix(ctx, "jelly", JELLY, { j: "#ff9ccf", h: "#ffffff", t: "#b06aa8" }, 2, { bloom: 4, glow: "#ff4f9a" }), x, y - (frac(u * 8) < 0.5 ? 0 : 2));
+      }
+    },
+    {
+      dur: 2.2,
+      draw(ctx, e, u) {
+        const pr = Math.round(Math.min(F.w, F.h * 1.2) * 0.3), px = F.x + F.w - pr * 0.45, py = F.bottom - pr * 0.3;
+        S.softRing(ctx, px, py, pr + 1, "#3df5ff", Math.sin(u * Math.PI) * 0.25, 2);
+      }
+    }
+  ]);
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    backdrop(ctx, api);
+    const hue = api.color();
+    if (flash) S.glow(ctx, L.cx, L.cy, F.w, "#ffd23d", flash * 0.3);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(F.x, F.y, F.w, F.h);
+    ctx.clip();
+    for (const p of pebbles) {
+      ctx.fillStyle = p.c;
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(Math.round(p.x), Math.round(p.y), p.s, p.s);
+      ctx.fillRect(Math.round(p.x) + p.s * 0.5, Math.round(p.y) - p.s * 0.5, p.s * 0.5, p.s * 0.5);
+    }
+    ctx.globalAlpha = 1;
+    deep.draw(ctx);
+
+    // The ring of light round Zip: pulses on the beat, brighter as a Grump comes
+    let soon = 9;
+    for (const g of rocks.list) if (g.state === "wait") soon = Math.min(soon, g.at - now);
+    const pulse = 1 - frac(now);
+    S.softRing(ctx, L.cx, L.cy, L.R, hue, 0.35 + 0.25 * pulse + (soon < 1 ? (1 - soon) * 0.4 : 0), 1.6);
+    // Tick marks round the ring, like a gunsight
+    ctx.fillStyle = S.rgba(hue, 0.6);
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * TAU + now * 0.05;
+      ctx.fillRect(L.cx + Math.cos(a) * (L.R + 6) - 1, L.cy + Math.sin(a) * (L.R + 6) - 1, 2, 2);
+    }
+
+    // Grumps, with a closing marker on the ring where each will touch
+    for (const g of rocks.list) {
+      if (g.state === "hit") continue;
+      const p = grumpAt(g, now);
+      if (p.x < F.x - 60 || p.x > F.x + F.w + 60 || p.y < F.y - 60 || p.y > F.bottom + 60) continue;
+      const left = g.at - now;
+      const face = g.state === "missed" ? "dizzy" : left < 1.2 ? "shock" : "grump";
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(g.state === "missed" ? (clock - g.t) * 3 : Math.sin(now * 0.8 + g.ang) * 0.15);
+      ctx.globalAlpha = g.state === "missed" ? clamp(1 - (clock - g.t) / 4, 0, 1) : 1;
+      S.draw(ctx, S.pix(ctx, "grump" + face + g.kind, GRUMP[face], rockPal(ROCKC[g.kind]), L.k, { glow: ROCKC[g.kind].h, bloom: 3 }), 0, 0);
+      ctx.restore();
+      if (g.state === "missed" && clock - g.t < 1.5) {
+        // Little stars circling a dizzy Grump
+        for (let i = 0; i < 3; i++) {
+          const a = clock * 5 + (i * TAU) / 3;
+          S.twinkle(ctx, p.x + Math.cos(a) * L.k * 7, p.y - L.k * 7 + Math.sin(a) * L.k * 2, L.k * 2, "#ffd23d", 1 - (clock - g.t) / 1.5);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Bolts and waves
+    for (const b of bolts) {
+      if (b.t < 0) continue;
+      const a = 1 - b.t / 0.22;
+      ctx.save();
+      ctx.translate(L.cx, L.cy);
+      ctx.rotate(b.ang);
+      ctx.globalCompositeOperation = "lighter";
+      for (const [w, al, c] of [[L.k * 4, 0.2, b.c], [L.k * 1.6, 0.6, b.c], [L.k * 0.6, 1, "#ffffff"]]) {
+        ctx.globalAlpha = a * al;
+        ctx.fillStyle = c;
+        ctx.fillRect(L.k * 6, -w / 2, b.len - L.k * 6, w);
+      }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    for (const w of waves) {
+      const u = w.t / 0.9;
+      if (w.small) {
+        S.softRing(ctx, L.cx, L.cy, L.R * (1 + u * 0.15), w.c, (1 - u) * 0.8, 3);
+      } else S.softRing(ctx, L.cx, L.cy, L.R + ease(u) * L.far, w.c, 1 - u, 4);
+    }
+
+    // Zip, bobbing, the pilot looking where the cannon points
+    const aim = aimAt(now);
+    const bob = Math.sin(now * Math.PI) * L.k * 0.8;
+    const zx = L.cx, zy = L.cy + bob;
+    S.glow(ctx, zx, zy, L.k * 14, hue, 0.16 + 0.1 * pulse);
+    ctx.save();
+    ctx.translate(zx, zy);
+    ctx.rotate(aim);
+    const recoil = wobble * L.k * 1.5;
+    ctx.fillStyle = "#c9bff0";
+    ctx.fillRect(L.k * 4 - recoil, -L.k, L.k * 6, L.k * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(L.k * 9 - recoil, -L.k * 0.5, L.k, L.k);
+    ctx.restore();
+    S.glow(ctx, zx + Math.cos(aim) * (L.k * 10 - recoil), zy + Math.sin(aim) * (L.k * 10 - recoil), L.k * 2, "#fff1a8", 0.5);
+    ctx.save();
+    ctx.translate(zx, zy);
+    ctx.rotate(Math.sin(clock * 2) * 0.06 + wobble * 0.15 * Math.sin(clock * 40));
+    S.draw(ctx, S.pix(ctx, "zip", ZIP, ZIP_PAL, L.k, { glow: "#ff4f9a", bloom: 5 }), 0, 0);
+    // The pilot's eyes follow the aim
+    const ex = Math.cos(aim) * L.k * 0.5, ey = Math.sin(aim) * L.k * 0.4;
+    ctx.fillStyle = INK;
+    const kk = L.k;
+    ctx.fillRect(-kk * 1.5 + ex - kk * 0.5, -kk * 1.0 + ey, kk * 0.9, kk * 0.9);
+    ctx.fillRect(kk * 0.5 + ex - kk * 0.5, -kk * 1.0 + ey, kk * 0.9, kk * 0.9);
+    ctx.restore();
+    // Underglow lights blinking round the saucer
+    for (let i = 0; i < 3; i++) S.glow(ctx, zx + (i - 1) * L.k * 4, zy + L.k * 3.5, L.k * 1.6, (Math.floor(now * 2) + i) % 3 ? "#fff1a8" : "#3df5ff", 0.6);
+    // The charge: pixel pips filling round Zip
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const n = 16, color = c >= 1 ? "#ffd23d" : "#3df5ff";
+      for (let i = 0; i < Math.floor(c * n); i++) {
+        const a = -Math.PI / 2 + (i / n) * TAU;
+        S.glow(ctx, zx + Math.cos(a) * L.k * 13, zy + Math.sin(a) * L.k * 13, L.k * 2.5, color, 1);
+      }
+    }
+
+    S.drawShards(ctx, shards, frameDt, 0);
+    // Gems: a little pop outward, then home to Zip
+    for (const gm of gems) {
+      if (gm.t < 0) continue;
+      const u = gm.t / 0.8;
+      const out = ease(Math.min(1, u * 3));
+      const home = smooth(clamp((u - 0.3) / 0.7, 0, 1));
+      const x = gm.x0 + gm.dx * out, y = gm.y0 + gm.dy * out;
+      const gx = x + (zx - x) * home, gy = y + (zy - y) * home;
+      S.glow(ctx, gx, gy, L.k * 3.5, gm.c, 0.45);
+      S.draw(ctx, S.pix(ctx, "gem" + gm.c, GEM, gemPal(gm.c), L.k * 0.8, { glow: gm.c, bloom: 3 }), gx, gy);
+    }
+    ctx.restore();
+  }
+
+  SpaceShell.mount({
+    key: "rocks",
+    title: "Rocks",
+    hint: "Tap as each Grump touches the ring",
+    skin: S,
+    marquee: S.attract,
+    setup,
+    engine: {},
+    tierNames: ["Finding your rhythm", "Rock steady", "Rock and roll", "Supernova"],
+    onPhrase: () => {
+      waves.push({ t: 0, c: "#3df5ff" });
+      for (const p of pebbles) S.shards(shards, p.x, p.y, 4, [p.c, "#ffffff"], 80, 0);
+    },
+    fidgetPoint: () => ({ x: L.cx, y: L.cy }),
+    resize: layout,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

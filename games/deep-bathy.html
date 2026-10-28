@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Pebble, a little submersible, hovers over the hydrothermal vents. Its headlamp sweeps the dark on the beat; snap a photo as the beam finds each creature. A rhythm micro-game that finds your tempo.">
+<title>Lamp</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/deepsea/deepsea-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Lamp: Pebble, a round little submersible, hovers above a field of hydrothermal vents. Its
+// headlamp sweeps back and forth through the black at a steady pace. Creatures come close in the
+// dark (at first just a glint of eyes), each placed where the beam will cross it on a whole beat.
+// Snap as the beam finds one: a camera flash, the creature lit for a moment in its own colours, and
+// its photo pinned to the log. One you miss blinks in the beam and slips away. The deep doesn't
+// mind.
+//
+// The beam's angle is a function of the beat position: a triangle sweep, six beats each way, so
+// every whole beat is one of seven angles. A creature spawns at the angle the beam will have on its
+// beat, at least two beats after the last. Clean is ±0.3 beat (wider with assist), perfect ±0.1.
+// Fidget (F): every press swings the lamp onto the next creature and snaps it.
+// Hold then let go: a floodlight; a full charge lights the whole deep for a moment, and something
+// very large far away opens one eye. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = DeepSeaSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const SWEEP = 6; // beats each way
+  const LAMP = "#e8f6ff";
+  const HULL = "#ffcf5c";
+  const VENT = "#ff7a2a";
+  // dumbo octopus, gulper eel, sea pig, hatchetfish
+  const KINDS = [
+    { name: "Dumbo", color: "#ff9cbc" },
+    { name: "Gulper", color: "#7fd8ff" },
+    { name: "Sea pig", color: "#ffb38a" },
+    { name: "Hatchet", color: "#c8e8ff" }
+  ];
+  const MOODS = [
+    { top: "#00030a", mid: "#010a14", low: "#0a0a0c", haze: ["#1c4a6a", "#1c3a5a"], vent: VENT, seed: 5 },
+    { top: "#00040a", mid: "#01121a", low: "#0a0e0c", haze: ["#1c6a6a", "#1c4a5a"], vent: VENT, seed: 15 },
+    { top: "#02030c", mid: "#0a0a1e", low: "#100a10", haze: ["#3a2a7a", "#2a2a6a"], vent: "#ff5a3a", seed: 25 },
+    { top: "#04030a", mid: "#120a12", low: "#1c0c08", haze: ["#6a3a3a", "#5a2a2a"], vent: "#ff9a2a", seed: 35 }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let track = null; // api.track: its list holds the creatures { kind, at, d, state, t, seed }
+  let log = []; // { kind, t }
+  let flashes = [], bubbles = [];
+  let clock = 0, lastTier = 1, hits = 0, snaps = 0;
+  let swing = null; // Fidget: { from, to, t0 }
+  let flood = null; // { t0, c }
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const m = Math.min(W, H);
+    const tall = H > W * 1.1;
+    L = {
+      r: clamp(m * 0.075, 26, 56),
+      k: clamp(m / 500, 0.7, 1.6),
+      sx: tall ? W * 0.24 : W * 0.28,
+      sy: tall ? H * 0.3 : H * 0.36,
+      base: tall ? 0.85 : 0.3,
+      arc: tall ? 0.62 : 0.72,
+      beam: tall ? Math.min(H * 0.6, W * 1.05) : Math.min(W * 0.62, H * 1.1),
+      floor: H * 0.86,
+      c: clamp(m * 0.03, 11, 22)
+    };
+  }
+  // The beam's angle at beat position `now`: a steady triangle sweep, eased at the turns
+  function beamAt(now) {
+    const p = frac(now / (SWEEP * 2)) * 2; // 0..2
+    const tri = p < 1 ? p : 2 - p; // 0..1..0
+    return L.base + (tri * 2 - 1) * L.arc;
+  }
+  // Pebble bobs a little, and the lamp hangs off its nose
+  const sub = (now) => [L.sx + Math.sin(clock * 0.5) * 6, L.sy + Math.sin(now * Math.PI * 0.5) * L.r * 0.12];
+  const lampOf = (now) => {
+    const [x, y] = sub(now);
+    return [x + L.r * 1.05, y + L.r * 0.2];
+  };
+  function angleNow(now) {
+    const a = beamAt(now);
+    if (!swing) return a;
+    const u = (clock - swing.t0) / 0.9;
+    if (u >= 1) return a;
+    // in Fidget the lamp whips onto a creature, holds, then eases back to its sweep
+    const k = u < 0.2 ? ease(u / 0.2) : 1 - ease((u - 0.5) / 0.5) * (u > 0.5 ? 1 : 0);
+    return a + (swing.to - a) * k;
+  }
+  function critterXY(c) {
+    const a = beamAt(c.at);
+    const [lx, ly] = [L.sx + L.r * 1.05, L.sy + L.r * 0.2];
+    return [lx + Math.cos(a) * c.d * L.beam + Math.sin(clock * 0.6 + c.seed) * 5, ly + Math.sin(a) * c.d * L.beam + Math.sin(clock * 0.9 + c.seed) * 4];
+  }
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  function critterSprite(ctx, kind, r) {
+    const c = KINDS[kind].color;
+    const R = Math.round(r);
+    return S.sprite(ctx, "crit" + kind + "_" + R, R * 6, R * 5, R * 3, R * 2.5, (g) => {
+      const body = g.createRadialGradient(-R * 0.2, -R * 0.3, R * 0.1, 0, 0, R * 1.4);
+      body.addColorStop(0, S.mix(c, "#ffffff", 0.5));
+      body.addColorStop(0.6, c);
+      body.addColorStop(1, S.mix(c, "#1a1020", 0.6));
+      g.fillStyle = body;
+      g.strokeStyle = c;
+      g.lineCap = "round";
+      g.beginPath();
+      if (kind === 0) {
+        // dumbo octopus: a round head, two ear fins, a little skirt of arms
+        g.ellipse(0, -R * 0.2, R * 0.85, R * 0.75, 0, 0, TAU);
+        g.fill();
+        g.beginPath();
+        g.ellipse(-R * 0.85, -R * 0.55, R * 0.45, R * 0.22, -0.6, 0, TAU);
+        g.ellipse(R * 0.85, -R * 0.55, R * 0.45, R * 0.22, 0.6, 0, TAU);
+        g.fill();
+        g.beginPath();
+        g.moveTo(-R * 0.8, R * 0.2);
+        for (let i = 0; i <= 6; i++) g.quadraticCurveTo(-R * 0.8 + (i - 0.5) * R * 0.27, R * (0.9 + (i % 2) * 0.2), -R * 0.8 + i * R * 0.27, R * 0.25);
+        g.fill();
+      } else if (kind === 1) {
+        // gulper eel: a huge mouth and a long thin tail with a light at its tip
+        g.moveTo(R * 1.2, -R * 0.1);
+        g.quadraticCurveTo(R * 0.2, -R * 1.1, -R * 0.4, -R * 0.15);
+        g.quadraticCurveTo(-R * 1.6, R * 0.2, -R * 2.6, -R * 0.2);
+        g.quadraticCurveTo(-R * 1.6, R * 0.45, -R * 0.4, R * 0.25);
+        g.quadraticCurveTo(R * 0.2, R * 0.9, R * 1.2, R * 0.4);
+        g.closePath();
+        g.fill();
+        g.fillStyle = "#1a0a16";
+        g.beginPath();
+        g.moveTo(R * 1.2, R * 0.05);
+        g.quadraticCurveTo(R * 0.4, -R * 0.1, R * 0.1, R * 0.15);
+        g.quadraticCurveTo(R * 0.5, R * 0.45, R * 1.2, R * 0.3);
+        g.fill();
+        g.fillStyle = "#ff6f86";
+        g.beginPath();
+        g.arc(-R * 2.6, -R * 0.2, R * 0.16, 0, TAU);
+        g.fill();
+      } else if (kind === 2) {
+        // sea pig: a plump body on little tube feet, with feelers up top
+        g.ellipse(0, 0, R * 1.15, R * 0.6, 0, 0, TAU);
+        g.fill();
+        g.lineWidth = Math.max(1.2, R * 0.13);
+        g.beginPath();
+        for (let i = 0; i < 5; i++) {
+          g.moveTo(-R * 0.8 + i * R * 0.4, R * 0.45);
+          g.lineTo(-R * 0.85 + i * R * 0.4, R * 0.85);
+        }
+        for (const k of [0.2, 0.55, 0.85]) {
+          g.moveTo(R * k, -R * 0.5);
+          g.quadraticCurveTo(R * (k + 0.2), -R * 1.1, R * (k + 0.35), -R * 1.05);
+        }
+        g.stroke();
+      } else {
+        // hatchetfish: a tall silver blade of a fish with a row of lights along its belly
+        g.moveTo(R * 0.9, -R * 0.2);
+        g.lineTo(-R * 0.3, -R * 0.75);
+        g.lineTo(-R * 0.7, -R * 0.2);
+        g.lineTo(-R * 1.3, -R * 0.4);
+        g.lineTo(-R * 1.2, R * 0.2);
+        g.lineTo(-R * 0.7, R * 0.1);
+        g.quadraticCurveTo(-R * 0.2, R * 1, R * 0.9, R * 0.2);
+        g.closePath();
+        g.fill();
+        g.fillStyle = "#7fe9ff";
+        for (let i = 0; i < 6; i++) {
+          g.beginPath();
+          g.arc(R * (0.6 - i * 0.22), R * (0.35 + Math.sin(i * 0.5) * 0.15), R * 0.07, 0, TAU);
+          g.fill();
+        }
+      }
+      // big eyes: everything down here has big eyes
+      const eye = kind === 1 ? [[R * 0.6, -R * 0.35, 0.13]] : kind === 2 ? [[R * 0.85, -R * 0.15, 0.1]] : kind === 3 ? [[R * 0.45, -R * 0.15, 0.22]] : [[-R * 0.3, -R * 0.25, 0.16], [R * 0.3, -R * 0.25, 0.16]];
+      for (const [x, y, s] of eye) {
+        g.fillStyle = "#ffffff";
+        g.beginPath();
+        g.arc(x, y, R * s, 0, TAU);
+        g.fill();
+        g.fillStyle = "#10081a";
+        g.beginPath();
+        g.arc(x + R * s * 0.15, y + R * s * 0.1, R * s * 0.6, 0, TAU);
+        g.fill();
+      }
+    });
+  }
+  // Pebble: a round yellow hull with a big porthole, skids and a little fin
+  function subSprite(ctx) {
+    const R = Math.round(L.r);
+    return S.sprite(ctx, "pebble" + R, R * 3.4, R * 3, R * 1.7, R * 1.4, (g) => {
+      g.fillStyle = "#3a3a2a";
+      g.fillRect(-R * 0.7, R * 0.78, R * 1.4, R * 0.08);
+      g.fillRect(-R * 0.5, R * 0.6, R * 0.08, R * 0.2);
+      g.fillRect(R * 0.42, R * 0.6, R * 0.08, R * 0.2);
+      g.fillStyle = "#c08a2a";
+      g.beginPath();
+      g.moveTo(-R * 0.9, -R * 0.2);
+      g.lineTo(-R * 1.5, -R * 0.65);
+      g.lineTo(-R * 1.45, R * 0.15);
+      g.closePath();
+      g.fill();
+      const hull = g.createRadialGradient(R * 0.2, -R * 0.35, R * 0.1, 0, 0, R);
+      hull.addColorStop(0, "#fff0b8");
+      hull.addColorStop(0.45, HULL);
+      hull.addColorStop(1, "#8a5a1a");
+      g.fillStyle = hull;
+      g.beginPath();
+      g.ellipse(0, 0, R, R * 0.78, 0, 0, TAU);
+      g.fill();
+      // a hatch on top and rivets round the porthole
+      g.fillStyle = "#d8a23a";
+      g.beginPath();
+      g.ellipse(-R * 0.15, -R * 0.78, R * 0.3, R * 0.12, 0, 0, TAU);
+      g.fill();
+      const pr = R * 0.42;
+      g.fillStyle = "#6a4a1a";
+      g.beginPath();
+      g.arc(R * 0.3, -R * 0.05, pr * 1.2, 0, TAU);
+      g.fill();
+      const glass = g.createRadialGradient(R * 0.2, -R * 0.2, 0, R * 0.3, -R * 0.05, pr);
+      glass.addColorStop(0, "#bff6ff");
+      glass.addColorStop(0.5, "#2a8aa8");
+      glass.addColorStop(1, "#0a2a3a");
+      g.fillStyle = glass;
+      g.beginPath();
+      g.arc(R * 0.3, -R * 0.05, pr, 0, TAU);
+      g.fill();
+      g.fillStyle = "rgba(255,255,255,0.7)";
+      g.beginPath();
+      g.ellipse(R * 0.18, -R * 0.2, pr * 0.3, pr * 0.16, -0.6, 0, TAU);
+      g.fill();
+      g.fillStyle = "#f8e0a0";
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * TAU;
+        g.beginPath();
+        g.arc(R * 0.3 + Math.cos(a) * pr * 1.1, -R * 0.05 + Math.sin(a) * pr * 1.1, R * 0.03, 0, TAU);
+        g.fill();
+      }
+    });
+  }
+  // The vent field on the floor: dark chimneys, their mouths glowing
+  function floorSprite(ctx) {
+    return S.sprite(ctx, "floor" + W + "x" + Math.round(H), W, H - L.floor + 60, 0, 60, (g) => {
+      const r = S.rng(77);
+      g.fillStyle = "#04070a";
+      g.beginPath();
+      g.moveTo(0, 10);
+      for (let x = 0; x <= W; x += 20) g.lineTo(x, 10 - Math.sin(x * 0.01) * 8 - r() * 6);
+      g.lineTo(W, H);
+      g.lineTo(0, H);
+      g.fill();
+      for (const v of L.vents) {
+        g.fillStyle = "#06090c";
+        g.beginPath();
+        g.moveTo(v.x - v.w, 14);
+        g.lineTo(v.x - v.w * 0.35, -v.h);
+        g.lineTo(v.x + v.w * 0.35, -v.h);
+        g.lineTo(v.x + v.w, 14);
+        g.fill();
+        S.blurred(g, VENT, 8, (g) => {
+          g.fillStyle = S.rgba(VENT, 0.6);
+          g.fillRect(v.x - v.w * 0.3, -v.h - 2, v.w * 0.6, 4);
+        });
+        // a little rim of tube worms, red and pale
+        for (let i = 0; i < 6; i++) {
+          g.strokeStyle = i % 2 ? "#e8e0d0" : "#ff4a5a";
+          g.lineWidth = 1.5;
+          const x = v.x - v.w * 0.6 + r() * v.w * 1.2;
+          g.beginPath();
+          g.moveTo(x, 4 - r() * v.h * 0.5);
+          g.lineTo(x + (r() - 0.5) * 4, -v.h * 0.2 - r() * 10);
+          g.stroke();
+        }
+      }
+    });
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "bathy" + tier, W, H, (g) => S.abyss(g, W, H, MOODS[(tier - 1) % 4]));
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function snap(api, c, perfect, ghost) {
+    c.t = api.eng.beatPos();
+    const [x, y] = critterXY(c);
+    // where the shell pops the points
+    c.x = x;
+    c.y = y;
+    flashes.push({ x, y, t: 0, big: perfect });
+    log.push({ kind: c.kind, t: clock });
+    if (log.length > 6) log.shift();
+    snaps++;
+    if (perfect && !ghost) api.ring(x, y, api.color(), L.c * 4);
+  }
+  const nextWaiting = () => track.next();
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. api.track spawns, judges, scores, misses and flies autopilot; this brings a creature
+  // close, where the beam will be on its beat `at`
+  function spawn(at) {
+    if (!W) return null;
+    const prev = track.list[track.list.length - 1];
+    let kind = Math.floor(Math.random() * KINDS.length);
+    if (prev && kind === prev.kind) kind = (kind + 1) % KINDS.length;
+    const c = { kind, at, d: 0.45 + Math.random() * 0.45, t: 0, seed: Math.random() * 100 };
+    // keep it on screen and above the floor
+    for (let tries = 0; tries < 6; tries++) {
+      const [x, y] = critterXY(c);
+      if (x > 30 && x < W - 30 && y > 80 && y < L.floor - 30) break;
+      c.d *= 0.82;
+    }
+    return c;
+  }
+
+  // Far-off life, now and then, out past the beam
+  const far = S.wonders({ kinds: ["leviathan", "school", "alarm", "eyes", "seep"], band: [0.22, 0.5], first: 10 });
+
+  function setup(api) {
+    track = api.track({
+      spawn,
+      note: (c) => c.kind / KINDS.length,
+      hit(c, { perfect, ghost, fidget }) {
+        // Fidget snaps the next one wherever it is: the lamp swings round to find it
+        if (fidget) {
+          const [x, y] = critterXY(c);
+          const [lx, ly] = lampOf(api.eng.beatPos());
+          swing = { to: Math.atan2(y - ly, x - lx), t0: clock };
+        }
+        snap(api, c, perfect, ghost);
+        if (!ghost && ++hits === 14) api.hint("flood", 'Hold <span class="pb-kbd">Space</span>, let go: floodlight');
+      },
+      miss(c, counted) {
+        c.t = c.at;
+        if (counted) api.hint("snap", "Snap as the headlamp finds the creature");
+      },
+      empty() {
+        const [lx, ly] = lampOf(api.eng.beatPos());
+        flashes.push({ x: lx, y: ly, t: 0, big: false, small: api.style !== "fidget" });
+      },
+      perfect: PERFECT,
+      keep: 4,
+      // the viewfinder is this game's timing cue, gold on the perfect beat (drawn in draw)
+      cue: false
+    });
+  }
+
+  // 3. A press: the camera flashes; whatever the beam is on gets its picture taken
+  function onFire(api) {
+    track.fire();
+  }
+
+  // A hold then release: a floodlight; at full charge the whole deep, and a far eye opening
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    flood = { t0: clock, c };
+    if (c >= 1) {
+      api.callout("Something big", W / 2, H * 0.22, HULL, 1.15);
+      api.eng.chime();
+    }
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    for (let i = flashes.length - 1; i >= 0; i--) if ((flashes[i].t += dt) > 0.6) flashes.splice(i, 1);
+    // bubbles off Pebble's prop and from the vents
+    if (Math.random() < dt * 5 && bubbles.length < 40) {
+      const [x, y] = sub(now);
+      bubbles.push({ x: x - L.r * 1.4, y: y + (Math.random() - 0.5) * L.r * 0.3, r: 1 + Math.random() * 2.5, life: 3 });
+    }
+    if (Math.random() < dt * 3 && bubbles.length < 40 && L.vents) {
+      const v = L.vents[Math.floor(Math.random() * L.vents.length)];
+      bubbles.push({ x: v.x + (Math.random() - 0.5) * v.w * 0.4, y: L.floor - v.h, r: 0.8 + Math.random() * 1.8, life: 4, hot: true });
+    }
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i];
+      b.y -= (14 + b.r * 6) * dt;
+      b.x += Math.sin(clock * 2 + b.r * 9) * 6 * dt;
+      if ((b.life -= dt) <= 0) bubbles.splice(i, 1);
+    }
+    if (swing && clock - swing.t0 > 0.9) swing = null;
+    if (flood && clock - flood.t0 > 1.6 + flood.c * 1.6) flood = null;
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  function resize(api) {
+    layout(api);
+    const n = W > 700 ? 4 : 3;
+    L.vents = [];
+    for (let i = 0; i < n; i++) L.vents.push({ x: W * ((i + 0.6) / n) + (i % 2 ? 20 : -14), w: 14 + (i % 2) * 8, h: 22 + ((i * 17) % 30) });
+  }
+
+  // 5. The look
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const tierC = api.color();
+    const fu = flood ? (clock - flood.t0) / (1.6 + flood.c * 1.6) : 1;
+    const fl = flood ? Math.sin(Math.min(1, fu * 5) * Math.PI * 0.5) * (1 - fu) * (0.4 + flood.c * 0.6) : 0;
+
+    // the far eye, seen only in a full floodlight
+    if (flood && flood.c >= 1) {
+      const open = Math.sin(clamp(fu * 1.3, 0, 1) * Math.PI);
+      const ex = W * 0.78, ey = H * 0.55, er = Math.min(W, H) * 0.12;
+      S.glow(ctx, ex, ey, er * 3, "#ffb35c", 0.25 * open);
+      ctx.save();
+      ctx.translate(ex, ey);
+      ctx.scale(1, Math.max(0.02, open * 0.55));
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = S.rgba("#ffcf5c", 0.35 * open);
+      ctx.beginPath();
+      ctx.arc(0, 0, er, 0, TAU);
+      ctx.fill();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "rgba(2,4,8," + 0.9 * open + ")";
+      ctx.beginPath();
+      ctx.ellipse(0, 0, er * 0.18, er * 0.9, 0, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    far.draw(ctx, W, H, now);
+    // vent glow breathing up from the floor, black smoke rolling up out of each chimney, and the floor
+    for (const v of L.vents) {
+      S.glow(ctx, v.x, L.floor - v.h, 70 * L.k, VENT, 0.22 + 0.06 * Math.sin(clock * 1.3 + v.x));
+      S.glow(ctx, v.x, L.floor - v.h - 40 * L.k, 50 * L.k, VENT, 0.08);
+      for (let i = 0; i < 5; i++) {
+        const u = frac(clock * 0.16 + i / 5 + v.x * 0.01), r = (5 + u * 22) * L.k;
+        ctx.fillStyle = "rgba(4,2,2," + 0.32 * (1 - u) + ")";
+        ctx.beginPath();
+        ctx.arc(v.x + Math.sin(u * 4 + i + v.x) * 8 * L.k + u * 14 * L.k, L.floor - v.h - u * 140 * L.k, r, 0, TAU);
+        ctx.fill();
+      }
+    }
+    S.snow(ctx, W, H, clock, { n: 50, fall: 6, alpha: 0.4 + fl * 0.5 });
+    if (fl > 0) S.glow(ctx, lampOf(now)[0], lampOf(now)[1], Math.max(W, H) * (0.6 + fl), LAMP, fl * 0.35);
+    S.draw(ctx, floorSprite(ctx), 0, L.floor);
+    // sea pens along the floor, glowing softly, brighter as the beam sweeps over them
+    {
+      const [bx, by] = lampOf(now), ba = angleNow(now);
+      for (let i = 0; i < 7; i++) {
+        const x = W * ((i + 0.35) / 7) + Math.sin(i * 7.3) * 18, y = L.floor + 4 + (i % 3) * 3;
+        const d = Math.abs(((Math.atan2(y - by, x - bx) - ba + Math.PI * 3) % TAU) - Math.PI);
+        const lit = clamp(1 - d / 0.25, 0, 1) + fl;
+        const sway = Math.sin(clock * 1.1 + i) * 3;
+        ctx.strokeStyle = S.rgba("#5cffc8", 0.25 + lit * 0.5);
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(x + sway * 0.5, y - 8 * L.k, x + sway, y - 16 * L.k);
+        ctx.stroke();
+        S.glow(ctx, x + sway, y - 16 * L.k, (4 + lit * 6) * L.k, "#5cffc8", 0.3 + lit * 0.5);
+      }
+    }
+    for (const b of bubbles) {
+      ctx.globalAlpha = Math.min(1, b.life) * 0.5;
+      ctx.strokeStyle = b.hot ? "#ffc48a" : "#bfe8ff";
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // The beam
+    const [lx, ly] = lampOf(now);
+    const a = angleNow(now);
+    S.cone(ctx, lx, ly, a, L.beam * (1.1 + fl * 0.4), 0.16 + fl * 0.35, LAMP, 0.55 + fl * 0.4);
+    S.cone(ctx, lx, ly, a, L.beam * 0.7, 0.08, tierC, 0.25);
+    // the snow inside the beam lights up: a second pass, brighter, only near the lamp's line
+    // (cheap: a handful of glints along the beam that drift with the snow clock)
+    for (let i = 0; i < 10; i++) {
+      const u = frac(i * 0.137 + clock * 0.03);
+      const d = 0.15 + u * 0.85;
+      const off = Math.sin(i * 12.9 + clock * 0.4) * 0.12 * d;
+      S.glow(ctx, lx + Math.cos(a + off) * d * L.beam, ly + Math.sin(a + off) * d * L.beam, 3, "#ffffff", 0.5 * (1 - u));
+    }
+
+    // Creatures: eyes in the dark, lit when the beam finds them
+    for (const c of track.list) {
+      const [x, y] = critterXY(c);
+      const ca = Math.atan2(y - ly, x - lx);
+      let diff = Math.abs(((ca - a + Math.PI * 3) % TAU) - Math.PI);
+      const inBeam = clamp(1 - diff / 0.2, 0, 1) + fl;
+      const appear = clamp((now - (c.at - 4)) / 1.5, 0, 1);
+      const r = L.c * (c.kind === 1 ? 0.8 : 1);
+      let alpha = appear, dx = 0, dy = 0, lit = 0;
+      if (c.state === "hit") {
+        const since = now - c.t;
+        lit = clamp(1 - since / 3, 0, 1);
+        alpha = clamp(1 - (since - 2) / 2, 0, 1);
+        dx = since > 1.5 ? (since - 1.5) * 18 : 0;
+        dy = since > 1.5 ? -(since - 1.5) * 10 : 0;
+      } else if (c.state === "missed") {
+        const since = now - c.t;
+        alpha = clamp(1 - since / 1.5, 0, 1);
+        dx = since * 40;
+        dy = since * 12;
+      }
+      if (alpha <= 0) continue;
+      const vis = Math.min(1, inBeam * 0.9 + lit);
+      if (vis > 0.02) {
+        S.glow(ctx, x + dx, y + dy, r * 4, KINDS[c.kind].color, (0.2 + lit * 0.3) * vis * alpha);
+        ctx.globalAlpha = vis * alpha;
+        S.draw(ctx, critterSprite(ctx, c.kind, r), x + dx, y + dy);
+        ctx.globalAlpha = 1;
+      }
+      // the eyes catch a glint even in the dark
+      if (vis < 0.9) {
+        const blink = frac(clock * 0.3 + c.seed) > 0.96;
+        if (!blink) {
+          S.glow(ctx, x + dx + r * 0.25, y + dy - r * 0.2, 4 * L.k, "#cfefff", 0.5 * alpha * (1 - vis));
+          if (c.kind === 0) S.glow(ctx, x + dx - r * 0.3, y + dy - r * 0.2, 4 * L.k, "#cfefff", 0.5 * alpha * (1 - vis));
+        }
+      }
+      // the cue: a faint viewfinder closing on it as the beam nears
+      if (c.state === "wait") {
+        const left = c.at - now;
+        if (left < 2 && left > -c.window) {
+          const k = r * 1.6 + Math.max(0, left) * r * 1.4, al = Math.min(1, (2 - left) / 0.6) * 0.75;
+          const gold = api.style !== "fidget" && Math.abs(left) < PERFECT;
+          ctx.globalCompositeOperation = "lighter";
+          ctx.strokeStyle = gold ? S.colors.yellow : S.rgba(tierC, al);
+          ctx.lineWidth = gold ? 3 : 1.6;
+          if (gold) S.glow(ctx, x, y, k * 1.6, S.colors.yellow, 0.25);
+          ctx.beginPath();
+          for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+            ctx.moveTo(x + sx * k, y + sy * k * 0.6);
+            ctx.lineTo(x + sx * k, y + sy * k);
+            ctx.lineTo(x + sx * k * 0.6, y + sy * k);
+          }
+          ctx.stroke();
+          ctx.globalCompositeOperation = "source-over";
+        }
+      }
+    }
+
+    // Pebble
+    const [sx, sy] = sub(now);
+    S.glow(ctx, sx + L.r * 0.3, sy, L.r * 1.6, HULL, 0.12);
+    S.draw(ctx, subSprite(ctx), sx, sy);
+    // its propeller, a blur that spins
+    const pa = clock * 18;
+    ctx.fillStyle = "rgba(200,180,120,0.6)";
+    ctx.beginPath();
+    ctx.ellipse(sx - L.r * 1.55, sy - L.r * 0.25, L.r * 0.08, L.r * 0.32 * Math.abs(Math.cos(pa)), 0, 0, TAU);
+    ctx.fill();
+    // the lamp on its swivel, and a tiny light on the hatch blinking on the beat
+    ctx.save();
+    ctx.translate(lx, ly);
+    ctx.rotate(a);
+    ctx.fillStyle = "#5a4a2a";
+    ctx.fillRect(-L.r * 0.12, -L.r * 0.14, L.r * 0.3, L.r * 0.28);
+    ctx.restore();
+    S.glow(ctx, lx, ly, L.r * 0.5, LAMP, 0.9);
+    S.glow(ctx, sx - L.r * 0.15, sy - L.r * 0.92, (4 + 3 * pulse) * L.k, "#ff6f86", pulse);
+
+    for (const f of flashes) {
+      const e = f.t / 0.6;
+      if (f.small) {
+        S.glow(ctx, f.x, f.y, L.r * (0.6 + e), "#ffffff", (1 - e) * 0.5);
+        continue;
+      }
+      S.glow(ctx, f.x, f.y, L.c * (f.big ? 10 : 7) * (0.6 + e), "#ffffff", (1 - e) * 0.85);
+      S.twinkle(ctx, f.x, f.y, L.c * (f.big ? 4 : 3), "#ffffff", 1 - e);
+    }
+    // a brief white-out of the whole screen on a snap, like a camera's flash in the dark
+    const lastF = flashes.length ? flashes[flashes.length - 1] : null;
+    if (lastF && !lastF.small && lastF.t < 0.12) S.glow(ctx, W / 2, H / 2, Math.max(W, H), "#dff4ff", 0.12 * (1 - lastF.t / 0.12));
+
+    // the photo log: the last few snaps, pinned along the bottom
+    const pw = clamp(Math.min(W * 0.09, H * 0.075), 22, 56), ph = pw * 0.8, fit = Math.max(1, Math.floor((W - 110) / (pw + 8)));
+    for (let i = Math.max(0, log.length - fit), j = 0; i < log.length; i++, j++) {
+      const p = log[i];
+      const age = clock - p.t;
+      const x = 14 + j * (pw + 8), y = H - 30 - ph + (1 - ease(age / 0.5)) * 30;
+      ctx.globalAlpha = Math.min(1, age * 3) * 0.9;
+      ctx.save();
+      ctx.translate(x + pw / 2, y + ph / 2);
+      ctx.rotate((i % 2 ? 1 : -1) * 0.05);
+      // a print: a pale border round the dark water, the creature lit by the flash
+      ctx.fillStyle = "#cfdde2";
+      ctx.fillRect(-pw / 2 - 3, -ph / 2 - 3, pw + 6, ph + 9);
+      ctx.fillStyle = "#06141c";
+      ctx.fillRect(-pw / 2, -ph / 2, pw, ph);
+      S.glow(ctx, 0, 0, pw * 0.5, KINDS[p.kind].color, 0.35);
+      S.draw(ctx, critterSprite(ctx, p.kind, pw * 0.17), 0, 0, 1);
+      ctx.fillStyle = "#ff6f86";
+      ctx.beginPath();
+      ctx.arc(0, -ph / 2 - 1, 2.2, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = "#cfefff";
+    ctx.font = "500 11px Oswald, Impact, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(snaps + " photos", W - 14, H - 26);
+    ctx.textAlign = "start";
+    ctx.globalAlpha = 1;
+
+    // the hold: an arc closing round the lamp
+    api.drawCharge(sx, sy, L.r * 1.35, undefined, HULL);
+  }
+
+  SpaceShell.mount({
+    key: "deep-lamp",
+    title: "Lamp",
+    hint: "Snap as the headlamp finds each creature",
+    skin: S,
+    words: { fire: "Snap", charge: "Floodlight" },
+    engine: {},
+    tierNames: ["Finding your rhythm", "Dive", "Vent field", "Hadal"],
+    fidgetPoint: (api) => {
+      const [x, y] = lampOf(api.eng.beatPos());
+      return { x, y };
+    },
+    resize,
+    setup,
+    onBeat: (n) => far.beat(n),
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

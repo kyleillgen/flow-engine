@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Kip the firefly finds the way through a dark maze. Tap as Kip reaches each lantern: it lights up and shows the way on to the next. A rhythm micro-game that finds your tempo.">
+<title>Lamp</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/arcade/arcade-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Lamp: a maze in the dark on one button. Kip, a firefly with a lantern for a tail, is finding
+// the way through a dark neon maze. A lantern waits at every corner, and Kip reaches each on a
+// whole beat. Tap then and it lights up, and its light runs ahead down the corridor to the next
+// lantern: that's the way on. A perfect one brings moths to the lantern. Miss and the lantern
+// stays dark: Kip still feels the way on, but the corridor stays dim and nothing runs ahead. A
+// phrase of eight lights the whole maze like a neon blueprint.
+//
+// Corners come from api.track: on whole beats, at least two apart. Each leg is laid out when
+// it's scheduled, at a steady two cells a beat, so Kip's position is a function of the beat
+// position: up the maze, across when there's room. A leg isn't drawn until the lantern at its
+// start is lit (or Kip is already on it, dimly). Clean is ±0.3 beat (wider with assist, for
+// corners not yet scheduled), perfect ±0.1. The shell's timing ring closes on the lantern, gold
+// on the perfect beat.
+// Fidget (F): every press lights the next lantern at once. Hold then let go for a flare; a full
+// charge lights every lantern in sight. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = ArcadeSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const COLS = 9;
+  const SPEED = 2; // cells a beat
+  const INK = "#1a0b2e";
+
+  // ---- Pixel art ----------------------------------------------------------------------------
+  const KIP = {
+    up: ["w........w", "ww......ww", ".wwhhhhww.", "..hcccch..", ".hcwecweh.", ".hceccech.", "..hcmmch..", "...yyyy...", "..yYYYYy..", "...yyyy..."],
+    down: ["..........", "..........", "..hhhhhh..", "whcccccchw", "whcwecwehw", ".hceccech.", "..hcmmch..", "...yyyy...", "..yYYYYy..", "...yyyy..."]
+  };
+  const LANTERN = {
+    dark: ["..hh..", ".hhhh.", "gggggg", "g.ff.g", "g.ff.g", "gggggg", ".hhhh."],
+    lit: ["..hh..", ".hhhh.", "gLLLLg", "gLFFLg", "gLFFLg", "gLLLLg", ".hhhh."]
+  };
+  const KIP_PAL = { w: "#bff9ff", h: "#3df5ff", c: "#9fe8ff", e: INK, m: INK, y: "#d8ff5a", Y: "#ffffff" };
+  const LANT_PAL = { h: "#6a5a8a", g: "#3a2a58", f: "#5a4a20", L: "#ffd23d", F: "#fff8c0" };
+  const DIM = "#3a2c66"; // a corridor Kip is feeling his way down
+  const DARK = "#1e1638"; // the rest of the maze, barely there
+
+  let W = 0, H = 0, F = null, L = {};
+  let nodes = []; // Kip's route: { at, cx, cy (cells), state, window, lit, litAt }; all but the first are api.track's
+  let corners = null;
+  let stubs = []; // side passages and dead ends: [x0, y0, x1, y1] in cells
+  let shards = [], moths = [];
+  let clock = 0, hits = 0, frameDt = 1 / 60;
+  let blueprint = -9, flare = null;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const frac = (v) => v - Math.floor(v);
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    F = S.field(W, H);
+    // Cells sized so a whole leg ahead (up to six cells) fits above Kip, even in the pocket
+    const C = Math.max(14, Math.min(Math.floor((F.w - 16) / COLS), Math.floor(F.h / 9.5)));
+    L = { C, k: Math.max(2, Math.floor(C / 9)), x0: F.x + (F.w - C * COLS) / 2 + C / 2, kipY: F.y + F.h * 0.78 };
+    if (!nodes.length) nodes.push({ at: -1e6, cx: 4, cy: 0, state: "start", lit: true, litAt: -9 });
+  }
+
+  // Kip at beat position now, in cells: parked on the last corner, or along the leg to the next
+  function along(now) {
+    let a = nodes[0], b = null;
+    for (const n of nodes) {
+      if (n.at <= now) a = n;
+      else {
+        b = n;
+        break;
+      }
+    }
+    if (!b) return { x: a.cx, y: a.cy, dir: a.dir || [0, -1], moving: false, from: a, to: null };
+    const t0 = b.at - b.dur;
+    if (now < t0) return { x: a.cx, y: a.cy, dir: b.dir, moving: false, from: a, to: b };
+    const u = (now - t0) / b.dur;
+    return { x: a.cx + (b.cx - a.cx) * u, y: a.cy + (b.cy - a.cy) * u, dir: b.dir, moving: true, from: a, to: b };
+  }
+  // The camera follows Kip up the maze, a little behind
+  const camY = (now) => along(now - 0.15).y;
+  const sx = (x) => L.x0 + x * L.C;
+  const sy = (y, cam) => L.kipY + (y - cam) * L.C;
+
+  // ---- The five questions ---------------------------------------------------------------------
+  function setup(api) {
+    // A lantern every beat or two; the tracker spawns, judges, misses and autopilots them
+    corners = api.track({
+      spawn: (at) => corner(api, at),
+      note: (n) => (api.style === "fidget" ? 0.3 + Math.random() * 0.4 : 0.2 + (n.cx / COLS) * 0.6),
+      hit: (n, { perfect, ghost }) => {
+        if (!ghost && ++hits === 16) api.hint("flare", 'Hold <span class="pb-kbd">Space</span>, let go: a flare');
+        return light(api, n, perfect, ghost);
+      },
+      miss: (n, counted) => counted && api.hint("corner", "Tap as Kip reaches a lantern to light the way"),
+      perfect: PERFECT,
+      // The ring closes on the lantern itself (its cells are cx, cy; this is on screen)
+      cueAt: (n) => ({ x: sx(n.cx), y: sy(n.cy, camY(api.eng.beatPos())) }),
+      cueSize: 0.9
+    });
+  }
+
+  // The next corner, on beat `at`
+  function corner(api, at) {
+    // Lay out the leg: across if there's room and the last leg went up, otherwise up
+    const prev = nodes[nodes.length - 1];
+    const dur = Math.min(3, at - Math.max(prev.at, at - 3));
+    const len = Math.round(dur * SPEED);
+    let dir = [0, -1];
+    const wasUp = !prev.dir || prev.dir[1] !== 0;
+    if (wasUp) {
+      const sides = [];
+      if (prev.cx - len >= 0) sides.push(-1);
+      if (prev.cx + len <= COLS - 1) sides.push(1);
+      if (sides.length) dir = [sides[Math.floor(Math.random() * sides.length)], 0];
+    }
+    const node = { cx: prev.cx + dir[0] * len, cy: prev.cy + dir[1] * len, dir, dur: len / SPEED, lit: false, at };
+    // Dead ends and side passages, so it reads as a maze rather than a single tube
+    const r = Math.random();
+    if (dir[1] !== 0) {
+      const side = node.cx + (node.cx < COLS / 2 ? 1 : -1) * (1 + Math.floor(Math.random() * 3));
+      const y = prev.cy - 1 - Math.floor(Math.random() * (len - 1));
+      stubs.push([node.cx, y, clamp(side, 0, COLS - 1), y]);
+      if (r < 0.6) stubs.push([clamp(side, 0, COLS - 1), y, clamp(side, 0, COLS - 1), y - 2 - Math.floor(Math.random() * 3)]);
+    } else {
+      stubs.push([node.cx, node.cy, node.cx, node.cy + 1 + Math.floor(Math.random() * 2)]);
+      if (r < 0.5) stubs.push([prev.cx + dir[0], prev.cy, prev.cx + dir[0], prev.cy - 2]);
+    }
+    if (stubs.length > 40) stubs.splice(0, stubs.length - 40);
+    // The tracker hands this back for judging; it's also the next leg of the route
+    nodes.push(node);
+    return node;
+  }
+
+  function light(api, n, perfect, ghost) {
+    n.lit = true;
+    n.litAt = clock;
+    const cam = camY(api.eng.beatPos());
+    const x = sx(n.cx), y = sy(n.cy, cam);
+    S.shards(shards, x, y, perfect ? 14 : 8, ["#ffd23d", "#fff8c0", "#d8ff5a"], 140, 60);
+    if (perfect) {
+      // Moths come to a perfect lantern and stay a while
+      for (let i = 0; i < 3; i++) moths.push({ n, t: 0, ph: Math.random() * TAU, r: 0.5 + Math.random() * 0.4 });
+      if (!ghost) api.ring(x, y, api.color(), L.C * 0.9);
+    }
+    // On screen, where the tracker pops the points
+    return { x, y };
+  }
+
+  function onFire(api) {
+    corners.fire();
+  }
+
+  // A hold then release (Fidget): a flare of light from Kip; a full charge lights every lantern
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    flare = { t0: clock, r: L.C * (3 + c * 5) };
+    if (c >= 1) {
+      blueprint = clock;
+      for (const n of nodes)
+        if (!n.lit) {
+          n.lit = true;
+          n.litAt = clock;
+        }
+      api.callout("Lights up", W / 2, H * 0.32, "#ffd23d", 1.1);
+      api.eng.chime();
+    }
+  }
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    frameDt = dt;
+    glimmers.update(dt);
+    // Forget corners and stubs well below the screen
+    const cam = camY(now);
+    while (nodes.length > 3 && sy(nodes[1].cy, cam) > F.bottom + L.C * 4 && nodes[1].at < now) nodes.shift();
+    stubs = stubs.filter((s) => sy(Math.min(s[1], s[3]), cam) < F.bottom + L.C * 2);
+    for (let i = moths.length - 1; i >= 0; i--) if ((moths[i].t += dt) > 5 || !nodes.includes(moths[i].n)) moths.splice(i, 1);
+    if (flare && clock - flare.t0 > 0.7) flare = null;
+  }
+
+  // ---- The look ---------------------------------------------------------------------------
+  function backdrop(ctx, api) {
+    S.layer(ctx, "lamp" + api.tier, W, H, (g) => {
+      g.fillStyle = "#07040f";
+      g.fillRect(0, 0, W, H);
+      // The wall mass: a dark brick of tiny pixel tiles
+      g.fillStyle = "#0e0a1c";
+      g.fillRect(F.x, F.y, F.w, F.h);
+      const r = S.rng(9);
+      for (let y = F.y; y < F.bottom; y += 6)
+        for (let x = F.x + ((y / 6) % 2) * 3; x < F.x + F.w; x += 6) {
+          g.fillStyle = r() > 0.5 ? "#140e26" : "#110b20";
+          g.fillRect(x, y, 5, 5);
+        }
+      S.sides(g, W, H, F, ["#d8ff5a", "#3df5ff", "#9b6bff"]);
+    });
+  }
+
+  // The rest of the maze, made up band by band from a seed so it's the same every time you pass
+  const bands = new Map();
+  function mazeAround(cam) {
+    const top = cam - (L.kipY - F.y) / L.C - 2, bottom = cam + (F.bottom - L.kipY) / L.C + 2;
+    const out = [];
+    for (let b = Math.floor(top / 6); b <= Math.floor(bottom / 6); b++) {
+      let segs = bands.get(b);
+      if (!segs) {
+        const r = S.rng(b * 131 + 7);
+        segs = [];
+        for (let i = 0; i < 4; i++) {
+          const x = Math.floor(r() * COLS), y = b * 6 + Math.floor(r() * 6), len = 2 + Math.floor(r() * 4);
+          if (r() < 0.5) segs.push([x, y, clamp(x + (r() < 0.5 ? -len : len), 0, COLS - 1), y]);
+          else segs.push([x, y, x, y - len]);
+        }
+        // A ring corridor now and then, the kind a maze loops round
+        if (r() < 0.5) {
+          const x = 1 + Math.floor(r() * (COLS - 4)), y = b * 6 + 1;
+          segs.push([x, y, x + 2, y, x + 2, y + 3, x, y + 3, x, y]);
+        }
+        bands.set(b, segs);
+        if (bands.size > 30) bands.delete(bands.keys().next().value);
+      }
+      out.push(...segs);
+    }
+    return out;
+  }
+
+  function corridor(ctx, segs, cam, color, edge) {
+    // Three strokes of the same paths: a wide glow, the neon edge, then the floor laid on top
+    if (!segs.length) return;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (const s of segs) {
+      ctx.moveTo(sx(s[0]), sy(s[1], cam));
+      for (let i = 2; i < s.length; i += 2) ctx.lineTo(sx(s[i]), sy(s[i + 1], cam));
+    }
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.25 * edge;
+    ctx.lineWidth = L.C * 0.62 + 10;
+    ctx.stroke();
+    ctx.globalAlpha = edge;
+    ctx.lineWidth = L.C * 0.62 + 3;
+    ctx.stroke();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#0a0716";
+    ctx.lineWidth = L.C * 0.62;
+    ctx.stroke();
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "miter";
+  }
+
+  // Now and then, somewhere in the dark: a glow-worm blinking down a dead end, a draught of light
+  // running along the walls, a moth wandering through, a faint echo of the blueprint
+  const glimmers = S.happenings([
+    {
+      dur: 3,
+      draw(ctx, e, u, cam) {
+        const x = sx(Math.floor(e.seed * COLS)), y = sy(cam - 3 - Math.floor(e.seed * 4), cam);
+        const on = Math.sin(u * Math.PI) * (frac(u * 4) < 0.6 ? 1 : 0.3);
+        S.glow(ctx, x, y, L.C * 0.7, "#7dff5a", on * 0.5);
+        ctx.fillStyle = "#d8ff5a";
+        ctx.globalAlpha = on;
+        ctx.fillRect(Math.round(x - L.k), Math.round(y), L.k * 2, L.k);
+      }
+    },
+    {
+      dur: 1.4,
+      draw(ctx, e, u) {
+        const y = F.y + F.h * (e.side > 0 ? u : 1 - u);
+        const g = ctx.createLinearGradient(0, y - 30, 0, y + 30);
+        g.addColorStop(0, "rgba(155,107,255,0)");
+        g.addColorStop(0.5, "rgba(155,107,255,0.08)");
+        g.addColorStop(1, "rgba(155,107,255,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(F.x, y - 30, F.w, 60);
+      }
+    },
+    {
+      dur: 6,
+      draw(ctx, e, u) {
+        const x = e.side > 0 ? F.x + u * F.w : F.x + F.w - u * F.w;
+        const y = F.y + F.h * (0.2 + e.seed * 0.3) + Math.sin(u * 30) * 6;
+        ctx.fillStyle = "#fff4e0";
+        ctx.globalAlpha = 0.55 * Math.sin(u * Math.PI);
+        const w = frac(u * 24) < 0.5 ? 2 : 1;
+        ctx.fillRect(Math.round(x - w), Math.round(y), w, 2);
+        ctx.fillRect(Math.round(x + 1), Math.round(y), w, 2);
+      }
+    },
+    {
+      dur: 1.2,
+      draw(ctx, e, u, cam) {
+        corridor(ctx, mazeAround(cam), cam, "#3df5ff", Math.sin(u * Math.PI) * 0.18);
+      }
+    }
+  ]);
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const hue = api.color();
+    backdrop(ctx, api);
+    const cam = camY(now);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(F.x, F.y, F.w, F.h);
+    ctx.clip();
+    // The maze in the dark: side passages barely there; the blueprint lights every wall
+    const bp = clamp(1 - (clock - blueprint) / 2.2, 0, 1);
+    corridor(ctx, [...mazeAround(cam), ...stubs], cam, bp > 0 ? S.mix(DARK, "#3df5ff", bp) : DARK, 0.7 + bp * 0.3);
+    glimmers.draw(ctx, cam);
+    // Kip's way: each leg shows once the lantern at its start is lit, the light running down it
+    // to the next lantern; a leg from a dark lantern shows dimly once Kip is on it
+    const bright = S.mix("#9b6bff", hue, 0.35);
+    const head = nodes[0];
+    const lit = [[head.cx, head.cy + 12, head.cx, head.cy]], dim = [], fuses = [];
+    const shown = new Set([head]);
+    for (let i = 1; i < nodes.length; i++) {
+      const a = nodes[i - 1], b = nodes[i];
+      if (a.lit) {
+        const u = ease((clock - a.litAt) / 0.45);
+        if (u < 1) {
+          dim.push([a.cx, a.cy, b.cx, b.cy]);
+          fuses.push([a.cx + (b.cx - a.cx) * u, a.cy + (b.cy - a.cy) * u, u]);
+        }
+        lit.push([a.cx, a.cy, a.cx + (b.cx - a.cx) * u, a.cy + (b.cy - a.cy) * u]);
+        shown.add(b);
+      } else if (a.state === "missed" || now >= a.at) {
+        dim.push([a.cx, a.cy, b.cx, b.cy]);
+        shown.add(b);
+      }
+    }
+    corridor(ctx, dim, cam, DIM, 0.8);
+    corridor(ctx, lit, cam, bright, 1);
+    for (const [x, y, u] of fuses) S.twinkle(ctx, sx(x), sy(y, cam), L.C * 0.5, "#ffd23d", 1 - u * 0.5);
+    // Floor lit round Kip
+    const k = along(now);
+    const kx = sx(k.x), ky = sy(k.y, cam);
+    S.glow(ctx, kx, ky, L.C * 2.4, "#d8ff5a", 0.22);
+    if (bp > 0) S.glow(ctx, W / 2, H / 2, F.w, "#3df5ff", bp * 0.2);
+    // Lanterns at the corners Kip can see
+    for (const n of nodes) {
+      if (n.state === "start" || !shown.has(n)) continue;
+      const x = sx(n.cx), y = sy(n.cy, cam);
+      if (y < F.y - L.C || y > F.bottom + L.C) continue;
+      if (n.lit) S.glow(ctx, x, y, L.C * 1.8, "#ffd23d", 0.4 + 0.12 * Math.sin(clock * 3 + n.cx));
+      const pop = n.lit ? clamp((clock - n.litAt) / 0.3, 0, 1) : 1;
+      const scale = n.lit ? 1 + 0.4 * Math.sin(pop * Math.PI) : 1;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      S.draw(ctx, S.pix(ctx, n.lit ? "lantlit" : "lantdark", n.lit ? LANTERN.lit : LANTERN.dark, LANT_PAL, L.k, { glow: n.lit ? "#ffd23d" : "#6a5a8a", bloom: n.lit ? 6 : 2 }), 0, 0);
+      ctx.restore();
+    }
+    // Moths round the perfect lanterns
+    ctx.fillStyle = "#fff4e0";
+    for (const m of moths) {
+      const a = m.ph + m.t * 3.2, x = sx(m.n.cx) + Math.cos(a) * L.C * m.r, y = sy(m.n.cy, cam) + Math.sin(a * 1.3) * L.C * m.r * 0.7;
+      ctx.globalAlpha = Math.min(1, (5 - m.t) * 2) * 0.85;
+      const w = frac(m.t * 9 + m.ph) < 0.5 ? 2 : 1;
+      ctx.fillRect(Math.round(x - w), Math.round(y), w, 2);
+      ctx.fillRect(Math.round(x + 1), Math.round(y), w, 2);
+    }
+    ctx.globalAlpha = 1;
+
+    // Kip: wings flapping on the eighths, his tail glowing brighter on the beat
+    const flap = Math.floor(now * 4) % 2 ? "up" : "down";
+    const pulse = 1 - frac(now);
+    S.glow(ctx, kx, ky + L.k * 3, L.C * (0.7 + pulse * 0.4), "#d8ff5a", 0.55);
+    ctx.save();
+    ctx.translate(kx, ky + Math.sin(clock * 8) * 1.5);
+    const ang = Math.atan2(k.dir[1], k.dir[0]) + Math.PI / 2;
+    ctx.rotate(k.moving ? ang : 0);
+    S.draw(ctx, S.pix(ctx, "kip" + flap, KIP[flap], KIP_PAL, L.k, { glow: "#3df5ff", bloom: 5 }), 0, 0);
+    ctx.restore();
+    // Flare: a ring of light pushing out from Kip
+    if (flare) {
+      const u = (clock - flare.t0) / 0.7;
+      S.softRing(ctx, kx, ky, flare.r * ease(u), "#d8ff5a", 1 - u, 4);
+      S.glow(ctx, kx, ky, flare.r * ease(u), "#d8ff5a", (1 - u) * 0.3);
+    }
+    // The charge: dots of light round Kip
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const n = 12, color = c >= 1 ? "#ffd23d" : "#3df5ff";
+      for (let i = 0; i < Math.floor(c * n); i++) {
+        const a = -Math.PI / 2 + (i / n) * TAU;
+        S.glow(ctx, kx + Math.cos(a) * L.C * 0.8, ky + Math.sin(a) * L.C * 0.8, L.k * 2.5, color, 1);
+      }
+    }
+    S.drawShards(ctx, shards, frameDt, 40);
+    ctx.restore();
+  }
+
+  SpaceShell.mount({
+    key: "lamp",
+    title: "Lamp",
+    hint: "Tap as Kip reaches a lantern to light the way",
+    skin: S,
+    marquee: S.attract,
+    setup,
+    engine: {},
+    tierNames: ["Finding your rhythm", "Glow worm", "Lamplighter", "Lighthouse"],
+    onPhrase: () => (blueprint = clock),
+    fidgetPoint: (api) => {
+      const now = api.eng.beatPos();
+      const k = along(now);
+      return { x: sx(k.x), y: sy(k.y, camY(now)) };
+    },
+    resize: layout,
+    onFire,
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

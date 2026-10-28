@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../../../icon.png">
+<title>__TITLE__</title>
+</head>
+<body>
+<script src="../../../engine/flow-engine.js"></script>
+<script src="../../../__SKIN__"></script>
+<script src="../../../__SHELL__"></script>
+<script>
+// __TITLE__: the starter game `node carts/cart.mjs new` writes. Orbs drift down to a line of
+// light and reach it on a beat; tap as one arrives. api.track() does the spawning, judging,
+// scoring, misses and autopilot, so what's left here is what arrives and how it looks.
+// Make it yours: change spawn() and draw(), keep the rules in docs/build-on-the-engine.md.
+(() => {
+  "use strict";
+  const S = window.__SKINVAR__;
+  const TAU = Math.PI * 2;
+  let W = 0, H = 0, lineY = 0, sparks = [];
+
+  // Drawing uses the neon skin's helpers (glow, stars, softRing); swap them for your skin's own
+  SpaceShell.mount({
+    key: "__KEY__",
+    title: "__TITLE__",
+    hint: "Tap as each orb reaches the line",
+    skin: S,
+    resize(api) {
+      W = api.W;
+      H = api.H;
+      lineY = H * 0.72;
+    },
+    setup(api) {
+      // The loop: an orb arrives on a beat, a tap as it does lights it up
+      this.orbs = api.track({
+        spawn: () => ({ x: W * (0.2 + Math.random() * 0.6), y: lineY, color: S.tiers[Math.floor(Math.random() * 4)] }),
+        note: (o) => o.x / W,
+        hit: (o, { perfect }) => {
+          for (let i = 0; i < (perfect ? 14 : 8); i++) {
+            const a = (i / 8) * TAU;
+            sparks.push({ x: o.x, y: o.y, vx: Math.cos(a) * 90, vy: Math.sin(a) * 90 - 40, life: 0.8, color: o.color });
+          }
+          if (perfect) api.ring(o.x, o.y, api.color(), 50);
+        },
+        miss: () => api.hint("line", "Tap as the orb touches the line")
+      });
+    },
+    onFire(api) {
+      this.orbs.fire();
+    },
+    onRelease(api, held) {
+      // A hold then release: a trick shot, for fun only (never scores)
+      if (api.chargeOf(held) >= 1) api.callout("Whoosh", W / 2, H * 0.3, S.colors.yellow, 1.2);
+    },
+    update(dt) {
+      for (const p of sparks) {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 120 * dt;
+        p.life -= dt;
+      }
+      sparks = sparks.filter((p) => p.life > 0);
+    },
+    draw(ctx, api) {
+      const now = api.eng.beatPos();
+      ctx.fillStyle = "#05030f";
+      ctx.fillRect(0, 0, W, H);
+      S.stars(ctx, W, H, 0);
+      S.glow(ctx, W / 2, lineY, W * 0.5, api.color(), 0.08 + 0.06 * (1 - (now % 1)));
+      ctx.fillStyle = api.color();
+      ctx.fillRect(W * 0.1, lineY - 1, W * 0.8, 2);
+      for (const o of this.orbs.list) {
+        if (o.state !== "wait") continue;
+        // Falls from the top so it reaches the line exactly on its beat
+        const u = 1 - (o.at - now) / 4;
+        const y = lineY * Math.max(0, Math.min(1, u));
+        S.glow(ctx, o.x, y, 22, o.color, 0.9);
+        if (o.at - now < 2) S.softRing(ctx, o.x, lineY, 8 + Math.max(0, o.at - now) * 30, o.color, 0.8, 1.4);
+      }
+      for (const p of sparks) S.glow(ctx, p.x, p.y, 6, p.color, p.life);
+      api.drawCharge(W / 2, lineY + 40, 22);
+    }
+  });
+})();
+</script>
+</body>
+</html>

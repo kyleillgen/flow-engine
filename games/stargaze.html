@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Join the stars one beat at a time and the constellation wakes up: a cat, a whale, a rabbit, a fox, a bird. A rhythm micro-game that finds your tempo.">
+<meta property="og:title" content="Stargaze · Flow Engine">
+<meta property="og:description" content="Join the stars one beat at a time and the constellation wakes up: a cat, a whale, a rabbit, a fox, a bird.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/games/stargaze.html">
+<meta name="twitter:card" content="summary_large_image">
+<title>Stargaze</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/neon/neon-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Stargaze: Lumi sits on a hill with a telescope, joining up the stars. A thread of light draws
+// from the last star to the next and reaches it on a whole beat; tap as it arrives and the star
+// ignites. When every star of a constellation is joined, it wakes up: a cat, a whale, a rabbit,
+// a fox or a bird opens its eyes, wiggles to the beat and drifts off into the sky. A star you
+// miss still joins in, dimly; nothing is lost.
+//
+// Each thread draws over the two beats before its star (it's a function of the beat position),
+// and a new constellation's first star arrives on a falling star. Clean is ±0.3 beat (wider
+// with assist), perfect ±0.1.
+// Fidget (F): every press ignites the next star at once. Hold then let go for a meteor shower;
+// a full charge is a wish, and the whole sky sparkles. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = NeonSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const INK = "#1c1238";
+  const LUMI = "#ffd9a8";
+  // Constellations in unit coordinates (y down): points in drawing order, each joined from its
+  // parent; extra lines close shapes; eyes open when it wakes
+  const SHAPES = [
+    { name: "The Cat", color: "#ffc46b", pts: [[-0.22, -0.4], [-0.1, -0.26], [0.1, -0.26], [0.22, -0.4], [0.22, -0.08], [0.26, 0.3], [-0.2, 0.3], [-0.22, -0.08], [0.44, 0.12]], par: [-1, 0, 1, 2, 3, 4, 5, 6, 5], extra: [[7, 0]], body: 8, eyes: [[-0.08, -0.14], [0.08, -0.14]] },
+    { name: "The Whale", color: "#7fe9ff", pts: [[0.4, 0], [0.16, -0.18], [-0.18, -0.12], [-0.42, -0.24], [-0.3, 0], [-0.42, 0.22], [-0.04, 0.18], [0.26, 0.14]], par: [-1, 0, 1, 2, 3, 4, 4, 6], extra: [[7, 0]], body: 8, eyes: [[0.22, -0.03]] },
+    { name: "The Rabbit", color: "#ff9ccf", pts: [[-0.12, -0.48], [-0.05, -0.16], [0.1, -0.46], [0.13, -0.15], [0.22, 0.05], [0.18, 0.32], [-0.22, 0.32], [-0.3, 0.06], [-0.4, 0.22]], par: [-1, 0, 1, 2, 3, 4, 5, 6, 7], extra: [[7, 1]], body: [0, 1, 2, 3, 4, 5, 6, 7, 1], eyes: [[0.09, -0.03]] },
+    { name: "The Fox", color: "#ffb38a", pts: [[-0.24, -0.36], [-0.1, -0.18], [0.08, -0.36], [0.08, -0.1], [0.3, 0], [0.06, 0.14], [-0.22, 0.28], [-0.46, 0.08], [-0.3, -0.02]], par: [-1, 0, 1, 2, 3, 4, 5, 6, 7], extra: [[8, 1]], body: 9, eyes: [[0.04, -0.07]] },
+    { name: "The Bird", color: "#8dffc4", pts: [[0.36, -0.1], [0.2, -0.2], [0.02, -0.08], [-0.2, -0.4], [-0.12, -0.02], [-0.42, 0.08], [-0.06, 0.16], [0.16, 0.04]], par: [-1, 0, 1, 2, 3, 4, 5, 6], extra: [[7, 0]], body: 8, eyes: [[0.2, -0.13]] }
+  ];
+  const MOODS = [
+    { top: "#05061c", mid: "#121640", low: "#2c2560", clouds: ["#7fe9ff", "#b69cff", "#ff8fd8", "#7fe9ff"], band: "#d4d8ff", seed: 61, hill: ["#1a1438", "#08061a"], rim: "#b69cff" },
+    { top: "#031020", mid: "#0c2a40", low: "#1a5058", clouds: ["#8dffc4", "#7fe9ff", "#c8fff0", "#b69cff"], band: "#c8fff0", seed: 73, hill: ["#0e2a36", "#050f16"], rim: "#8dffc4" },
+    { top: "#0e0620", mid: "#2a1046", low: "#5a2668", clouds: ["#ff8fd8", "#c49cff", "#7fe9ff", "#ffd2f0"], band: "#f0d8ff", seed: 83, hill: ["#2a1240", "#100618"], rim: "#ff8fd8" },
+    { top: "#120a1e", mid: "#36203c", low: "#7a4450", clouds: ["#ffc46b", "#ff8fd8", "#ffe0a0", "#c49cff"], band: "#ffe8c8", seed: 97, hill: ["#33192c", "#140810"], rim: "#ffc46b" }
+  ];
+
+  let W = 0, H = 0, L = {};
+  let cons = []; // { shape, cx, cy, size, stars: [{ x, y, at, state: "wait"|"lit"|"dim", litAt, window }], next, aliveAt, ghost }
+  let motes = [], pops = [], meteors = [];
+  let beatsSince = 99, lastAt = -99, shapeIx = Math.floor(Math.random() * SHAPES.length), side = 1;
+  let clock = 0, lastTier = 1, warp = 0, hits = 0, wish = 0, happy = -9;
+  let sky = { from: 1, to: 1, t: 1 };
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // The timing ring warms toward gold in the last third of a beat and is full gold, with a glow,
+  // inside the perfect window. Only while timing counts (not in Fidget).
+  const GOLD = "#ffd76a";
+  let timed = true;
+  const gilt = (left) => (!timed ? 0 : Math.abs(left) < PERFECT ? 1 : 0.55 * clamp(1 - (Math.abs(left) - PERFECT) / 0.3, 0, 1));
+  function cueRing(ctx, x, y, r, color, a, w, left) {
+    const g = gilt(left);
+    S.softRing(ctx, x, y, r, g ? S.mix(color, GOLD, g) : color, a, w * (1 + g * 0.8));
+    if (g >= 1) S.glow(ctx, x, y, r * 2.4, GOLD, 0.4 * a);
+  }
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    // A short screen (the pocket's Mini) gets a lower hill and a smaller Lumi, to leave the sky
+    const short = H < 320;
+    L = { size: Math.min(W * 0.78, H * 0.42, 460), horizon: H - Math.max(short ? 56 : 90, H * 0.17), k: clamp(Math.min(W, H) / 420, short ? 0.65 : 0.8, 1.4) };
+    L.lumi = { x: W * 0.12 + 24 * L.k, y: L.horizon + 2, k: L.k * (short ? 1.1 : 1.5) };
+  }
+
+  function current() {
+    const c = cons[cons.length - 1];
+    return c && c.next < c.stars.length ? c : null;
+  }
+  function newCons() {
+    const shape = SHAPES[shapeIx];
+    shapeIx = (shapeIx + 1 + Math.floor(Math.random() * (SHAPES.length - 1))) % SHAPES.length;
+    side = -side;
+    const cx = W / 2 + side * Math.max(0, W - L.size) * 0.25 * Math.random(), cy = Math.max(H * 0.4, 50 + L.size * 0.55) + (Math.random() - 0.5) * H * 0.06; // clear of the HUD
+    const c = { shape, cx, cy, size: L.size, next: 0, aliveAt: -1, ghost: true };
+    c.stars = shape.pts.map(([x, y]) => ({ x: cx + x * L.size, y: cy + y * L.size, at: Infinity, state: "wait", litAt: -99, window: 0.3 }));
+    cons.push(c);
+    return c;
+  }
+  const pending = () => {
+    for (const c of cons) for (const s of c.stars) if (s.state === "wait" && s.at < Infinity) return s;
+    return null;
+  };
+  // Where a star's thread starts: its parent star, or for a first star a point up in the sky
+  function threadFrom(c, i) {
+    const p = c.shape.par[i];
+    if (p >= 0) return c.stars[p];
+    return { x: c.stars[0].x + W * 0.5 * -side, y: -40, at: c.stars[0].at - 2 };
+  }
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function ignite(api, c, s, perfect, ghost) {
+    s.state = "lit";
+    s.litAt = api.eng.beatPos();
+    if (!ghost) c.ghost = false;
+    pops.push({ x: s.x, y: s.y, t: 0, size: perfect ? 60 : 40, color: c.shape.color });
+    for (let i = 0; i < (perfect ? 12 : 7) && motes.length < 200; i++) {
+      const a = (i / 7) * TAU + Math.random(), v = 40 + Math.random() * 70, life = 0.7 + Math.random() * 0.6;
+      motes.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? c.shape.color : "#ffffff", r: 2 + Math.random() * 3, star: i % 3 === 0 });
+    }
+    happy = clock;
+    if (perfect && !ghost) api.ring(s.x, s.y, api.color(), 54);
+    settle(api, c);
+  }
+  // When every star is joined the constellation wakes up
+  function settle(api, c) {
+    if (c.aliveAt >= 0 || c.stars.some((s) => s.state === "wait")) return;
+    c.aliveAt = clock;
+    if (!c.ghost) api.bonus(c.stars.every((s) => s.state === "lit") ? 1200 : 600, c.shape.name, c.cx, c.cy - c.size * 0.55);
+    else api.callout(c.shape.name, c.cx, c.cy - c.size * 0.55, c.shape.color, 1);
+    warp = Math.max(warp, 0.5);
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: the next star of the constellation gets its arrival, two beats or more after
+  //    the last; a finished one makes way for a new one
+  function onBeat(n, api) {
+    if (++beatsSince < Math.max(2, api.eng.paceBeats()) || !W) return;
+    beatsSince = 0;
+    const c = current() || newCons();
+    const at = Math.max(n + 4, lastAt + 2);
+    lastAt = at;
+    const s = c.stars[c.next++];
+    s.at = at;
+    s.window = 0.3 + 0.15 * api.eng.assist;
+  }
+
+  // 3. A tap: the star the thread is reaching now ignites
+  function onFire(api) {
+    const now = api.eng.beatPos();
+    if (api.style === "fidget") {
+      const s = pending();
+      if (s) {
+        const c = cons.find((c) => c.stars.includes(s));
+        ignite(api, c, s, false, true);
+        api.eng.tap({ height: c.stars.indexOf(s) / c.stars.length });
+      } else {
+        meteors.push({ x: W * (0.3 + Math.random() * 0.8), y: H * Math.random() * 0.3, t: 0, color: api.color() });
+        api.eng.tap({ height: 0.5 });
+      }
+      return;
+    }
+    let best = null;
+    for (const c of cons) for (const s of c.stars) if (s.state === "wait" && Math.abs(now - s.at) < s.window && (!best || Math.abs(now - s.at) < Math.abs(now - best.s.at))) best = { c, s };
+    api.eng.tap({ height: best ? best.c.stars.indexOf(best.s) / best.c.stars.length : 0.85 });
+    if (!best) {
+      pops.push({ x: L.lumi.x + 30 * L.lumi.k, y: L.lumi.y - 40 * L.lumi.k, t: 0, size: 20, color: LUMI });
+      return;
+    }
+    const perfect = Math.abs(now - best.s.at) < PERFECT;
+    ignite(api, best.c, best.s, perfect, false);
+    // 4. Score it
+    api.hit(perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 1.5);
+    if (++hits === 16) api.hint("meteor", 'Hold <span class="pb-kbd">Space</span>, let go: a meteor shower');
+  }
+
+  // A hold then release: a meteor shower; a full charge is a wish and the whole sky sparkles
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    for (let i = 0; i < 3 + c * 10; i++) meteors.push({ x: W * (0.3 + Math.random() * 0.9), y: H * Math.random() * 0.35, t: -i * 0.08, color: SHAPES[i % SHAPES.length].color });
+    if (c >= 1) {
+      wish = 1;
+      api.callout("Make a wish", W / 2, H * 0.22, "#ffc46b", 1.2);
+      api.eng.chime();
+      warp = 1;
+    }
+  }
+
+  function autopilot(dt, api) {
+    const now = api.eng.beatPos();
+    for (const c of cons) for (const s of c.stars) if (s.state === "wait" && now >= s.at) ignite(api, c, s, false, true);
+  }
+
+  // 2. Movement and misses
+  // ---- Asides: now and then something happens far off ---------------------------------------
+  // Slow and faint, behind everything and never on the beat, so it never gets in the way of the
+  // timing, and never gold, which means "tap now". One at a time, every 14 to 30 seconds,
+  // and never the same one twice running.
+  let aside = null, asideIn = 8 + Math.random() * 6, asideLast = -1;
+  const fadeIO = (u) => Math.min(1, u * 5, (1 - u) * 5);
+  // x across the screen at progress u, coming in from the side a.dir says, m of a width off each edge
+  const across = (a, u, m) => (a.dir > 0 ? -W * m + u * W * (1 + 2 * m) : W * (1 + m) - u * W * (1 + 2 * m));
+  function asides(dt) {
+    if (aside) {
+      if ((aside.t += dt) >= aside.dur) {
+        aside = null;
+        asideIn = 14 + Math.random() * 16;
+      }
+      return;
+    }
+    if ((asideIn -= dt) > 0) return;
+    let i = Math.floor(Math.random() * ASIDES.length);
+    if (i === asideLast) i = (i + 1) % ASIDES.length;
+    asideLast = i;
+    aside = Object.assign({ i, t: 0, dir: Math.random() < 0.5 ? -1 : 1, y: 0.06 + Math.random() * 0.14, x0: 0.15 + Math.random() * 0.55 }, ASIDES[i].start);
+  }
+  function drawAside(ctx) {
+    if (!aside) return;
+    const u = aside.t / aside.dur;
+    ASIDES[aside.i].draw(ctx, aside, u, fadeIO(u), Math.min(W, H) / 500);
+  }
+  const ASIDES = [
+    { // a comet, slow, its tail of light behind it
+      start: { dur: 11 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + u * 0.05);
+        for (let j = 9; j >= 0; j--) S.glow(ctx, x - a.dir * j * 13 * k, y - j * 0.8 * k, (16 - j) * k, "#9fe8ff", f * 0.2 * (1 - j / 11));
+        S.twinkle(ctx, x, y, 9 * k, "#ffffff", f * 0.7);
+      }
+    },
+    { // sky lanterns rising from far away
+      start: { dur: 17 },
+      draw(ctx, a, u, f, k) {
+        for (let n = 0; n < 4; n++) {
+          const v = u * 1.3 - n * 0.1;
+          if (v < 0) continue;
+          const x = W * (a.x0 + n * 0.08) + Math.sin(a.t * 0.6 + n) * 10 * k, y = H * (0.62 - v * 0.5);
+          S.glow(ctx, x, y, 14 * k, "#ff9ccf", f * 0.35);
+          S.glow(ctx, x, y, 4 * k, "#fff1d6", f * 0.6);
+        }
+      }
+    },
+    { // an aurora swells and folds, then fades
+      start: { dur: 13 },
+      draw(ctx, a, u, f, k) {
+        ["#8dffc4", "#9fe8ff"].forEach((c, r) => {
+          for (let i = 0; i <= 12; i++) {
+            const v = i / 12;
+            S.glow(ctx, v * W, H * (0.1 + r * 0.06) + Math.sin(v * 6 + a.t * 0.5 + r * 2) * H * 0.03, H * 0.07, c, f * 0.15);
+          }
+        });
+      }
+    },
+    { // night birds in a loose V, drifting over
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.2), y = H * (a.y + 0.04) + Math.sin(a.t * 0.8) * 8 * k;
+        for (let i = 0; i < 7; i++) {
+          const row = Math.ceil(i / 2), side = i % 2 ? 1 : -1;
+          const bx = x - a.dir * row * 15 * k, by = y + side * row * 8 * k + Math.sin(a.t * 3 + i) * 2 * k;
+          S.glow(ctx, bx, by, 6 * k, "#d6c8ff", f * 0.45);
+          S.glow(ctx, bx, by, 2.5 * k, "#ffffff", f * 0.5);
+        }
+      }
+    },
+    { // a moon moth flutters across
+      start: { dur: 14 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.1), y = H * (0.16 + a.y) + Math.sin(a.t * 1.7) * 26 * k;
+        const flap = 0.3 + 0.7 * Math.abs(Math.sin(a.t * 8));
+        for (const s of [-1, 1]) S.glow(ctx, x + s * 8 * k * flap, y - 2 * k, 9 * k, "#e8d6ff", f * 0.45);
+        S.glow(ctx, x, y, 3 * k, "#ffffff", f * 0.7);
+      }
+    }
+  ];
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    asides(dt);
+    for (const c of cons) {
+      for (const s of c.stars) {
+        if (s.state === "wait" && now > s.at + s.window) {
+          s.state = "dim";
+          s.litAt = now;
+          if (api.miss()) api.hint("join", "Tap as the thread reaches the star");
+          settle(api, c);
+        }
+      }
+    }
+    cons = cons.filter((c) => c.aliveAt < 0 || clock - c.aliveAt < 9);
+    const drag = Math.pow(0.15, dt);
+    for (let i = motes.length - 1; i >= 0; i--) {
+      const p = motes[i];
+      p.vx *= drag;
+      p.vy *= drag;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) motes.splice(i, 1);
+    }
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    for (let i = meteors.length - 1; i >= 0; i--) if ((meteors[i].t += dt) > 1.1) meteors.splice(i, 1);
+    wish = Math.max(0, wish - dt / 5);
+    if (api.tier !== lastTier) {
+      if (api.tier > lastTier) warp = 1;
+      sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    }
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    warp = Math.max(0, warp - dt * 0.9);
+  }
+
+  // 5. The look
+  function scene(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "gaze" + tier, W, H, (g) => {
+      const m = MOODS[(tier - 1) % 4];
+      S.dreamSky(g, W, H, m);
+    });
+    ctx.globalAlpha = 1;
+  }
+  function line(ctx, x0, y0, x1, y1, color, w, a) {
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    for (const [k, al] of [[5, 0.12], [2, 0.35], [0.7, 0.95]]) {
+      ctx.globalAlpha = a * al;
+      ctx.strokeStyle = al > 0.9 ? S.mix(color, "#ffffff", 0.6) : color;
+      ctx.lineWidth = w * k;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  function drawCons(ctx, c, now, pulse) {
+    const col = c.shape.color;
+    let dy = 0, a = 1, wig = 0, glowA = 0;
+    if (c.aliveAt >= 0) {
+      const t = clock - c.aliveAt;
+      glowA = Math.min(1, t / 0.6);
+      wig = Math.sin(now * Math.PI) * 0.04 * glowA;
+      if (t > 4) {
+        const u = (t - 4) / 5;
+        dy = -u * u * H * 0.5;
+        a = 1 - u;
+      }
+    }
+    const pos = (s) => {
+      const rx = s.x - c.cx, ry = s.y - c.cy;
+      return [c.cx + rx * (1 + wig) + ry * wig * 0.5, c.cy + ry * (1 - wig) + dy];
+    };
+    // the creature's soft glow once it wakes
+    if (glowA) {
+      S.glow(ctx, c.cx, c.cy + dy, c.size * 0.7, col, 0.18 * glowA * a * (0.8 + 0.2 * pulse));
+      // its body fills in with soft light, so you can see who it is
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = 0.16 * glowA * a;
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      const body = Array.isArray(c.shape.body) ? c.shape.body : c.stars.slice(0, c.shape.body).map((_, i) => i);
+      body.forEach((j, i) => {
+        const [x, y] = pos(c.stars[j]);
+        if (i) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      });
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
+    }
+    // lines: from each star to its parent, drawing in over the two beats before the star
+    c.stars.forEach((s, i) => {
+      if (s.at === Infinity) return;
+      const f = threadFrom(c, i);
+      const fly = Math.min(2, s.at - (f.at === Infinity ? s.at - 2 : f.at));
+      const u = clamp((now - (s.at - fly)) / fly, 0, 1);
+      if (u <= 0) return;
+      const [fx, fy] = c.shape.par[i] >= 0 ? pos(f) : [f.x, f.y + dy];
+      const [sx, sy] = pos(s);
+      const ex = fx + (sx - fx) * u, ey = fy + (sy - fy) * u;
+      if (c.shape.par[i] < 0) {
+        // the first star rides in on a falling star, which doesn't leave a line
+        if (s.state === "wait") {
+          const trail = [];
+          for (let j = 0; j < 8; j++) {
+            const v = clamp(u - j * 0.03, 0, 1);
+            trail.push([fx + (sx - fx) * v, fy + (sy - fy) * v]);
+          }
+          S.streak(ctx, trail, 3, col);
+        }
+        return;
+      }
+      line(ctx, fx, fy, ex, ey, col, (1.2 + glowA) * L.k, (s.state === "dim" ? 0.4 : 0.8) * a);
+      if (s.state === "wait" && u < 1) S.twinkle(ctx, ex, ey, 10 * L.k, col, 0.9);
+    });
+    if (c.aliveAt >= 0) for (const [p, q] of c.shape.extra) {
+      const [x0, y0] = pos(c.stars[p]);
+      const [x1, y1] = pos(c.stars[q]);
+      const u = clamp((clock - c.aliveAt) / 0.5, 0, 1);
+      line(ctx, x0, y0, x0 + (x1 - x0) * u, y0 + (y1 - y0) * u, col, (1.2 + glowA) * L.k, 0.8 * a);
+    }
+    // the stars: lit ones bright and twinkling on the beat, dim ones faint, waiting ones a speck
+    c.stars.forEach((s, i) => {
+      const [x, y] = pos(s);
+      if (s.state === "lit") {
+        const pop = Math.max(0, 1 - (now - s.litAt) / 0.5);
+        S.glow(ctx, x, y, 16 * L.k * (1 + pop), col, 0.7 * a);
+        S.twinkle(ctx, x, y, (11 + 5 * pulse * ((i + Math.floor(now)) % 2) + 10 * pop) * L.k, col, a);
+      } else if (s.state === "dim") {
+        S.glow(ctx, x, y, 9 * L.k, col, 0.35 * a);
+      } else if (s.at < Infinity) {
+        S.glow(ctx, x, y, 6 * L.k, "#ffffff", 0.35);
+        const left = s.at - now;
+        if (left < 2) cueRing(ctx, x, y, 6 + Math.max(0, left) * 26 * L.k, col, Math.min(1, (2 - left) / 0.6), 1.3, left);
+      }
+    });
+    // eyes, once awake: they open, blink on every fourth beat and look around
+    if (glowA) {
+      const blink = Math.floor(now) % 4 === 0 && frac(now) < 0.15;
+      for (const [ex, ey] of c.shape.eyes) {
+        const [x, y] = pos({ x: c.cx + ex * c.size, y: c.cy + ey * c.size });
+        S.glow(ctx, x, y, 12 * L.k, "#ffffff", 0.5 * glowA * a);
+        ctx.globalAlpha = glowA * a;
+        ctx.fillStyle = "#fff6e4";
+        ctx.beginPath();
+        ctx.ellipse(x + Math.sin(clock * 0.8) * 1.5, y, 4.5 * L.k, (blink ? 0.8 : 6) * L.k, 0, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function drawLumi(ctx, now, target) {
+    const { x, y, k } = L.lumi;
+    const joy = Math.max(0, 1 - (clock - happy) / 0.5);
+    const bob = Math.sin(now * Math.PI) * 1.5 * k - Math.sin(joy * Math.PI) * 6 * k;
+    // the telescope, swinging to the next star
+    const ang = target ? Math.atan2(target.y - (y - 30 * k), target.x - x) : -0.9;
+    ctx.save();
+    ctx.translate(x + 8 * k, y - 22 * k + bob);
+    ctx.rotate(ang);
+    ctx.fillStyle = "#8a6fd8";
+    ctx.fillRect(0, -4 * k, 30 * k, 8 * k);
+    ctx.fillStyle = "#c9b4ff";
+    ctx.fillRect(26 * k, -5.5 * k, 8 * k, 11 * k);
+    S.glow(ctx, 34 * k, 0, 6 * k, "#ffffff", 0.6);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(x, y - 18 * k + bob);
+    S.glow(ctx, 0, 0, 40 * k, LUMI, 0.22);
+    // ears
+    ctx.fillStyle = LUMI;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(s * 5 * k, -12 * k);
+      ctx.lineTo(s * 13 * k, -26 * k);
+      ctx.lineTo(s * 14 * k, -8 * k);
+      ctx.fill();
+    }
+    const body = ctx.createRadialGradient(-4 * k, -6 * k, 1, 0, 0, 17 * k);
+    body.addColorStop(0, "#fff6e4");
+    body.addColorStop(0.6, LUMI);
+    body.addColorStop(1, "#c9845e");
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 16 * k, 15 * k, 0, 0, TAU);
+    ctx.fill();
+    // face, looking up at the stars
+    ctx.fillStyle = ctx.strokeStyle = INK;
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1.6 * k;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      if (joy > 0) {
+        ctx.arc(s * 5 * k, -2 * k, 2.6 * k, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      } else {
+        ctx.ellipse(s * 5 * k + 1.2 * k, -4 * k, 1.9 * k, 2.4 * k, 0, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(s * 5 * k + 0.8 * k, -5 * k, 0.8 * k, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = INK;
+      }
+    }
+    ctx.beginPath();
+    ctx.arc(1 * k, 3 * k, 2.4 * k, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,120,150,0.5)";
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(s * 9 * k, 2 * k, 2.6 * k, 1.5 * k, 0, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function draw(ctx, api) {
+    timed = api.style !== "fidget";
+    const now = api.eng.beatPos();
+    const pulse = 1 - frac(now);
+    if (sky.t < 1) scene(ctx, sky.from, 1);
+    scene(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    const mood = MOODS[(api.tier - 1) % 4];
+    S.glow(ctx, W * (0.5 + 0.15 * Math.sin(clock * 0.04)), H * 0.35, W * 0.8, mood.clouds[0], 0.07);
+    S.stars(ctx, W, H, warp);
+    drawAside(ctx);
+    // a wish: every background star sparkles in turn
+    if (wish > 0) for (let i = 0; i < 40; i++) {
+      const x = frac(Math.sin(i * 12.9898) * 43758.5) * W, y = frac(Math.sin(i * 78.233) * 12345.6) * L.horizon;
+      S.twinkle(ctx, x, y, 8 + 4 * Math.sin(clock * 6 + i), mood.clouds[i % 4], wish * (0.5 + 0.5 * Math.sin(clock * 4 + i)));
+    }
+    for (const m of meteors) {
+      if (m.t < 0) continue;
+      const trail = [];
+      for (let j = 0; j < 9; j++) {
+        const t = Math.max(0, m.t - j * 0.025);
+        trail.push([m.x - t * W * 0.8, m.y + t * H * 0.4]);
+      }
+      S.streak(ctx, trail, 2.6, m.color);
+    }
+    for (const c of cons) drawCons(ctx, c, now, pulse);
+
+    // the hill, rim-lit, with Lumi on top
+    ctx.fillStyle = mood.hill[1];
+    ctx.fillRect(0, L.horizon + 20, W, H);
+    S.hills(ctx, "gaze" + api.tier, W, L.horizon + 24, 44, 0, [mood.hill[0], mood.hill[1]], mood.rim, 4);
+    const s = pending();
+    drawLumi(ctx, now, s);
+
+    for (const f of pops) {
+      const e = Math.min(1, f.t / 0.5);
+      S.glow(ctx, f.x, f.y, f.size * (0.6 + e), f.color, (1 - e) * 0.7);
+      S.softRing(ctx, f.x, f.y, f.size * 0.3 + f.size * 0.7 * ease(e), f.color, (1 - e) * 0.8, 1.3);
+    }
+    for (const p of motes) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, p.r * 2, p.color, a);
+      else S.glow(ctx, p.x, p.y, p.r * 1.6, p.color, a * 0.9);
+    }
+    const c = api.started ? api.charge : 0;
+    if (c > 0) {
+      const col = c >= 1 ? "#ffc46b" : LUMI;
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = col;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(L.lumi.x, L.lumi.y - 18 * L.lumi.k, 30 * L.lumi.k, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+    }
+    S.motes(ctx, W, H, clock, [api.color(), "#ffc2ea", "#d6c8ff"], { n: 5, size: 22, rise: 8, sway: 26, alpha: 0.08, seed: 41 });
+  }
+
+  SpaceShell.mount({
+    key: "stargaze",
+    title: "Stargaze",
+    hint: "Tap as the thread reaches each star",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Twilight", "Starlit", "Wishing"],
+    onPhrase: () => (warp = Math.max(warp, 0.45)),
+    fidgetPoint: () => ({ x: L.lumi.x, y: L.lumi.y - 18 * L.lumi.k }),
+    resize: layout,
+    onBeat,
+    onFire,
+    onRelease,
+    autopilot,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="A little jellyfish floats up through glowing hoops in a star-sea. Pulse as each hoop reaches you and rise through it. A rhythm micro-game that finds your tempo.">
+<meta property="og:title" content="Tidelight · Flow Engine">
+<meta property="og:description" content="A little jellyfish floats up through glowing hoops in a star-sea. Pulse as each hoop reaches you and rise through it. A rhythm micro-game that finds your tempo.">
+<meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
+<meta property="og:url" content="https://kyleillgen.github.io/flow-engine/games/tidelight.html">
+<meta name="twitter:card" content="summary_large_image">
+<title>Tidelight</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/neon/neon-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Tidelight: you are Wisp, a little jellyfish rising through a sea that is also the night sky.
+// She never stops swimming: a stroke of her bell on every beat, then a glide. Hoops of light
+// hang in the water above her, and she reaches each one exactly on a beat; its inner ring turns
+// gold as she does, and a pulse then times her pass. The hoop flares, and the sleepy glow fish
+// riding on it lights up and joins the school trailing behind you. Wisp finds her way to each
+// hoop by herself; the one thing to do is the timing. It's the same family as Nova (shell/space-shell.js): one button, nothing to lose.
+//
+// The five questions:
+// 1. On the beat: a hoop appears above the others, due four beats later, always on a whole beat
+//    and at least two beats after the last.
+// 2. Movement: the hoops stay still in the water; Wisp swims up a stroke a beat (her height is a
+//    function of the beat position) and the view follows her up at her average pace.
+// 3. The player pulses. Every press is a note (api.eng.tap) and a pulse of Wisp's bell.
+// 4. While a hoop's inner ring is gold, pulsing passes it: CLEAN within ±0.3 beat (wider with
+//    assist, for hoops not yet set off), PERFECT within ±0.1. Wisp glides softly on past a
+//    hoop you miss, and its fish stays asleep; nothing is lost.
+// 5. The look: a deep star-sea with slow light rays, glowing kelp scrolling by at two depths,
+//    falling plankton, sleepy background fish, and a star whale who visits about once a minute
+//    (six hoops passed while she's there and she sings: a bonus).
+// Fidget (F): every press is a hoop: the next one lights wherever it is, or a new one appears
+// right at her bell. Hold then let go for a bloom: a wave of light that wakes every
+// sleepy fish in the sea; a full charge is a moonbloom and the school loops. Blooms never score.
+(() => {
+  "use strict";
+
+  const S = NeonSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1; // beats
+  const INK = "#1a1438";
+  // Four original glow fish. Sizes are in "fish units": about a pixel each at phone size.
+  const KINDS = [
+    { name: "puffle", color: "#ffb38a", deep: "#ff7a6a", note: 0.2 }, // a round little puffer
+    { name: "manta", color: "#7fffd8", deep: "#22b8a4", note: 0.35 }, // a tiny ray, flapping
+    { name: "bloop", color: "#ff9ad8", deep: "#d85cb4", note: 0.5 }, // a baby jelly
+    { name: "glim", color: "#bca8ff", deep: "#7a60e0", note: 0.65 } // a lantern fish with a lure
+  ];
+  // The sea's moods as the tiers climb: midnight, lagoon, orchid, starsea
+  const MOODS = [
+    { top: "#06102a", mid: "#0b2446", low: "#0d3a58", clouds: ["#3fd7ff", "#7fffd8", "#8a7dff", "#3fd7ff", "#ff9ad8"], seed: 5, kelp: "#7fffd8" },
+    { top: "#05182a", mid: "#0f4450", low: "#1f7a72", clouds: ["#8dffc4", "#3fd7ff", "#bca8ff", "#8dffc4", "#7fffd8"], seed: 15, kelp: "#8dffc4" },
+    { top: "#140a30", mid: "#2c1656", low: "#5a2a72", clouds: ["#ff9ad8", "#bca8ff", "#3fd7ff", "#ff9ad8", "#ffb38a"], seed: 25, kelp: "#ff9ad8" },
+    { top: "#0e0e2c", mid: "#2a2048", low: "#5a4058", clouds: ["#ffc46b", "#ff9ad8", "#7fffd8", "#ffc46b", "#bca8ff"], seed: 35, kelp: "#ffc46b" }
+  ];
+  const SCHOOL_MAX = 9;
+  const FISH_RES = 1.6; // fish bodies are baked larger than their units, so they stay crisp when drawn big
+  const RISE = 26; // pixels the sea scrolls by per beat, at phone size
+
+  let W = 0, H = 0;
+  let L = {}; // layout, from the window size
+  const GOLD = "#ffd76a"; // a hoop's inner ring while it's ready to pass
+  let hoops = []; // { kind (its fish), t0, arriveAt, tx, phase, side, window, state: "drift" | "lit" | "gone", fade, doneAt }
+  let wispY = 0, trailY = 0, lastBeat = 0; // Wisp's height on screen, and the school's slower one
+  let school = []; // lit friends: { kind, slot, at, fx, fy, leaving }
+  let sleepy = []; // background fish: { kind, x, y, d, phase, glow }
+  let pops = [], sparks = [], waves = [], bubbles = [];
+  let beatsSince = 99, lastArrive = -99, lastTx = 0;
+  let trailX = 0, wispX = 0, wispFrom = { x: 0, t: 0 }, aim = null, lean = 0;
+  let pulseAt = -9, clock = 0, lastTier = 1, lit = 0, loopAt = -9;
+  let sky = { from: 1, to: 1, t: 1 };
+  let whale = null; // { t0, beats, hits, flash }
+  let whaleClock = 0, nextWhale = 50 + Math.random() * 20;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => (u = clamp(u, 0, 1)) * u * (3 - 2 * u);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const k = clamp(Math.min(W / 400, H / 700), 0.7, 1.5);
+    const rest = Math.round(H * (H > W ? 0.7 : 0.66));
+    // climb: how far Wisp swims up each beat
+    L = { k, wispY: rest, meetY: rest - 8 * k, climb: 66 * k, rise: RISE * k, rx: 46 * k, ry: 14 * k };
+    if (!wispX) wispX = trailX = lastTx = W / 2;
+    if (!wispY) wispY = trailY = rest;
+    wispX = clamp(wispX, W * 0.12, W * 0.88);
+    wispFrom = { x: wispX, t: api.eng.beatPos() };
+    if (!sleepy.length) {
+      const r = S.rng(77);
+      for (let i = 0; i < 6; i++) sleepy.push({ kind: i % 4, x: r(), y: r(), d: 0.35 + r() * 0.4, phase: r() * TAU, glow: 0 });
+    }
+  }
+
+  // Wisp never stops swimming up: each beat her bell contracts and she glides on, quick then
+  // slow but never still, climbing L.climb a beat. The hoops hang still in the sea, one at the
+  // height she reaches on each hoop's beat, and the view follows at her average pace, so she's
+  // seen to pull ahead on every pulse and drift back as it catches up.
+  const glide = (u) => 0.15 * u + 0.85 * (1 - Math.pow(1 - u, 3)); // one beat's climb, 0 to 1
+  const climbAt = (now) => L.climb * (Math.floor(now) + glide(now - Math.floor(now)));
+  const wispAt = (now) => L.wispY - (climbAt(now) - L.climb * now); // on screen
+  function hoopPos(h, now) {
+    const y = L.meetY - L.climb * (h.arriveAt - now); // still in the sea; the view moves
+    if (h.state !== "gone") return [h.tx, y];
+    const t = now - h.doneAt; // a missed hoop drifts softly aside as she glides past
+    return [h.tx + h.side * t * t * 14 * L.k, y];
+  }
+  const done = (h, now, state) => Object.assign(h, { state, doneAt: now });
+  function nextHoop() {
+    let best = null;
+    for (const h of hoops) if (h.state === "drift" && (!best || h.arriveAt < best.arriveAt)) best = h;
+    return best;
+  }
+  // Where a hoop's fish rides: perched on its rim, bobbing
+  const riderPos = (h, x, y, now) => [x + h.side * L.rx * 0.75, y - 12 * L.k + Math.sin(now * Math.PI + h.phase) * 2 * L.k];
+
+  // ---- Sprites --------------------------------------------------------------------------
+  // A fish's soft body, baked lit and sleepy (lit 1 or 0); fins and tails are live
+  function bodySprite(ctx, kind, on) {
+    const K = KINDS[kind];
+    const k = L.k * FISH_RES;
+    return S.sprite(ctx, "fish" + kind + on + k, 80 * k, 70 * k, 40 * k, 35 * k, (g) => {
+      g.scale(k, k);
+      const c = on ? K.color : S.mix(K.color, "#0b1838", 0.62);
+      const shape = () => {
+        g.beginPath();
+        if (kind === 0) g.arc(0, 0, 11, 0, TAU);
+        else if (kind === 1) g.ellipse(0, 0, 8, 6, 0, 0, TAU);
+        else if (kind === 2) {
+          g.ellipse(0, 0, 10, 9, 0, Math.PI, TAU);
+          g.quadraticCurveTo(5, 3, 0, 2);
+          g.quadraticCurveTo(-5, 3, -10, 0);
+        } else g.ellipse(0, 0, 12, 9, 0, 0, TAU);
+      };
+      if (on) S.blurred(g, K.color, 14, (g) => { shape(); g.fillStyle = S.rgba(K.color, 0.7); g.fill(); });
+      shape();
+      const fill = g.createRadialGradient(-3, -4, 1, 0, 0, 13);
+      fill.addColorStop(0, on ? S.mix(K.color, "#ffffff", 0.6) : S.mix(c, "#ffffff", 0.15));
+      fill.addColorStop(0.55, c);
+      fill.addColorStop(1, on ? K.deep : S.mix(K.deep, "#0b1838", 0.7));
+      g.fillStyle = fill;
+      g.fill();
+      // Freckles of light (bioluminescent spots), brighter once lit
+      g.fillStyle = on ? "rgba(255,255,255,0.75)" : "rgba(200,230,255,0.18)";
+      const dots = kind === 0 ? [[-5, -6], [1, -8], [6, -5], [-7, 1]] : kind === 1 ? [[-4, -2], [4, -2]] : kind === 2 ? [[-5, -5], [0, -7], [5, -5]] : [[-7, -3], [-3, -6], [6, 4]];
+      for (const [x, y] of dots) {
+        g.beginPath();
+        g.arc(x, y, 1.1, 0, TAU);
+        g.fill();
+      }
+      g.fillStyle = on ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.08)";
+      g.beginPath();
+      g.ellipse(-3, -4, 3.5, 2, -0.5, 0, TAU);
+      g.fill();
+    });
+  }
+
+  // A glow fish at (x, y). o = { s: size, dir: -1 | 1 facing, on: 0..1 lit, t: animation clock,
+  // a: alpha, rot }
+  function drawFish(ctx, kind, x, y, o) {
+    const K = KINDS[kind];
+    const on = o.on || 0, t = o.t || 0;
+    const fin = on > 0.5 ? K.color : S.mix(K.color, "#0b1838", 0.55);
+    ctx.save();
+    ctx.translate(x, y);
+    if (o.rot) ctx.rotate(o.rot);
+    const s = (o.s || 1) * L.k;
+    ctx.scale(s * (o.dir || 1), s);
+    ctx.globalAlpha = o.a === undefined ? 1 : o.a;
+    const base = ctx.globalAlpha;
+    ctx.fillStyle = fin;
+    ctx.strokeStyle = fin;
+    // Fins and tails, behind the body
+    if (kind === 0) {
+      const f = Math.sin(t * 9) * 0.35;
+      ctx.beginPath();
+      ctx.moveTo(-9, 0);
+      ctx.quadraticCurveTo(-16, -7 - f * 8, -19, -7 + f * 4);
+      ctx.quadraticCurveTo(-16, 0, -19, 7 + f * 4);
+      ctx.quadraticCurveTo(-16, 7 - f * 8, -9, 0);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-3, -10);
+      ctx.quadraticCurveTo(1, -16 + f * 3, 5, -10);
+      ctx.fill();
+    } else if (kind === 1) {
+      const f = Math.sin(t * 5);
+      ctx.beginPath();
+      ctx.moveTo(-6, -2);
+      ctx.quadraticCurveTo(-14, -6 - f * 6, -20, 2 - f * 7);
+      ctx.quadraticCurveTo(-12, 4, -5, 4);
+      ctx.moveTo(6, -2);
+      ctx.quadraticCurveTo(14, -6 - f * 6, 20, 2 - f * 7);
+      ctx.quadraticCurveTo(12, 4, 5, 4);
+      ctx.fill();
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(0, 5);
+      ctx.quadraticCurveTo(Math.sin(t * 4) * 3, 11, 0, 16);
+      ctx.stroke();
+    } else if (kind === 2) {
+      ctx.lineWidth = 1.6;
+      ctx.lineCap = "round";
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * 5, 1);
+        for (let j = 1; j <= 4; j++) ctx.lineTo(i * 5 + Math.sin(t * 4 + j * 0.9 + i) * 2.2, 1 + j * 3.4);
+        ctx.stroke();
+      }
+    } else {
+      const f = Math.sin(t * 7) * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(-10, 0);
+      ctx.quadraticCurveTo(-18, -8 - f * 6, -20, -4);
+      ctx.quadraticCurveTo(-17, 0, -20, 4);
+      ctx.quadraticCurveTo(-18, 8 - f * 6, -10, 0);
+      ctx.fill();
+      // The lure, bobbing on its stalk
+      const lx = 13 + Math.sin(t * 2.2) * 1.5, ly = -16 + Math.cos(t * 2.6) * 1.5;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(2, -8);
+      ctx.quadraticCurveTo(6, -19, lx, ly);
+      ctx.stroke();
+      ctx.globalAlpha = base;
+      S.glow(ctx, lx, ly, 9 + 5 * on, "#ffe08a", 0.5 + 0.5 * on);
+      ctx.fillStyle = "#fff4c8";
+      ctx.beginPath();
+      ctx.arc(lx, ly, 1.8, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = base;
+    if (on > 0 && on < 1) {
+      S.draw(ctx, bodySprite(ctx, kind, 0), 0, 0, 1 / (L.k * FISH_RES));
+      ctx.globalAlpha = base * on;
+      S.draw(ctx, bodySprite(ctx, kind, 1), 0, 0, 1 / (L.k * FISH_RES));
+      ctx.globalAlpha = base;
+    } else S.draw(ctx, bodySprite(ctx, kind, on >= 1 ? 1 : 0), 0, 0, 1 / (L.k * FISH_RES));
+    ctx.restore();
+  }
+
+  // Wisp's bell, baked with its glow and frilly rim; the face and tentacles are live
+  function bellSprite(ctx, color) {
+    const k = L.k;
+    return S.sprite(ctx, "bell" + color + k, 120 * k, 100 * k, 60 * k, 56 * k, (g) => {
+      g.scale(k, k);
+      const shape = () => {
+        g.beginPath();
+        g.moveTo(-27, 6);
+        g.bezierCurveTo(-29, -18, -14, -30, 0, -30);
+        g.bezierCurveTo(14, -30, 29, -18, 27, 6);
+        for (let i = 6; i >= -6; i--) g.quadraticCurveTo(i * 4.5 + 2.25, 11, i * 4.5 - 0.0, 6 + (i & 1) * 1.5);
+        g.closePath();
+      };
+      S.blurred(g, color, 22, (g) => { shape(); g.fillStyle = S.rgba(color, 0.55); g.fill(); });
+      shape();
+      const fill = g.createRadialGradient(-6, -16, 2, 0, -6, 34);
+      fill.addColorStop(0, "rgba(255,255,255,0.95)");
+      fill.addColorStop(0.35, S.mix(color, "#ffffff", 0.45));
+      fill.addColorStop(1, S.mix(color, "#3a2a7a", 0.35));
+      g.fillStyle = fill;
+      g.fill();
+      // An inner bell, like a lantern's mantle
+      g.fillStyle = "rgba(255,255,255,0.25)";
+      g.beginPath();
+      g.ellipse(0, -6, 15, 14, 0, Math.PI * 1.05, Math.PI * 1.95);
+      g.fill();
+      S.haloed(g, S.mix(color, "#ffffff", 0.3), (g, c, core) => {
+        shape();
+        g.strokeStyle = c;
+        g.lineWidth = core ? 0.8 : 1.6;
+        g.stroke();
+      });
+    });
+  }
+
+  // The star whale: a long soft shape full of tiny stars
+  function whaleSprite(ctx) {
+    const k = L.k;
+    return S.sprite(ctx, "whale" + k, 260 * k, 120 * k, 130 * k, 60 * k, (g) => {
+      g.scale(k, k);
+      const shape = () => {
+        g.beginPath();
+        g.moveTo(-110, -6);
+        g.bezierCurveTo(-90, -42, 20, -50, 70, -22);
+        g.bezierCurveTo(100, -8, 104, 18, 80, 26);
+        g.bezierCurveTo(30, 40, -60, 30, -100, 8);
+        g.quadraticCurveTo(-118, 22, -126, 30);
+        g.quadraticCurveTo(-124, 8, -128, -16);
+        g.quadraticCurveTo(-118, -8, -110, -6);
+        g.closePath();
+      };
+      S.blurred(g, "#7fb8ff", 24, (g) => { shape(); g.fillStyle = "rgba(60,90,200,0.5)"; g.fill(); });
+      shape();
+      const lin = g.createLinearGradient(0, -48, 0, 34);
+      lin.addColorStop(0, "#2a3a8a");
+      lin.addColorStop(0.65, "#1a2660");
+      lin.addColorStop(1, "#3a4a9a");
+      g.fillStyle = lin;
+      g.fill();
+      g.save();
+      shape();
+      g.clip();
+      const r = S.rng(9);
+      for (let i = 0; i < 90; i++) {
+        g.fillStyle = `rgba(255,255,255,${0.2 + r() * 0.6})`;
+        g.fillRect(-120 + r() * 220, -45 + r() * 75, 1.2, 1.2);
+      }
+      g.fillStyle = "rgba(190,220,255,0.18)";
+      g.beginPath();
+      g.ellipse(10, 24, 80, 12, 0, 0, TAU);
+      g.fill();
+      g.restore();
+      S.haloed(g, "#9fd0ff", (g, c, core) => {
+        shape();
+        g.strokeStyle = c;
+        g.lineWidth = core ? 0.7 : 1.4;
+        g.stroke();
+      });
+    });
+  }
+  const WHALE_SPOTS = [[-70, -14], [-40, -24], [-10, -28], [20, -26], [45, -18], [-25, -4]];
+
+  // A strand of glowing kelp, one screen tall, tiled as the sea scrolls by
+  function kelpSprite(ctx, color, tall) {
+    const k = L.k;
+    const h = Math.ceil(H);
+    return S.sprite(ctx, "kelp" + color + h + tall + k, 60 * k, h, 30 * k, 0, (g) => {
+      const r = S.rng(tall ? 3 : 4);
+      const x = (y) => Math.sin((y / h) * TAU * (tall ? 3 : 4) + (tall ? 0 : 2)) * 9 * k; // whole waves, so the tiles meet
+      g.lineCap = "round";
+      S.blurred(g, color, 8, (g) => {
+        g.strokeStyle = S.rgba(color, tall ? 0.45 : 0.3);
+        g.lineWidth = 2.2 * k;
+        g.beginPath();
+        g.moveTo(x(0), 0);
+        for (let y = 6; y <= h; y += 6) g.lineTo(x(y), y);
+        g.stroke();
+      });
+      for (let y = 20; y < h; y += 26 * k + r() * 18 * k) {
+        const s = r() < 0.5 ? -1 : 1;
+        g.fillStyle = S.rgba(color, tall ? 0.35 : 0.22);
+        g.beginPath();
+        g.ellipse(x(y) + s * 7 * k, y, 8 * k, 3 * k, s * 0.6, 0, TAU);
+        g.fill();
+        if (r() < 0.35) {
+          g.fillStyle = S.mix(color, "#ffffff", 0.7);
+          g.beginPath();
+          g.arc(x(y) + s * 13 * k, y - 2 * k, 1.6 * k, 0, TAU);
+          g.fill();
+        }
+      }
+    });
+  }
+
+  // Soft slanted rays of light from far above
+  function raysSprite(ctx) {
+    return S.sprite(ctx, "rays" + W + "x" + H, W, H, 0, 0, (g) => {
+      g.globalCompositeOperation = "lighter";
+      const r = S.rng(12);
+      for (let i = 0; i < 5; i++) {
+        const x = W * (0.1 + r() * 0.9), w = W * (0.06 + r() * 0.1);
+        const lin = g.createLinearGradient(0, 0, 0, H * 0.85);
+        lin.addColorStop(0, "rgba(200,240,255,0.12)");
+        lin.addColorStop(1, "rgba(200,240,255,0)");
+        g.fillStyle = lin;
+        g.beginPath();
+        g.moveTo(x, 0);
+        g.lineTo(x + w, 0);
+        g.lineTo(x + w - H * 0.35, H * 0.85);
+        g.lineTo(x - w * 0.6 - H * 0.35, H * 0.85);
+        g.closePath();
+        g.fill();
+      }
+    });
+  }
+
+  function skyLayer(ctx, tier, a) {
+    ctx.globalAlpha = a;
+    S.layer(ctx, "tide" + tier, W, H, (g) => {
+      S.dreamSky(g, W, H, MOODS[(tier - 1) % 4]);
+      // The deep below: darker toward the bottom, as if the sea goes on forever
+      const lin = g.createLinearGradient(0, H * 0.6, 0, H);
+      lin.addColorStop(0, "rgba(2,4,16,0)");
+      lin.addColorStop(1, "rgba(2,4,16,0.55)");
+      g.fillStyle = lin;
+      g.fillRect(0, H * 0.6, W, H * 0.4);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Effects ---------------------------------------------------------------------------
+  function pulse() {
+    pulseAt = clock;
+    for (let i = 0; i < 3 && bubbles.length < 40; i++) bubbles.push({ x: wispX + (Math.random() - 0.5) * 30 * L.k, y: wispY + 6 * L.k, r: 1.5 + Math.random() * 2.5, vy: -(40 + Math.random() * 50), t: 0 });
+  }
+  // Pass a hoop: Wisp swims up through it, it flares, and its fish lights up and swims into
+  // the school. The view follows her up, so the hoop sinks away below.
+  function light(api, f, power, ghost) {
+    const K = KINDS[f.kind];
+    const now = api.eng.beatPos();
+    const [x, y] = hoopPos(f, now);
+    join(f.kind, ...riderPos(f, x, y, now));
+    done(f, now, "lit");
+    pops.push({ x, y, t: 0, color: K.color, size: 44 * L.k * power });
+    for (let i = 0; i < 10 * power && sparks.length < 220; i++) {
+      const a = Math.random() * TAU, v = 30 + Math.random() * 90 * power, life = 0.7 + Math.random() * 0.8;
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color: i % 3 ? K.color : "#ffffff", r: 2 + Math.random() * 3, star: i % 3 === 0 });
+    }
+    if (whale && !ghost && api.started && !api.eng.auto) {
+      whale.flash = 1;
+      if (++whale.hits >= 6) {
+        const [wx, wy] = whalePos(api.eng.beatPos());
+        for (let i = 0; i < 50; i++) {
+          const a = Math.random() * TAU, v = 40 + Math.random() * 160, life = 1 + Math.random();
+          sparks.push({ x: wx, y: wy, vx: Math.cos(a) * v, vy: Math.sin(a) * v * 0.6, life, max: life, color: KINDS[i % 4].color, r: 3 + Math.random() * 4, star: i % 2 === 0 });
+        }
+        api.ring(wx, wy, "#ffd23a", Math.min(W, H) * 0.45);
+        api.bonus(3000, "Whale song!", W / 2, H * 0.34);
+        loopAt = clock;
+        whale.leaving = true;
+      }
+    }
+  }
+  function join(kind, x, y) {
+    if (school.filter((m) => !m.leaving).length >= SCHOOL_MAX) {
+      const old = school.find((m) => !m.leaving);
+      if (old) {
+        // The longest-swimming friend slows and falls behind
+        [old.fx, old.fy] = memberPos(old, clock);
+        old.leaving = true;
+        old.at = clock;
+      }
+    }
+    const used = new Set(school.filter((m) => !m.leaving).map((m) => m.slot));
+    let slot = 0;
+    while (used.has(slot)) slot++;
+    school.push({ kind, slot, at: clock, fx: x, fy: y, leaving: false });
+  }
+  // Where a school member swims: a slow, loose drift trailing behind (below) Wisp, each at its
+  // own depth. It follows trailX, which lags Wisp, so the school never darts after her.
+  function memberSpot(m, t) {
+    const i = m.slot;
+    const looping = clamp((t - loopAt) / 2.5, 0, 1);
+    const a = i * 2.39996 + t * (0.16 + (i % 3) * 0.04) * (i % 2 ? 1 : -1) + Math.sin(looping * Math.PI) * TAU;
+    const r = (34 + (i % 3) * 20) * L.k * (1 + 0.3 * Math.sin(looping * Math.PI));
+    return [trailX + Math.cos(a) * r * 1.4, trailY + (70 + (i % 3) * 26) * L.k + Math.sin(a) * r * 0.5];
+  }
+  function memberPos(m, t) {
+    const [sx, sy] = memberSpot(m, t);
+    if (m.leaving) {
+      // A friend leaving the school just slows and falls behind as Wisp rises on, fading out
+      const u = t - m.at;
+      return [m.fx + Math.sin(u * 0.8 + m.slot) * 8 * L.k, m.fy + u * 26 * L.k];
+    }
+    const e = smooth((t - m.at) / 2.2); // a gentle glide into place, not a dart
+    return [m.fx + (sx - m.fx) * e, m.fy + (sy - m.fy) * e];
+  }
+  function whalePos(now) {
+    const p = (now - whale.t0) / whale.beats;
+    return [W + 160 * L.k - p * (W + 320 * L.k), H * 0.3 + Math.sin(now * 0.5) * 8];
+  }
+
+  // Half a hoop of light (front: the near half), seen a little from above. A waiting hoop
+  // brightens as Wisp nears it, and its inner ring turns gold while it's ready to pass; a
+  // passed one flares and fades as it sinks away below.
+  function hoopArc(ctx, h, now, front) {
+    if (h.state === "drift" && now < h.t0) return;
+    const [x, y] = hoopPos(h, now);
+    const K = KINDS[h.kind];
+    const k = L.k;
+    const from = front ? 0 : Math.PI, to = front ? Math.PI : TAU;
+    if (h.state === "drift") {
+      // The inner ring: a pale thread, warming to gold just before the tap window opens and
+      // solid gold all through it, brightest right on the beat
+      const d = now - h.arriveAt;
+      const gold = d < h.window ? clamp((d + h.window + 0.5) / 0.5, 0, 1) : 0;
+      const peak = Math.max(0, 1 - Math.abs(d) / h.window);
+      const soon = clamp(1 - (h.arriveAt - now) / 1.6, 0, 1);
+      const fadeIn = clamp((now - h.t0) * 2, 0, 1);
+      const rx = L.rx * 0.66, ry = L.ry * 0.66;
+      ctx.lineCap = "round";
+      if (gold > 0) {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.strokeStyle = GOLD;
+        ctx.globalAlpha = gold * (0.25 + 0.2 * peak);
+        ctx.lineWidth = 12 * k;
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, 0, from, to);
+        ctx.stroke();
+        ctx.globalCompositeOperation = "source-over";
+      }
+      ctx.globalAlpha = fadeIn * Math.max(0.2 + 0.3 * soon, gold) * (front ? 1 : 0.8);
+      ctx.strokeStyle = gold > 0 ? S.mix("#e8fbff", GOLD, gold) : "#e8fbff";
+      ctx.lineWidth = (1.4 + 2.4 * gold) * k;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rx, ry, 0, from, to);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      if (gold > 0 && front) S.glow(ctx, x, y, L.rx * 1.3, GOLD, gold * (0.15 + 0.25 * peak));
+    }
+    let a, glow;
+    if (h.state === "lit") {
+      const e = clamp(now - h.doneAt, 0, 2);
+      a = Math.max(0, h.fade);
+      glow = 1 + Math.max(0, 1 - e * 2);
+    } else {
+      const near = clamp((2.4 - (h.arriveAt - now)) / 2.4, 0, 1);
+      a = (h.state === "gone" ? Math.max(0, h.fade) * 0.6 : clamp((now - h.t0) * 2, 0, 1)) * (0.45 + 0.55 * near);
+      glow = 0.6 + 0.4 * near;
+    }
+    if (a <= 0.01) return;
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    for (const [w, al, c] of [[16, 0.12, K.color], [6, 0.4, K.color], [2.2, 1, S.mix(K.color, "#ffffff", 0.6)]]) {
+      ctx.globalAlpha = Math.min(1, a * al * glow * (front ? 1 : 0.7));
+      ctx.strokeStyle = c;
+      ctx.lineWidth = w * k * (0.8 + 0.2 * glow);
+      ctx.beginPath();
+      ctx.ellipse(x, y, L.rx, L.ry, 0, from, to);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineCap = "butt";
+    ctx.globalCompositeOperation = "source-over";
+    // Little lanterns turning round the rim, on whichever half they're on
+    for (let i = 0; i < 4; i++) {
+      const t = now * 0.5 + h.phase + (i * TAU) / 4;
+      if (Math.sin(t) > 0 !== front) continue;
+      S.glow(ctx, x + Math.cos(t) * L.rx, y + Math.sin(t) * L.ry, 7 * k * glow, K.color, a);
+    }
+    if (h.state === "lit" && front) S.glow(ctx, x, y, L.rx * 1.6, K.color, a * Math.max(0, 1 - (now - h.doneAt) * 1.5) * 0.6);
+  }
+
+  // ---- The five questions ----------------------------------------------------------------
+  // 1. On the beat: when the pacer says so, a hoop appears at the top of the column
+  function onBeat(n, api) {
+    if (++beatsSince < Math.max(2, api.eng.paceBeats()) || !W) return;
+    beatsSince = 0;
+    const arriveAt = Math.max(n + 4, lastArrive + 2);
+    lastArrive = arriveAt;
+    const tx = clamp(lastTx + (Math.random() * 2 - 1) * W * 0.3, W * 0.16, W * 0.84);
+    lastTx = tx;
+    hoops.push({ kind: Math.floor(Math.random() * 4), t0: arriveAt - 4, arriveAt, tx, phase: Math.random() * TAU, side: Math.random() < 0.5 ? -1 : 1, window: 0.3 + 0.15 * api.eng.assist, state: "drift", fade: 1 });
+  }
+
+  // Fidget: every press is a hoop. The next one lights wherever it is, else a new one appears
+  // right at her bell. Mash and she rises through a tunnel of light.
+  function zap(api) {
+    const now = api.eng.beatPos();
+    let h = nextHoop();
+    if (!h) {
+      h = { kind: Math.floor(Math.random() * 4), t0: now - 4, arriveAt: now, tx: wispX, phase: Math.random() * TAU, side: Math.random() < 0.5 ? -1 : 1, window: 0, state: "drift", fade: 1 };
+      hoops.push(h);
+    }
+    light(api, h, 1);
+    return h.kind;
+  }
+
+  // 3. The player pulses. Every press goes to the engine; a hoop at your bell is passed.
+  function onFire(api) {
+    pulse();
+    if (api.style === "fidget") {
+      api.eng.tap({ height: KINDS[zap(api)].note });
+      return;
+    }
+    const now = api.eng.beatPos();
+    let f = null;
+    for (const x of hoops) if (x.state === "drift" && Math.abs(now - x.arriveAt) < x.window && (!f || Math.abs(now - x.arriveAt) < Math.abs(now - f.arriveAt))) f = x;
+    api.eng.tap({ height: f ? KINDS[f.kind].note : 0.8 });
+    if (!f) {
+      waves.push({ x: wispX, y: wispY, t: 0, size: 40 * L.k, color: api.color() }); // a pulse into the dark, still a note
+      return;
+    }
+    const perfect = Math.abs(now - f.arriveAt) < PERFECT;
+    const [x, y] = hoopPos(f, now);
+    light(api, f, perfect ? 1.4 : 1);
+    if (perfect) api.ring(x, y, api.color(), 60);
+    // 4. Score it
+    api.hit(perfect ? "PERFECT" : "CLEAN", api.eng.beatSec * 1.5);
+    if (++lit === 16) api.hint("bloom", 'Hold <span class="pb-kbd">Space</span>, let go: a bloom of light');
+  }
+
+  // Hold then let go: a bloom, a wave of light that wakes every sleepy fish it passes. A full
+  // charge is a moonbloom: a huge wave, and the whole school loops the loop. Never scores.
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const full = c >= 1;
+    waves.push({ x: wispX, y: wispY, t: 0, size: (full ? Math.max(W, H) : 120 + 200 * c) * L.k, color: full ? "#ffc46b" : api.color(), bloom: true, slow: full });
+    if (full) {
+      api.callout("Moonbloom", W / 2, H * 0.3, "#ffc46b", 1.3);
+      api.eng.chime();
+      loopAt = clock;
+    }
+  }
+
+  function autopilot(dt, api) {
+    const now = api.eng.beatPos();
+    for (const f of hoops) {
+      if (f.state === "drift" && now >= f.arriveAt) {
+        pulse();
+        light(api, f, 1, true);
+      }
+    }
+  }
+
+  // 2. Movement, misses and effects
+  // ---- Asides: now and then something happens far off ---------------------------------------
+  // Slow and faint, behind everything and never on the beat, so it never gets in the way of the
+  // timing, and never gold, which means "tap now". One at a time, every 9 to 20 seconds,
+  // and never the same one twice running.
+  let aside = null, asideIn = 5 + Math.random() * 6, asideLast = -1;
+  const fadeIO = (u) => Math.min(1, u * 5, (1 - u) * 5);
+  // x across the screen at progress u, coming in from the side a.dir says, m of a width off each edge
+  const across = (a, u, m) => (a.dir > 0 ? -W * m + u * W * (1 + 2 * m) : W * (1 + m) - u * W * (1 + 2 * m));
+  function asides(dt) {
+    if (aside) {
+      if ((aside.t += dt) >= aside.dur) {
+        aside = null;
+        asideIn = 9 + Math.random() * 11;
+      }
+      return;
+    }
+    if ((asideIn -= dt) > 0) return;
+    let i = Math.floor(Math.random() * ASIDES.length);
+    if (i === asideLast) i = (i + 1) % ASIDES.length;
+    asideLast = i;
+    aside = Object.assign({ i, t: 0, dir: Math.random() < 0.5 ? -1 : 1, y: 0.06 + Math.random() * 0.14, x0: 0.15 + Math.random() * 0.55 }, ASIDES[i].start);
+  }
+  function drawAside(ctx) {
+    if (!aside) return;
+    const u = aside.t / aside.dur;
+    ASIDES[aside.i].draw(ctx, aside, u, fadeIO(u), Math.min(W, H) / 500);
+  }
+  const ASIDES = [
+    { // a manta ray of light, gliding by
+      start: { dur: 17 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.25), y = H * (0.22 + a.y) + Math.sin(a.t * 0.5) * 20 * k;
+        const flap = Math.sin(a.t * 1.6) * 10 * k;
+        S.glow(ctx, x, y, 60 * k, "#7fe9ff", f * 0.12);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(a.dir, 1);
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = S.rgba("#7fe9ff", 0.14 * f);
+        ctx.beginPath();
+        ctx.moveTo(30 * k, 0);
+        ctx.quadraticCurveTo(4 * k, -12 * k, -12 * k, -46 * k - flap);
+        ctx.quadraticCurveTo(-6 * k, -10 * k, -24 * k, 0);
+        ctx.quadraticCurveTo(-6 * k, 10 * k, -12 * k, 46 * k + flap);
+        ctx.quadraticCurveTo(4 * k, 12 * k, 30 * k, 0);
+        ctx.fill();
+        ctx.strokeStyle = S.rgba("#dff6ff", 0.22 * f);
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-24 * k, 0);
+        ctx.quadraticCurveTo(-48 * k, Math.sin(a.t * 2) * 8 * k, -76 * k, Math.sin(a.t * 2 + 1) * 4 * k);
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+    { // a ball of tiny silver fish, swirling past
+      start: { dur: 12 },
+      draw(ctx, a, u, f, k) {
+        const cx = across(a, u, 0.2), cy = H * (0.28 + a.y * 1.5);
+        for (let i = 0; i < 18; i++) {
+          const ang = a.t * 1.4 + i * 2.4, rr = (10 + ((i * 7) % 26)) * k;
+          S.glow(ctx, cx + Math.cos(ang) * rr * 1.5, cy + Math.sin(ang) * rr * 0.6, 4 * k, i % 3 ? "#dff6ff" : "#ffc2ea", f * 0.5);
+        }
+      }
+    },
+    { // three baby moon jellies, pulsing up from the deep
+      start: { dur: 15 },
+      draw(ctx, a, u, f, k) {
+        for (let n = 0; n < 3; n++) {
+          const p = 1 + 0.18 * Math.sin(a.t * 3 + n * 2);
+          const x = W * (a.x0 + (n - 1) * 0.07) + Math.sin(a.t * 0.7 + n * 2) * 8 * k, y = H * (1.05 - u * 0.95 - n * 0.06);
+          S.glow(ctx, x, y, 14 * k * p, "#ffc2ea", f * 0.3);
+          S.softRing(ctx, x, y, 5 * k * p, "#ffe3f3", f * 0.35, 1);
+          for (let j = 1; j < 4; j++) S.glow(ctx, x + Math.sin(a.t * 2 + j + n) * 2 * k, y + j * 6 * k, 2.5 * k, "#ffc2ea", f * 0.3);
+        }
+      }
+    },
+    { // a sea turtle of light, paddling slowly across
+      start: { dur: 20 },
+      draw(ctx, a, u, f, k) {
+        const x = across(a, u, 0.15), y = H * (0.2 + a.y) + Math.sin(a.t * 0.4) * 14 * k;
+        const p = Math.sin(a.t * 1.2);
+        S.glow(ctx, x, y, 34 * k, "#8dffc4", f * 0.16);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(a.dir, 1);
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = S.rgba("#8dffc4", 0.16 * f);
+        for (const [fx, sy] of [[10, -1], [10, 1], [-12, -1], [-12, 1]]) {
+          ctx.beginPath();
+          ctx.ellipse(fx * k, sy * 14 * k, 9 * k, 3.5 * k, sy * (0.6 + 0.4 * p * (fx > 0 ? 1 : -1)), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.beginPath();
+        ctx.arc(24 * k, 0, 6 * k, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 20 * k, 14 * k, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = S.rgba("#dfffee", 0.3 * f);
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+    { // a glimmer runs through the deep, like a wave of tiny lights waking
+      start: { dur: 7 },
+      draw(ctx, a, u, f, k) {
+        const x0 = across(a, u, 0.1);
+        for (let i = 0; i < 18; i++) S.glow(ctx, x0 - a.dir * i * 16 * k, H * (0.88 + 0.03 * Math.sin(i * 0.7 + a.t * 2)), 10 * k, "#8dffc4", f * 0.3 * (1 - i / 18));
+      }
+    },
+    { // lantern fish, blinking to each other far below
+      start: { dur: 13 },
+      draw(ctx, a, u, f, k) {
+        for (let n = 0; n < 4; n++) {
+          const x = W * (a.x0 + n * 0.07) + a.dir * u * W * 0.12, y = H * (0.74 + (n % 2) * 0.05) + Math.sin(a.t + n) * 6 * k;
+          const on = Math.sin(a.t * 2.2 + n * 1.7) > -0.2;
+          S.glow(ctx, x, y, (on ? 9 : 4) * k, "#7fffd4", f * (on ? 0.5 : 0.2));
+        }
+      }
+    }
+  ];
+
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    asides(dt);
+    for (const f of hoops) {
+      if (f.state === "drift" && now > f.arriveAt + f.window) {
+        done(f, now, "gone"); // she glides softly on past it all the same
+        if (api.miss()) api.hint("glow", "Pulse while the inner ring is gold");
+      }
+      if (f.state !== "drift") f.fade -= dt * (f.state === "lit" ? 0.9 : 0.7);
+    }
+    hoops = hoops.filter((f) => f.fade > 0);
+    school = school.filter((m) => !m.leaving || clock - m.at < 4);
+    wispY = wispAt(now);
+    if (Math.floor(now) !== lastBeat) {
+      lastBeat = Math.floor(now); // each stroke of her bell leaves a few bubbles
+      for (let i = 0; i < 2 && bubbles.length < 40; i++) bubbles.push({ x: wispX + (Math.random() - 0.5) * 24 * L.k, y: wispY + 10 * L.k, r: 1.2 + Math.random() * 2, vy: -(20 + Math.random() * 30), t: 0 });
+    }
+    trailX += (wispX - trailX) * Math.min(1, dt * 0.9);
+    trailY += (wispY - trailY) * Math.min(1, dt * 0.9);
+    // Wisp glides under the next hoop and is settled there half a beat before it arrives
+    const nf = nextHoop();
+    if (nf !== aim) {
+      aim = nf;
+      wispFrom = { x: wispX, t: now };
+    }
+    const before = wispX;
+    if (nf) {
+      const u = clamp((now - wispFrom.t) / Math.max(0.3, nf.arriveAt - 0.5 - wispFrom.t), 0, 1);
+      wispX = wispFrom.x + (nf.tx - wispFrom.x) * smooth(u);
+    }
+    lean += (clamp((wispX - before) / dt / 900, -0.3, 0.3) - lean) * Math.min(1, dt * 6);
+    // Waves of light wake the sleepy fish as they pass
+    for (const w of waves) {
+      const r = w.size * ease(w.t / (w.slow ? 1.6 : 0.9));
+      if (!w.bloom) continue;
+      for (const s of sleepy) {
+        const [sx, sy] = sleepyPos(s);
+        if (Math.abs(Math.hypot(sx - w.x, sy - w.y) - r) < 30 * L.k) s.glow = 1;
+      }
+    }
+    for (const s of sleepy) s.glow = Math.max(0, s.glow - dt * 0.35);
+    const drag = Math.pow(0.15, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 10 * dt; // they sink slowly, like snow in the sea
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i];
+      b.t += dt;
+      b.y += b.vy * dt;
+      b.x += Math.sin(b.t * 6 + b.r) * 12 * dt;
+      if (b.t > 1.6) bubbles.splice(i, 1);
+    }
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    for (let i = waves.length - 1; i >= 0; i--) if ((waves[i].t += dt) > (waves[i].slow ? 1.6 : 0.9)) waves.splice(i, 1);
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+    if (whale) {
+      whale.flash = Math.max(0, whale.flash - dt * 2.5);
+      if ((now - whale.t0) / whale.beats > 1.05) whale = null;
+    } else if (api.started && !api.eng.auto && (whaleClock += dt) >= nextWhale) {
+      whale = { t0: now, beats: 24 / api.eng.beatSec, hits: 0, flash: 0 };
+      whaleClock = 0;
+      nextWhale = 50 + Math.random() * 20;
+      api.callout("A star whale!", W / 2, H * 0.24, "#9fd0ff", 1.1);
+    }
+  }
+  function sleepyPos(s) {
+    const span = H + 80;
+    const y = ((((s.y * span + clock * L.rise * 0.6 * s.d) % span) + span) % span) - 40;
+    return [s.x * W + Math.sin(clock * 0.3 + s.phase) * 30, y];
+  }
+
+  // 5. The look
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const k = L.k;
+    const frac = now - Math.floor(now);
+    const beat = 1 - frac;
+    const mood = MOODS[(api.tier - 1) % 4];
+    const tierC = api.color();
+    const scroll = now * L.climb; // how far the view has followed Wisp up
+
+    // Far: the star-sea, slow light rays, the stars through the water, the whale
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    ctx.globalAlpha = 0.6 + 0.25 * Math.sin(clock * 0.3);
+    ctx.globalCompositeOperation = "lighter";
+    S.draw(ctx, raysSprite(ctx), Math.sin(clock * 0.12) * 14, 0);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    S.glow(ctx, W * (0.5 + 0.2 * Math.sin(clock * 0.05)), H * 0.2, W * 0.8, mood.clouds[0], 0.1);
+    S.stars(ctx, W, H, 0);
+    drawAside(ctx);
+    if (whale) {
+      const [x, y] = whalePos(now);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(-1, 1); // she swims right to left, head first
+      ctx.globalAlpha = 0.85;
+      S.draw(ctx, whaleSprite(ctx), 0, Math.sin(clock * 0.8) * 4);
+      ctx.globalAlpha = 1;
+      WHALE_SPOTS.forEach(([sx, sy], i) => S.glow(ctx, sx * k, sy * k + Math.sin(clock * 0.8) * 4, (i < whale.hits ? 14 : 6) * k, i < whale.hits ? "#ffe08a" : "#9fd0ff", i < whale.hits ? 1 : 0.35 + 0.2 * Math.sin(clock * 3 + i)));
+      if (whale.flash) S.glow(ctx, 0, 0, 120 * k, "#ffffff", whale.flash * 0.3);
+      ctx.restore();
+    }
+
+    // Middle: kelp at two depths scrolling past, falling plankton, the sleepy fish
+    const kelp = (tall, x, depth, a) => {
+      const spr = kelpSprite(ctx, mood.kelp, tall);
+      const off = (scroll * depth) % H;
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.translate(x, 0);
+      ctx.transform(1, 0, Math.sin(clock * 0.6 + x) * 0.04, 1, 0, 0);
+      S.draw(ctx, spr, 0, off - H);
+      S.draw(ctx, spr, 0, off);
+      ctx.restore();
+    };
+    ctx.globalCompositeOperation = "lighter";
+    kelp(false, W * 0.08, 0.5, 0.6);
+    kelp(false, W * 0.94, 0.5, 0.6);
+    ctx.globalCompositeOperation = "source-over";
+    S.motes(ctx, W, H, now, [mood.clouds[0], mood.clouds[1], "#e8fbff"], { n: 18, size: 5, rise: -L.rise * 0.7, sway: 14, alpha: 0.4, seed: 4 });
+    for (const s of sleepy) {
+      const [x, y] = sleepyPos(s);
+      S.glow(ctx, x, y, 30 * k * s.d, KINDS[s.kind].color, 0.08 + 0.5 * s.glow);
+      drawFish(ctx, s.kind, x, y, { s: s.d * 1.2, dir: Math.cos(clock * 0.3 + s.phase) > 0 ? 1 : -1, on: s.glow, t: clock * 0.6 + s.phase, a: 0.45 + 0.5 * s.glow });
+    }
+
+    // Waves of light from Wisp
+    for (const w of waves) {
+      const e = ease(w.t / (w.slow ? 1.6 : 0.9));
+      S.softRing(ctx, w.x, w.y, 10 + w.size * e, w.color, (1 - e) * (w.bloom ? 0.9 : 0.5), w.bloom ? 2.4 : 1.2);
+      if (w.bloom) S.glow(ctx, w.x, w.y, w.size * e * 0.8, w.color, (1 - e) * 0.18);
+    }
+
+    // The far half of every hoop, behind Wisp (the near half is drawn after her)
+    for (const h of hoops) hoopArc(ctx, h, now, false);
+
+    // The school, behind Wisp
+    for (const m of school) {
+      const [x, y] = memberPos(m, clock);
+      const [x2] = memberPos(m, clock + 0.05);
+      const a = m.leaving ? Math.max(0, 1 - (clock - m.at) / 4) : 1;
+      S.glow(ctx, x, y, 30 * k, KINDS[m.kind].color, 0.3 * a);
+      drawFish(ctx, m.kind, x, y, { s: m.leaving ? 1.05 : 1.05 + 0.55 * (1 - smooth((clock - m.at) / 2.2)), dir: x2 >= x ? 1 : -1, on: 1, t: clock + m.slot, a });
+    }
+
+    // Wisp: tentacles trailing, the bell contracting on every beat (her swimming stroke) and
+    // squeezing harder on each pulse of yours
+    const pt = clock - pulseAt;
+    const tap = pt < 0.1 ? pt / 0.1 : Math.max(0, 1 - (pt - 0.1) / 0.35);
+    const stroke = frac < 0.1 ? frac / 0.1 : Math.max(0, 1 - (frac - 0.1) / 0.45);
+    const squeeze = Math.max(tap, stroke * 0.7);
+    const breathe = 0.03 * beat;
+    const wy = wispY + Math.sin(clock * 1.6) * 2 * k;
+    const c = api.started ? api.charge : 0;
+    const bellC = c >= 1 ? "#ffc46b" : tierC;
+    S.glow(ctx, wispX, wy, (70 + 30 * squeeze + 60 * c) * k, bellC, 0.22 + 0.2 * squeeze + 0.2 * c);
+    ctx.save();
+    ctx.translate(wispX, wy);
+    ctx.rotate(lean);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    for (let i = 0; i < 6; i++) {
+      const x0 = (i - 2.5) * 8 * k;
+      const len = (60 + (i % 3) * 16) * k * (1 - squeeze * 0.15);
+      for (const [w, a] of [[5, 0.12], [1.6, 0.6]]) {
+        ctx.strokeStyle = S.mix(bellC, "#ffffff", i % 2 ? 0.2 : 0.5);
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w * k;
+        ctx.beginPath();
+        ctx.moveTo(x0, 6 * k);
+        for (let j = 1; j <= 8; j++) {
+          const v = j / 8;
+          ctx.lineTo(x0 * (1 + v * 0.3) + Math.sin(clock * 2.4 - v * 4 + i) * 6 * k * v - lean * 40 * v, 6 * k + len * v);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.scale(1 + 0.12 * squeeze + breathe, 1 - 0.14 * squeeze - breathe * 0.5);
+    S.draw(ctx, bellSprite(ctx, S.tone(bellC)), 0, 0);
+    // Wisp's face: sleepy-content most of the time, a happy squint on every pulse
+    ctx.scale(k, k);
+    ctx.lineCap = "round";
+    ctx.strokeStyle = ctx.fillStyle = INK;
+    ctx.lineWidth = 1.4;
+    const blink = Math.floor(now) % 7 === 0 && frac < 0.14;
+    for (const s of [-1, 1]) {
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = "#ff6f9e";
+      ctx.beginPath();
+      ctx.ellipse(s * 13, -5, 3.4, 1.8, 0, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = INK;
+      ctx.beginPath();
+      if (tap > 0.2) {
+        ctx.arc(s * 7, -9, 2.6, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      } else if (blink) {
+        ctx.arc(s * 7, -11, 2.4, Math.PI * 0.15, Math.PI * 0.85);
+        ctx.stroke();
+      } else {
+        ctx.ellipse(s * 7, -10, 2.2, 2.8, 0, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(s * 7 - 0.8, -11.2, 0.95, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = INK;
+      }
+    }
+    ctx.beginPath();
+    if (tap > 0.2) {
+      ctx.arc(0, -5.5, 2.4, 0, Math.PI);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.arc(0, -7, 2, Math.PI * 0.25, Math.PI * 0.75);
+      ctx.stroke();
+    }
+    ctx.restore();
+    if (c > 0) {
+      // The held charge: a ring of light closing round Wisp, gold when full
+      ctx.globalCompositeOperation = "lighter";
+      ctx.strokeStyle = bellC;
+      ctx.lineCap = "round";
+      for (const [w, a] of [[8, 0.18], [2.2, 0.95]]) {
+        ctx.globalAlpha = a;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.arc(wispX, wy - 8 * k, 44 * k, -Math.PI / 2, -Math.PI / 2 + c * TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "butt";
+      ctx.globalCompositeOperation = "source-over";
+      if (c >= 1) S.twinkle(ctx, wispX + Math.cos(clock * 4) * 44 * k, wy - 8 * k + Math.sin(clock * 4) * 44 * k, 12, bellC, 1);
+    }
+
+    // The near half of every hoop, in front of Wisp, and the sleepy fish riding each one
+    for (const h of hoops) {
+      hoopArc(ctx, h, now, true);
+      if (h.state === "lit") continue;
+      const [hx, hy] = hoopPos(h, now);
+      const [x, y] = riderPos(h, hx, hy, now);
+      const a = h.state === "gone" ? Math.max(0, h.fade) : clamp((now - h.t0) * 2, 0, 1);
+      const wake = h.state === "gone" ? 0.3 : 0.3 + 0.4 * clamp((2.4 - (h.arriveAt - now)) / 2.4, 0, 1);
+      S.glow(ctx, x, y, 30 * k, KINDS[h.kind].color, 0.2 * a);
+      drawFish(ctx, h.kind, x, y, { s: 1.15, dir: -h.side, on: wake, t: clock * 1.3 + h.phase, a });
+    }
+
+    // Lighting moments: a soft flash and ring, sparkles sinking like snow, Wisp's bubbles
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.6);
+      S.glow(ctx, p.x, p.y, p.size * (0.6 + e), p.color, (1 - e) * 0.9);
+      S.glow(ctx, p.x, p.y, p.size * 0.3, "#ffffff", Math.max(0, 1 - e * 2.5));
+      S.softRing(ctx, p.x, p.y, p.size * 0.3 + p.size * 0.8 * ease(e), p.color, (1 - e) * 0.7, 1.3);
+    }
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, p.r * 2.2, p.color, a);
+      else S.glow(ctx, p.x, p.y, p.r * 1.6, p.color, a * 0.9);
+    }
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = "#e8fbff";
+    ctx.lineWidth = 1;
+    for (const b of bubbles) {
+      ctx.globalAlpha = Math.max(0, 1 - b.t / 1.6) * 0.6;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r * k, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+
+    // Near: tall kelp sliding by in front, and a few big out-of-focus motes
+    ctx.globalCompositeOperation = "lighter";
+    kelp(true, -W * 0.02, 1.2, 0.8);
+    kelp(true, W * 1.02, 1.2, 0.8);
+    ctx.globalCompositeOperation = "source-over";
+    S.motes(ctx, W, H, now, [tierC, "#e8fbff"], { n: 5, size: 24, rise: -L.rise * 1.6, sway: 26, alpha: 0.1, seed: 31 });
+  }
+
+  SpaceShell.mount({
+    key: "tidelight",
+    title: "Tidelight",
+    hint: "Pulse when the inner ring turns gold",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Shimmer", "Bloom", "Starsea"],
+    onPhrase: () => (loopAt = clock),
+    fidgetPoint: () => ({ x: wispX, y: wispY - 10 * L.k }),
+    resize: layout,
+    onBeat,
+    onFire,
+    onRelease,
+    autopilot,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>

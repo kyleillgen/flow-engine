@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<link rel="icon" href="../icon.png">
+<meta name="description" content="Deer bound between the pines at dusk. Your sights glide to each leap by themselves: tap at the top of the jump to tag it. A rhythm micro-game that finds your tempo.">
+<title>Leap</title>
+</head>
+<body>
+<script src="../engine/flow-engine.js"></script>
+<script src="../skins/hunt/hunt-skin.js"></script>
+<script src="../shell/space-shell.js"></script>
+<script>
+// Leap: deer bound across a woods clearing at dusk, on two lanes, near and far. Each one comes
+// out from behind the trunks at a run and leaps, and the top of the leap lands on a whole beat.
+// The sights glide to that point by themselves, so the whole game is the timing: tap at the top
+// and the deer is tagged (a flash, a little gold tag on its flank), then it bounds off happy with
+// big springy hops. A deer you miss just runs on. Nothing is lost.
+//
+// A deer's path is a function of the beat position: it runs at a steady pace, leaps from one beat
+// before the top to one beat after. Clean is ±0.3 beat (wider with assist, for deer not yet
+// spawned), perfect ±0.1.
+// Fidget (F): every press tags a deer; if none is close, one springs up right in the sights.
+// Hold then let go: a lantern flare of fireflies; a full charge also sends a shooting star and
+// sets every deer on screen hopping. Trick shots never score.
+(() => {
+  "use strict";
+
+  const S = HuntSkin;
+  const TAU = Math.PI * 2;
+  const PERFECT = 0.1;
+  const SIGHT = "#ff8a3d";
+  const GOLD = "#ffd76a";
+  // Coats: doe, fawn (spots), buck (little antlers)
+  const KINDS = [
+    { coat: "#c98a52", dark: "#7d4a2a", belly: "#f3dcb8", spots: false, antlers: false },
+    { coat: "#d69a5e", dark: "#8a5532", belly: "#f6e4c4", spots: true, antlers: false },
+    { coat: "#a8703e", dark: "#5e3820", belly: "#ead2ad", spots: false, antlers: true }
+  ];
+  const MOODS = [
+    { top: "#2a2350", mid: "#b0567a", low: "#ffb36b", glow: "#ffb36b", orb: "#ffd9a0", orbX: 0.72, orbY: 0.56, orbR: 0.07, stars: 0.2, seed: 3, far: ["#5a3450", "#3a2238"], near: ["#24142a", "#160c1a"], ground: ["#3a2232", "#140a12"], trunk: "#1c1018" },
+    { top: "#1c1a44", mid: "#7a3a6e", low: "#ff8a5c", glow: "#ff8a5c", orb: "#ffc08a", orbX: 0.3, orbY: 0.6, orbR: 0.08, stars: 0.5, seed: 11, far: ["#4a2846", "#301a34"], near: ["#1e1026", "#120a18"], ground: ["#2e1a2e", "#100810"], trunk: "#180c16" },
+    { top: "#0d1430", mid: "#2c3a6e", low: "#b07a8a", glow: "#f0b0b0", orb: "#fff0d0", orbX: 0.24, orbY: 0.22, orbR: 0.045, stars: 1, seed: 19, far: ["#2e3458", "#1e2240"], near: ["#121630", "#0a0c1e"], ground: ["#1a1c34", "#08080f"], trunk: "#0e0e1e" },
+    { top: "#070a1c", mid: "#18264a", low: "#3a4a6a", glow: "#bcd4ff", orb: "#f4f0dc", orbX: 0.76, orbY: 0.2, orbR: 0.06, stars: 1.4, seed: 23, far: ["#1e2a48", "#141c34"], near: ["#0c1224", "#070a16"], ground: ["#121a2c", "#05070c"], trunk: "#0a0e1a" }
+  ];
+  const FLIES = ["#ffe08a", "#fff1c0", "#ffc46b"];
+
+  let W = 0, H = 0, L = {};
+  let track = null; // api.track(): track.list holds { at, dir, lane, apex, kind, window, state: "wait" | "tag" | "gone", tagAt, joy }
+  let sparks = [], pops = [], flies = [], shooters = [];
+  let lastLane = 1;
+  let clock = 0, lastTier = 1, hits = 0;
+  let sky = { from: 1, to: 1, t: 1 };
+  let prevSpot = null; // where the sights last settled: { x, y, at }
+  let hopUntil = -99; // a full-charge flare sets every deer hopping until this beat
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (u) => 1 - Math.pow(1 - clamp(u, 0, 1), 3);
+  const smooth = (u) => u * u * (3 - 2 * u);
+  const frac = (v) => v - Math.floor(v);
+
+  function layout(api) {
+    W = api.W;
+    H = api.H;
+    const d = clamp(Math.min(W, H) * 0.2, 64, 130);
+    L = {
+      d,
+      k: d / 90,
+      horizon: H * 0.6,
+      lanes: [
+        { y: H * 0.68, k: 0.62, speed: W * 0.24, arc: H * 0.12 },
+        { y: H * 0.86, k: 1, speed: W * 0.3, arc: H * 0.17 }
+      ]
+    };
+  }
+
+  // Where a deer is at beat position `now`: a steady run, a leap that tops out on its beat, and
+  // after a tag, big springy hops away
+  function deerAt(m, now) {
+    const ln = L.lanes[m.lane];
+    const t = now - m.at;
+    const away = m.state === "tag" && t > 1;
+    const x = m.apex + m.dir * ln.speed * (away ? 1 + (t - 1) * 1.5 : t) ;
+    let y = ln.y, air = 0;
+    if (Math.abs(t) < 1) {
+      air = 1 - t * t;
+      y -= ln.arc * air;
+    } else if (away) {
+      air = Math.abs(Math.sin(Math.PI * (t - 1)));
+      y -= ln.arc * 0.55 * air;
+    } else if (now < hopUntil) {
+      air = Math.abs(Math.sin(Math.PI * 2 * now));
+      y -= ln.arc * 0.3 * air;
+    } else y -= Math.abs(Math.sin(TAU * now)) * 3 * ln.k;
+    return { x, y: y - L.d * ln.k * 0.42, ground: ln.y, air, t };
+  }
+  const apexOf = (m) => ({ x: m.apex, y: L.lanes[m.lane].y - L.lanes[m.lane].arc - L.d * L.lanes[m.lane].k * 0.42 });
+
+  // ---- Sprites --------------------------------------------------------------------------------
+  // An original deer, side on and facing right, in units of the body length d; "leap" stretches
+  // the legs out, "run" gathers them under
+  function deerSprite(ctx, kind, pose, d) {
+    const K = KINDS[kind];
+    d = Math.round(d);
+    return S.sprite(ctx, `deer${kind}${pose}${d}`, d * 2, d * 1.8, d, d * 1.05, (g) => {
+      g.scale(d, d);
+      g.lineCap = g.lineJoin = "round";
+      const legs = pose === "leap"
+        ? [[[0.26, 0.1], [0.52, 0.28], [0.74, 0.3]], [[0.2, 0.1], [0.46, 0.3], [0.66, 0.36]], [[-0.3, 0.1], [-0.52, 0.26], [-0.8, 0.3]], [[-0.24, 0.12], [-0.46, 0.3], [-0.72, 0.38]]]
+        : [[[0.26, 0.1], [0.34, 0.28], [0.26, 0.42]], [[0.18, 0.1], [0.14, 0.3], [0.2, 0.42]], [[-0.3, 0.1], [-0.4, 0.26], [-0.3, 0.42]], [[-0.22, 0.12], [-0.18, 0.3], [-0.26, 0.42]]];
+      legs.forEach((leg, i) => {
+        g.strokeStyle = i % 2 ? K.dark : S.mix(K.coat, K.dark, 0.35);
+        g.lineWidth = 0.065;
+        g.beginPath();
+        g.moveTo(leg[0][0], leg[0][1]);
+        g.quadraticCurveTo(leg[1][0], leg[1][1], leg[2][0], leg[2][1]);
+        g.stroke();
+        g.fillStyle = "#2a1810";
+        g.beginPath();
+        g.arc(leg[2][0], leg[2][1], 0.035, 0, TAU);
+        g.fill();
+      });
+      // tail, a white puff held up
+      g.fillStyle = "#fff6e6";
+      g.beginPath();
+      g.ellipse(-0.47, -0.13, 0.08, 0.05, -0.7, 0, TAU);
+      g.fill();
+      const body = g.createLinearGradient(0, -0.3, 0, 0.22);
+      body.addColorStop(0, S.mix(K.coat, "#ffd9a0", 0.25));
+      body.addColorStop(0.55, K.coat);
+      body.addColorStop(1, K.dark);
+      g.fillStyle = body;
+      g.beginPath();
+      g.ellipse(0, 0, 0.42, 0.19, 0, 0, TAU);
+      g.ellipse(0.24, -0.02, 0.2, 0.2, 0, 0, TAU);
+      g.ellipse(-0.27, -0.03, 0.19, 0.19, 0, 0, TAU);
+      g.fill();
+      // neck and head
+      g.beginPath();
+      g.moveTo(0.18, -0.1);
+      g.quadraticCurveTo(0.34, -0.36, 0.44, -0.52);
+      g.lineTo(0.58, -0.44);
+      g.quadraticCurveTo(0.44, -0.2, 0.42, 0.02);
+      g.closePath();
+      g.fill();
+      g.beginPath();
+      g.ellipse(0.58, -0.5, 0.14, 0.09, 0.35, 0, TAU);
+      g.fill();
+      g.fillStyle = K.belly;
+      g.beginPath();
+      g.ellipse(0.02, 0.1, 0.3, 0.07, 0, 0, TAU);
+      g.fill();
+      g.beginPath();
+      g.ellipse(0.7, -0.45, 0.05, 0.04, 0.35, 0, TAU);
+      g.fill();
+      if (K.spots) {
+        g.fillStyle = "rgba(255,246,226,0.85)";
+        for (const [x, y, r] of [[-0.2, -0.1, 0.03], [-0.05, -0.12, 0.028], [0.1, -0.1, 0.03], [-0.12, -0.02, 0.022], [0.04, -0.03, 0.025], [-0.3, -0.06, 0.022]]) {
+          g.beginPath();
+          g.arc(x, y, r, 0, TAU);
+          g.fill();
+        }
+      }
+      // ear, eye, nose
+      g.fillStyle = K.coat;
+      g.beginPath();
+      g.ellipse(0.47, -0.62, 0.1, 0.045, -0.7, 0, TAU);
+      g.fill();
+      g.fillStyle = "#f2b8a0";
+      g.beginPath();
+      g.ellipse(0.475, -0.615, 0.06, 0.022, -0.7, 0, TAU);
+      g.fill();
+      if (K.antlers) {
+        g.strokeStyle = "#f0dcb4";
+        g.lineWidth = 0.035;
+        g.beginPath();
+        g.moveTo(0.52, -0.58);
+        g.quadraticCurveTo(0.5, -0.74, 0.6, -0.82);
+        g.moveTo(0.51, -0.7);
+        g.lineTo(0.44, -0.78);
+        g.moveTo(0.56, -0.57);
+        g.quadraticCurveTo(0.58, -0.7, 0.68, -0.76);
+        g.stroke();
+      }
+      g.fillStyle = "#1e120c";
+      g.beginPath();
+      g.arc(0.6, -0.53, 0.028, 0, TAU);
+      g.fill();
+      g.beginPath();
+      g.arc(0.73, -0.46, 0.022, 0, TAU);
+      g.fill();
+      g.fillStyle = "#ffffff";
+      g.beginPath();
+      g.arc(0.592, -0.54, 0.009, 0, TAU);
+      g.fill();
+      // a line of dusk light along the back
+      g.strokeStyle = "rgba(255,214,150,0.55)";
+      g.lineWidth = 0.018;
+      g.beginPath();
+      g.ellipse(0, 0, 0.42, 0.19, 0, Math.PI * 1.15, Math.PI * 1.85);
+      g.stroke();
+    });
+  }
+  // The tag: a little gold star on a ribbon, baked with its glow
+  function tagSprite(ctx) {
+    return S.sprite(ctx, "deertag", 48, 48, 24, 24, (g) =>
+      S.haloed(g, GOLD, (g, c, core) => {
+        g.fillStyle = c;
+        g.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 3.4 : 8;
+          g.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        g.closePath();
+        g.fill();
+      })
+    );
+  }
+
+  function skyLayer(ctx, tier, a) {
+    const m = MOODS[(tier - 1) % 4];
+    ctx.globalAlpha = a;
+    S.layer(ctx, "leap" + tier, W, H, (g) => {
+      S.duskSky(g, W, H, m);
+      const lin = g.createLinearGradient(0, L.horizon, 0, H);
+      lin.addColorStop(0, m.ground[0]);
+      lin.addColorStop(1, m.ground[1]);
+      g.fillStyle = lin;
+      g.fillRect(0, L.horizon, W, H - L.horizon);
+      // two worn lanes across the clearing, catching a little sky light
+      for (const ln of L.lanes) {
+        const lg = g.createLinearGradient(0, ln.y - 6, 0, ln.y + 10);
+        lg.addColorStop(0, S.rgba(m.glow, 0));
+        lg.addColorStop(0.5, S.rgba(m.glow, 0.07));
+        lg.addColorStop(1, S.rgba(m.glow, 0));
+        g.fillStyle = lg;
+        g.fillRect(0, ln.y - 6, W, 16);
+      }
+      // tufts of grass along the near lane and the bottom edge
+      const r = S.rng(m.seed + 100);
+      g.fillStyle = m.ground[1];
+      for (const [y0, hgt, n] of [[L.lanes[1].y + 8, H * 0.03, Math.round(W / 14)], [H, H * 0.06, Math.round(W / 9)]])
+        for (let i = 0; i < n; i++) {
+          const x = r() * W, h = hgt * (0.5 + r()), lean = (r() - 0.5) * h * 0.6;
+          g.beginPath();
+          g.moveTo(x - 4, y0);
+          g.quadraticCurveTo(x - 2, y0 - h * 0.5, x + lean, y0 - h);
+          g.quadraticCurveTo(x + 1, y0 - h * 0.5, x + 4, y0);
+          g.fill();
+        }
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  const settle = (m) => {
+    const p = apexOf(m);
+    if (!prevSpot || m.at >= prevSpot.at) prevSpot = { x: p.x, y: p.y, at: m.at };
+  };
+
+  // ---- Now and then, behind the play -----------------------------------------------------------
+  // One small thing at a time, every few seconds, a different one each time; none of it is a
+  // target and none of it crosses where the sights go
+  const across = (u, e, pad) => (e.dir > 0 ? -pad + u * (W + 2 * pad) : W + pad - u * (W + 2 * pad));
+  const moodNow = () => MOODS[(lastTier - 1) % 4];
+  const amb = S.ambience([
+    // a fox trots along under the far trees
+    { dur: 8, draw: (ctx, u, e) => S.critter(ctx, "fox", across(u, e, 40), L.horizon + H * 0.02, L.d * 0.12, u * 8, S.mix(moodNow().far[1], "#000000", 0.3), e.dir) },
+    // a few birds going home across the sky
+    { dur: 7, draw: (ctx, u, e) => {
+      for (let i = 0; i < 5; i++) S.critter(ctx, "bird", across(u, e, 90) - e.dir * Math.abs(i - 2) * 14 * L.k, H * (0.12 + e.r * 0.14) + (i - 2) * 7 * L.k, 6 * L.k, u * 7 + i, moodNow().far[1], e.dir);
+    } },
+    // a rabbit hops along the far edge of the clearing
+    { dur: 6, draw: (ctx, u, e) => S.critter(ctx, "rabbit", across(u, e, 30), L.horizon + H * 0.04, L.d * 0.08, u * 6, S.mix(moodNow().far[1], "#000000", 0.35), e.dir) },
+    // two bats out early
+    { dur: 5, draw: (ctx, u, e) => {
+      for (let i = 0; i < 2; i++) S.critter(ctx, "bat", across(u, e, 40) + i * 30 * L.k, H * (0.16 + e.r * 0.12) + Math.sin(u * 20 + i * 2) * 10 * L.k, 7 * L.k, u * 5 + i, moodNow().far[1], e.dir);
+    } },
+    // a shooting star
+    { dur: 1.5, draw: (ctx, u, e) => {
+      if (e.fired) return;
+      e.fired = true;
+      shooters.push({ x: W * (0.5 + e.r * 0.5), y: H * 0.06, t: 0 });
+    } }
+  ]);
+
+  // ---- Effects --------------------------------------------------------------------------------
+  function tag(api, m, perfect, ghost) {
+    const now = api.eng.beatPos();
+    m.state = "tag";
+    settle(m);
+    m.tagAt = now;
+    const p = deerAt(m, now);
+    const k = L.lanes[m.lane].k;
+    pops.push({ x: p.x, y: p.y, t: 0, size: L.d * k * (perfect ? 1.4 : 1), color: perfect ? GOLD : "#fff1dc" });
+    for (let i = 0; i < (perfect ? 14 : 9) && sparks.length < 160; i++) {
+      const a = Math.random() * TAU, v = 60 + Math.random() * 120, life = 0.6 + Math.random() * 0.5;
+      sparks.push({ x: p.x, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 40, life, max: life, color: i % 3 ? GOLD : "#fff1dc", star: i % 3 === 0 });
+    }
+    if (perfect && !ghost) api.ring(p.x, p.y, GOLD, L.d * k * 1.2);
+    return { x: p.x, y: p.y - L.d * k * 0.6 }; // where the shell pops the points
+  }
+  function flare(x, y, n, spread) {
+    for (let i = 0; i < n && flies.length < 90; i++) {
+      const a = Math.random() * TAU, v = spread * (0.3 + Math.random());
+      flies.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 20, life: 1.6 + Math.random() * 1.4, max: 3, seed: Math.random() * 10, color: FLIES[i % 3] });
+    }
+  }
+
+  // ---- The five questions ---------------------------------------------------------------------
+  // 1. On the beat: a deer whose leap tops out `ahead` beats from now, two or more after the last
+  function spawn() {
+    const lane = Math.random() < 0.6 ? 1 - lastLane : lastLane;
+    lastLane = lane;
+    return { dir: Math.random() < 0.5 ? 1 : -1, lane, apex: W * (0.36 + Math.random() * 0.28), kind: Math.floor(Math.random() * KINDS.length), tagAt: -99 };
+  }
+
+  const waiting = (now) => track.list.filter((m) => m.state === "wait" && now < m.at + m.window);
+
+  // 3. A tap: the tracker tags whatever is in reach. In Fidget, with nothing within 1.2 beats,
+  // one springs up right in the sights instead (from the tracker's empty())
+  function springUp(api) {
+    if (track.list.length >= 12) return;
+    const now = api.eng.beatPos();
+    const sp = sights(now);
+    const lane = sp.y > (L.lanes[0].y + L.lanes[1].y) / 2 - L.lanes[1].arc ? 1 : 0;
+    const m = { at: now, dir: Math.random() < 0.5 ? 1 : -1, lane, apex: sp.x, kind: Math.floor(Math.random() * KINDS.length), state: "wait", tagAt: -99, window: 0 };
+    track.list.push(m);
+    tag(api, m, false, true);
+  }
+
+  // The arrive-on-the-beat loop is the shell's: it spawns, judges, scores, misses and plays
+  // autopilot, and the game says what arrives and how a tag looks
+  function setup(api) {
+    track = api.track({
+      spawn,
+      ready: (m, now) => Math.abs(m.at - now) < 1.2,
+      note: (m) => 0.2 + m.lane * 0.5,
+      hit: (m, { perfect, ghost }) => {
+        const at = tag(api, m, perfect, ghost);
+        if (!ghost && ++hits === 16) api.hint("flare", 'Hold <span class="pb-kbd">Space</span>, let go: a lantern flare');
+        return at;
+      },
+      miss: (m, counted) => {
+        m.state = "gone";
+        settle(m);
+        if (counted) api.hint("top", "Tap at the top of the leap");
+      },
+      empty: () => {
+        if (api.style === "fidget") return springUp(api);
+        const sp = sights(api.eng.beatPos());
+        pops.push({ x: sp.x, y: sp.y, t: 0, size: L.d * 0.5, color: SIGHT });
+      },
+      perfect: PERFECT,
+      cue: false, // the sights carry the timing ring, gold on the perfect beat (see draw)
+      keep: (m, now) => {
+        const p = deerAt(m, now);
+        return !(now > m.at + 1 && (p.x < -L.d * 1.5 || p.x > W + L.d * 1.5));
+      } // until it's off screen
+    });
+  }
+
+  // A hold then release: fireflies burst from the sights; a full charge adds a shooting star
+  // and sets every deer hopping
+  function onRelease(api, held) {
+    const c = api.chargeOf(held);
+    if (c <= 0) return;
+    const now = api.eng.beatPos();
+    const sp = sights(now);
+    flare(sp.x, sp.y, Math.round(10 + c * 20), 40 + c * 120);
+    if (c >= 1) {
+      shooters.push({ x: W * (0.6 + Math.random() * 0.4), y: H * 0.08, t: 0 });
+      hopUntil = now + 4;
+      api.callout("Firefly flare", W / 2, H * 0.3, GOLD, 1.2);
+      api.eng.chime();
+    }
+  }
+
+  // The sights glide from the last leap to the next and settle a moment before the top
+  function sights(now) {
+    let next = null;
+    for (const m of track.list) {
+      if (m.state === "wait" && now < m.at + m.window) {
+        if (!next || m.at < next.at) next = m;
+      }
+    }
+    const from = prevSpot || { x: W * 0.5, y: (L.lanes[0].y + L.lanes[1].y) / 2 - L.lanes[1].arc };
+    if (!next) return { x: from.x, y: from.y, lock: 0, next: null };
+    const to = apexOf(next);
+    const start = Math.max(prevSpot ? prevSpot.at : -1e9, next.at - 1.8), end = next.at - 0.35;
+    const u = end > start ? smooth(clamp((now - start) / (end - start), 0, 1)) : 1;
+    return { x: from.x + (to.x - from.x) * u, y: from.y + (to.y - from.y) * u, lock: clamp(1 - Math.abs(next.at - now) / 1.2, 0, 1), next };
+  }
+
+  // 2. Movement and misses
+  function update(dt, api) {
+    if (!W) return;
+    const now = api.eng.beatPos();
+    clock += dt;
+    amb.update(dt);
+    const drag = Math.pow(0.2, dt);
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.vx *= drag;
+      p.vy = p.vy * drag + 30 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if ((p.life -= dt) <= 0) sparks.splice(i, 1);
+    }
+    const fdrag = Math.pow(0.4, dt);
+    for (let i = flies.length - 1; i >= 0; i--) {
+      const f = flies[i];
+      f.vx = f.vx * fdrag + Math.sin(clock * 2 + f.seed) * 20 * dt;
+      f.vy = f.vy * fdrag - 8 * dt;
+      f.x += f.vx * dt;
+      f.y += f.vy * dt;
+      if ((f.life -= dt) <= 0) flies.splice(i, 1);
+    }
+    for (let i = pops.length - 1; i >= 0; i--) if ((pops[i].t += dt) > 0.6) pops.splice(i, 1);
+    for (let i = shooters.length - 1; i >= 0; i--) if ((shooters[i].t += dt) > 1.4) shooters.splice(i, 1);
+    if (api.tier !== lastTier) sky = { from: sky.t < 1 ? sky.to : lastTier, to: api.tier, t: 0 };
+    lastTier = api.tier;
+    sky.t = Math.min(1, sky.t + dt / 2.5);
+  }
+
+  // 5. The look
+  function drawDeer(ctx, m, now) {
+    const p = deerAt(m, now);
+    const ln = L.lanes[m.lane];
+    const d = L.d * ln.k;
+    if (p.x < -d * 1.2 || p.x > W + d * 1.2) return;
+    // a soft shadow on the ground that shrinks as the deer rises
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    ctx.beginPath();
+    ctx.ellipse(p.x, ln.y + 2, d * 0.4 * (1 - p.air * 0.5), d * 0.06 * (1 - p.air * 0.5), 0, 0, TAU);
+    ctx.fill();
+    const leaping = p.air > 0.25 || (m.state === "tag" && p.t > 1 && p.air > 0.1);
+    const s = deerSprite(ctx, m.kind, leaping ? "leap" : "run", d);
+    // tilt with the arc: nose up on the way up, down on the way down
+    const tilt = Math.abs(p.t) < 1 ? -p.t * 0.22 : 0;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.scale(m.dir, 1);
+    ctx.rotate(tilt);
+    S.draw(ctx, s, 0, 0);
+    if (m.state === "tag") {
+      const since = now - m.tagAt;
+      const grow = clamp(since * 4, 0, 1);
+      S.add(ctx, tagSprite(ctx), -d * 0.12, -d * 0.06, (d / 90) * (0.6 + 0.6 * grow + 0.4 * Math.max(0, 1 - since * 2)), 1);
+    }
+    ctx.restore();
+    if (m.state === "tag" && p.t > 0.3) {
+      // a happy little trail of sparkles off the tail
+      for (let i = 0; i < 3; i++) {
+        const q = deerAt(m, now - 0.06 * (i + 1));
+        S.twinkle(ctx, q.x - m.dir * d * 0.45, q.y - d * 0.1, d * 0.12 * (1 - i * 0.25), GOLD, 0.6 - i * 0.15);
+      }
+    }
+  }
+
+  function draw(ctx, api) {
+    const now = api.eng.beatPos();
+    const mood = MOODS[(api.tier - 1) % 4];
+    if (sky.t < 1) skyLayer(ctx, sky.from, 1);
+    skyLayer(ctx, sky.to, sky.t < 1 ? ease(sky.t) : 1);
+    for (const s of shooters) {
+      const trail = [];
+      for (let j = 0; j < 8; j++) trail.push([s.x - (s.t - j * 0.03) * W * 0.7, s.y + (s.t - j * 0.03) * H * 0.25]);
+      S.streak(ctx, trail, 3, "#fff1c0");
+    }
+    S.pines(ctx, "far" + api.tier, W, L.horizon, H * 0.16, now * W * 0.004, [S.mix(mood.far[0], mood.low, 0.25), mood.far[0]], null, 3, 26);
+    S.pines(ctx, "mid" + api.tier, W, L.horizon + H * 0.012, H * 0.24, now * W * 0.008, mood.far, mood.glow, 5, 15);
+    amb.draw(ctx);
+    // the far lane, then a row of thin trunks between the lanes
+    for (const m of track.list) if (m.lane === 0) drawDeer(ctx, m, now);
+    for (const [fx, fw] of [[0.2, 0.022], [0.57, 0.018], [0.83, 0.026]]) S.trunk(ctx, W * fx, L.lanes[0].y + H * 0.05, Math.max(8, W * fw), L.lanes[0].y + H * 0.05, mood.near[0], mood.glow);
+    S.motes(ctx, W, H, clock, FLIES, { n: 10, size: 6, rise: 6, sway: 22, par: 0, alpha: 0.5, seed: 9 });
+    for (const m of track.list) if (m.lane === 1) drawDeer(ctx, m, now);
+    // two big trunks framing the clearing, which the deer run out from behind
+    S.trunk(ctx, W * 0.03, H, Math.max(22, W * 0.06), H, mood.trunk, mood.glow);
+    S.trunk(ctx, W * 0.97, H, Math.max(22, W * 0.06), H, mood.trunk, mood.glow);
+
+    // The sights
+    const sp = sights(now);
+    const perfectNow = sp.next && Math.abs(sp.next.at - now) < PERFECT;
+    S.reticle(ctx, sp.x, sp.y, L.d * 0.42, perfectNow ? GOLD : SIGHT, sp.lock, api.started ? 1 : 0.8);
+    if (sp.next) {
+      const left = sp.next.at - now;
+      if (left < 1.5 && left > -sp.next.window) S.softRing(ctx, sp.x, sp.y, L.d * 0.2 + Math.max(0, left) * L.d * 0.8, perfectNow ? GOLD : SIGHT, Math.min(1, (1.5 - left) / 0.5) * 0.8, 1.2);
+    }
+    api.drawCharge(sp.x, sp.y, L.d * 0.62, SIGHT, GOLD);
+
+    for (const p of pops) {
+      const e = Math.min(1, p.t / 0.5);
+      S.glow(ctx, p.x, p.y, p.size * (0.6 + e), p.color, (1 - e) * 0.8);
+      S.softRing(ctx, p.x, p.y, p.size * 0.3 + p.size * 0.6 * ease(e), p.color, (1 - e) * 0.8, 1.4);
+    }
+    for (const p of sparks) {
+      const a = p.life / p.max;
+      if (p.star) S.twinkle(ctx, p.x, p.y, 7 * L.k, p.color, a);
+      else S.glow(ctx, p.x, p.y, 5 * L.k, p.color, a);
+    }
+    for (const f of flies) {
+      const a = Math.min(1, f.life) * (0.6 + 0.4 * Math.sin(clock * 8 + f.seed * 5));
+      S.glow(ctx, f.x, f.y, 9 * L.k, f.color, a);
+    }
+  }
+
+  SpaceShell.mount({
+    skin: S,
+    key: "leap",
+    title: "Leap",
+    hint: "Tap at the top of each deer's leap",
+    engine: {},
+    tierNames: ["Finding your rhythm", "Golden hour", "Blue hour", "Moonrise"],
+    fidgetPoint: (api) => {
+      const sp = sights(api.eng.beatPos());
+      return { x: sp.x, y: sp.y };
+    },
+    resize: layout,
+    setup,
+    onFire: () => track.fire(),
+    onRelease,
+    update,
+    draw
+  });
+})();
+</script>
+</body>
+</html>
