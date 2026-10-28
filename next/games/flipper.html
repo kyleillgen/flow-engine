@@ -141,8 +141,7 @@
     // One candidate flight: launch at a given aim and let it ricochet until the steer takes over
     function fly(aim) {
       const a = -Math.PI / 2 + (x < cx ? 0.2 : -0.2) + aim * 0.5 + (Math.random() - 0.5) * 0.16;
-      // Up the table, but no higher than it can come back down from in the time it has
-      const v0 = Math.sqrt(2 * g * Math.min(Math.max(90, y - TOP) * 0.88, (g * secs * secs) / 8));
+      const v0 = Math.sqrt(2 * g * Math.max(90, y - TOP) * 0.88);
       let vx = Math.cos(a) * v0, vy = Math.sin(a) * v0;
       const knocked = new Set();
       const samples = [{ x, y, s: 0 }];
