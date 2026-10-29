@@ -10,7 +10,7 @@
 // runtime that ships with Windows 11.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { cartFiles, unpackTo } from "../carts/cart.mjs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -30,7 +30,7 @@ const RES = join(HERE, "resources");
 // launcher reads the list from resources/carts/index.js.
 const ROOT = join(HERE, "..");
 const FIRST = "space"; // the cartridge the shelf starts with
-function syncCarts() {
+export function syncCarts({ dropped: withDropped = true } = {}) {
   const out = join(RES, "carts");
   rmSync(out, { recursive: true, force: true });
   // Copies from before cartridges, no longer used
@@ -46,7 +46,7 @@ function syncCarts() {
     carts.set(cart.id, cart);
   }
   const dropped = join(homedir(), ".flow-pocket", "carts");
-  if (existsSync(dropped)) {
+  if (withDropped && existsSync(dropped)) {
     for (const f of readdirSync(dropped).filter((f) => f.endsWith(".cart"))) {
       try {
         const tmp = join(out, ".unpack");
@@ -81,32 +81,35 @@ async function download(url, to) {
   console.log(`${url}\n  -> ${to} (${(buf.length / 1e6).toFixed(2)} MB, sha256 ${createHash("sha256").update(buf).digest("hex")})`);
 }
 
-async function main() {
-  if (!process.argv.includes("--sync")) {
-    mkdirSync(BIN, { recursive: true });
-    if (!existsSync(EXE)) {
-      const zip = join(BIN, `neutralinojs-v${VERSION}.zip`);
-      if (!existsSync(zip)) {
-        await download(`https://github.com/neutralinojs/neutralinojs/releases/download/v${VERSION}/neutralinojs-v${VERSION}.zip`, zip);
-      }
-      // Windows' own tar (bsdtar, Windows 10+) reads zips; a Git Bash tar on PATH would
-      // mistake "D:" for a remote host, so call the system one by full path
-      const winTar = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
-      execFileSync(existsSync(winTar) ? winTar : "tar", ["-xf", zip, "-C", BIN, "neutralino-win_x64.exe"]);
-      renameSync(join(BIN, "neutralino-win_x64.exe"), EXE);
-      rmSync(zip);
-      console.log("extracted flow-pocket.exe");
+// The runtime and its client library, downloaded once
+export async function fetchRuntime() {
+  mkdirSync(BIN, { recursive: true });
+  if (!existsSync(EXE)) {
+    const zip = join(BIN, `neutralinojs-v${VERSION}.zip`);
+    if (!existsSync(zip)) {
+      await download(`https://github.com/neutralinojs/neutralinojs/releases/download/v${VERSION}/neutralinojs-v${VERSION}.zip`, zip);
     }
-    mkdirSync(join(RES, "js"), { recursive: true });
-    const client = join(RES, "js", "neutralino.js");
-    if (!existsSync(client)) {
-      await download(`https://github.com/neutralinojs/neutralino.js/releases/download/v${VERSION}/neutralino.js`, client);
-    }
+    // Windows' own tar (bsdtar, Windows 10+) reads zips; a Git Bash tar on PATH would
+    // mistake "D:" for a remote host, so call the system one by full path
+    const winTar = join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+    execFileSync(existsSync(winTar) ? winTar : "tar", ["-xf", zip, "-C", BIN, "neutralino-win_x64.exe"]);
+    renameSync(join(BIN, "neutralino-win_x64.exe"), EXE);
+    rmSync(zip);
+    console.log("extracted flow-pocket.exe");
   }
-  syncCarts();
+  mkdirSync(join(RES, "js"), { recursive: true });
+  const client = join(RES, "js", "neutralino.js");
+  if (!existsSync(client)) {
+    await download(`https://github.com/neutralinojs/neutralino.js/releases/download/v${VERSION}/neutralino.js`, client);
+  }
 }
 
-main().catch((e) => {
-  console.error(e.message);
-  process.exit(1);
-});
+// Run directly (package.mjs imports it instead)
+if (process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === resolve(process.argv[1]).toLowerCase()) {
+  (process.argv.includes("--sync") ? Promise.resolve() : fetchRuntime())
+    .then(() => syncCarts())
+    .catch((e) => {
+      console.error(e.message);
+      process.exit(1);
+    });
+}

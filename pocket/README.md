@@ -2,9 +2,13 @@
 
 A small always-on-top desktop window for playing the flow-engine games beside your editor while code builds or an AI assistant works, without running a browser.
 
-It runs on [Neutralinojs](https://neutralino.js.org), which uses the WebView2 engine already built into Windows 11 instead of bundling a browser. It's one borderless window with no tabs or extensions. Games draw at 0.75× resolution and pause their audio while hidden, and the launcher passes WebView2 a few options: one renderer process, GPU work in the main process, no background networking. Games draw at full speed only while you play; when one is playing itself, paused or left alone for a few seconds it drops to 20 frames a second. Measured on the author's machine with a game playing itself, the whole app used about 29% of one CPU core and 139 MB of private memory (350 MB working set) across 6 processes. Nothing loads from the network: the games, engine and fonts all ship inside it.
+It runs on [Neutralinojs](https://neutralino.js.org), which uses the WebView2 engine already built into Windows 11 instead of bundling a browser. It's one borderless window with no tabs or extensions. Games draw at 0.75× resolution and pause their audio while hidden, and the launcher passes WebView2 a few options: one renderer process, GPU work in the main process, no background networking. Games draw at 30 frames a second while you play and 10 while one plays itself, and the music rests after a minute untouched. Measured on the author's machine with a game playing itself, the whole app used about 9% of one CPU core and 128 MB of private memory. Nothing loads from the network: the games, engine and fonts all ship inside it.
 
-## Set up (once)
+## Download
+
+Get [Flow-Pocket-windows.zip](https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip) (2 MB), unzip it anywhere and double-click **Flow Pocket.cmd**. It has the runtime and all six cartridges; nothing else is needed. The first time, Windows says "Windows protected your PC" because the exe isn't code-signed: click **More info**, then **Run anyway**.
+
+## Or set it up from a clone
 
 ```bash
 node pocket/setup.mjs
@@ -32,7 +36,7 @@ Tell the pocket when Claude starts, finishes or needs you:
 - **Claude finishes:** the lamp blinks green, a chime plays and a "Claude is done" callout appears. The game goes to autopilot and the music winds down, so there's a natural place to switch back.
 - **Claude needs you** (a permission prompt or a question): the same cue, in red.
 
-Add these hooks to `~/.claude/settings.json`, merged into any `hooks` you already have (use the path to your own clone):
+Add these hooks to `~/.claude/settings.json`, merged into any `hooks` you already have (use the path to your unzipped folder or your clone; in the download, `signal.mjs` sits beside `Flow Pocket.cmd`):
 
 ```json
 {
@@ -63,6 +67,7 @@ It summarises each game and flags anything out of range, naming the knob to adju
 | `neutralino.config.json` | Window settings, a fixed local port (41823, below the ranges Windows reserves for Hyper-V and WSL) and the short list of native calls the app may use |
 | `resources/index.html` | The launcher: game switcher, dock, pin, Claude lamp, and the game in a frame |
 | `setup.mjs` | Downloads the runtime and installs the cartridges |
+| `package.mjs` | Builds the download, `dist/Flow-Pocket-windows.zip` |
 | `signal.mjs` | Writes the signal for Claude Code hooks or build scripts |
 | `report.mjs` | The tuning report from `sessions.log` |
 | `Flow Pocket.cmd` | Starts the app |

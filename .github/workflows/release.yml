@@ -1,0 +1,26 @@
+# A release: push a tag like v1.0.1 and this attaches the one-download Windows pocket and each
+# cartridge as a .cart file to a GitHub release of that name.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flow Pocket for Windows
+        run: node pocket/package.mjs
+      - name: Cartridges
+        shell: bash
+        run: for d in carts/*/; do node carts/cart.mjs pack "$(basename "$d")"; done
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/Flow-Pocket-windows.zip dist/*.cart --title "Flow Engine $GITHUB_REF_NAME" --generate-notes
