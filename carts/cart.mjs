@@ -34,7 +34,10 @@ import { createRequire } from "node:module";
 import zlib from "node:zlib";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const BUDGET = { bytes: 512 * 1024, drawMs: 4, heapMB: 48, games: 6 };
+// idleCpu: percent of one core for a game's page and GPU work while it plays itself in the
+// pocket's frame, measured headless. Every game measured 7-10 when this was set; the real
+// pocket, untouched, came to about 9% of a core in all. See docs/build-on-the-engine.md.
+const BUDGET = { bytes: 512 * 1024, drawMs: 4, heapMB: 48, games: 6, idleCpu: 15 };
 const ALWAYS = ["engine/flow-engine.js", "icon.png"];
 const FORBIDDEN_EXT = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".ogg", ".wav", ".m4a", ".mp4", ".webm"];
 
@@ -264,14 +267,41 @@ async function play(id) {
     if (!fps.length) problems.push("no frame reports (does it load the shell and call SpaceShell.mount / FlowShell.mount?)");
     if (draw > BUDGET.drawMs) problems.push(`drawing ${draw.toFixed(2)} ms a frame, over ${BUDGET.drawMs} ms`);
     if (heap > BUDGET.heapMB) problems.push(`heap ${heap.toFixed(0)} MB, over ${BUDGET.heapMB} MB`);
-    // Only the drawing time and heap are judged; a headless frame rate swings from run to run
-    console.log(`${problems.length ? "FAIL" : "ok  "} ${g.file}: draw ${draw.toFixed(2)} ms a frame, heap ${heap.toFixed(0)} MB (headless; frame rate ${rate.toFixed(0)}, not judged)`);
+    await page.close();
+    const cpu = await idleCpu(browser, `${base}/${g.file}?pocket=1`);
+    if (cpu > BUDGET.idleCpu) problems.push(`CPU ${cpu.toFixed(0)}% of a core while it plays itself, over ${BUDGET.idleCpu}%`);
+    // Drawing time, heap and idle CPU are judged; a headless frame rate swings from run to run
+    console.log(`${problems.length ? "FAIL" : "ok  "} ${g.file}: draw ${draw.toFixed(2)} ms a frame, heap ${heap.toFixed(0)} MB, CPU ${cpu.toFixed(0)}% of a core untouched (headless; frame rate ${rate.toFixed(0)}, not judged)`);
     for (const p of problems) console.log("     " + p);
     if (problems.length) ok = false;
-    await page.close();
   }
   await close();
   return ok;
+}
+
+// The game's CPU, as a percent of one core, while it plays itself at the pocket's size: start
+// it, hand it to autopilot, let it settle, then read the page's and the GPU's CPU time over 6 s.
+// The browser's own processes are left out (they have busy moments of their own, like indexing),
+// and the best of two readings is kept.
+async function idleCpu(browser, url) {
+  const cdp = await browser.target().createCDPSession();
+  const total = async () => (await cdp.send("SystemInfo.getProcessInfo")).processInfo.filter((p) => p.type === "renderer" || p.type === "GPU").reduce((s, p) => s + p.cpuTime, 0);
+  const page = await browser.newPage();
+  await page.setViewport({ width: 372, height: 330, deviceScaleFactor: 1 });
+  await page.goto(url);
+  await sleep(1500);
+  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
+  await sleep(2500);
+  const readings = [];
+  for (let i = 0; i < 2; i++) {
+    const a = await total(), t0 = Date.now();
+    await sleep(6000);
+    readings.push(((await total()) - a) / ((Date.now() - t0) / 1000) * 100);
+  }
+  await page.close();
+  await cdp.detach();
+  return Math.min(...readings);
 }
 
 // ---- shots: what each game looks like, for reviewing art ---------------------------------------

@@ -80,7 +80,9 @@ The occasional flow check (`flowCheck: true`) is the one piece of UI the engine 
 
 `FlowEngine.createController()`, `FlowEngine.createPacer()` and `FlowEngine.createStyle()` are the pure state machines underneath, with no audio and no DOM. The controller enforces the autopilot rule: `score` and `clip` are ignored while autopilot is on. Its contract tests are in `tests/flow-engine.test.cjs` (run `node --test tests/flow-engine.test.cjs`). They cover tempo locking for steady tappers, half- and double-time folding, typing rhythms with pauses, slow re-syncs (no more than 1.5% per bar), autopilot (including the rule that it never scores or costs), misses, assist, and the pacer (follows capacity, adds and returns room, never faster than capacity, waits between changes).
 
-Experiment switches work in any game: `?phase=frozen` and `?milestones=off`. For reviewing and testing: `?tier=2` to `?tier=4` starts at that tier, and `?test=1` puts the engine on `window.flowEngine` (the space shell adds `window.flowTest` with the shell's api and trackers), so a harness can press exactly on the beat.
+Experiment switches work in any game: `?phase=frozen` and `?milestones=off`. For reviewing and testing: `?tier=2` to `?tier=4` starts at that tier, and `?test=1` puts the engine on `window.flowEngine` (the space shell adds `window.flowTest` with the shell's api and trackers), so a harness can press exactly on the beat. In the space shell, `?fps=N` fixes the frame rate and `?rest=S` sets how long it waits before the music rests, for measuring.
+
+`eng.rest(true)` fades the music out and stops the audio context, so it costs no CPU; the beat carries on silently and `eng.rest(false)` brings it back. The space shell rests the music after a minute without input. Muted music stops the audio context the same way.
 
 ## Fitting the tempo
 

@@ -85,7 +85,8 @@
   .ss-labelrow .pb-label { min-width: 0; }
   .ss-mult:not(.ready) { display: none; }
   .ss-controls { display: flex; gap: 5px; pointer-events: auto; }
-  @media (max-width: 520px) { .ss-track, .pb-best { display: none; } }
+  @media (max-width: 520px) { .pb-best { display: none; } }
+  @media (max-width: 400px) { .ss-intensity { padding-left: 6px; padding-right: 6px; } }
   .ss-over { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; padding: 16px; background: var(--ss-veil); }
   .ss-over.show { display: flex; }
   .ss-hint { position: fixed; bottom: 30px; left: 0; right: 0; z-index: 10; text-align: center; pointer-events: none; transition: opacity .7s; }
@@ -109,6 +110,7 @@
   .fe-check-est { width: 60px; margin-left: 4px; padding: 3px 6px; border: 0; border-radius: 6px; background: var(--ss-bg); box-shadow: 0 0 0 1px var(--ss-line) inset; color: var(--ss-text); font: 500 12px var(--ss-head); }`;
   const kbd = (k) => `<span class="pb-kbd">${k}</span>`;
   const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+  const ICON_TRACK = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 17.5a2.5 2.5 0 11-2-2.45V5.2l11-2.2v11.5a2.5 2.5 0 11-2-2.45V6.4l-7 1.4z"/></svg>';
   const ICON_SOUND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5.6 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.6l4.7-4.7c.6-.6 1.7-.2 1.7.7v14c0 .9-1.1 1.3-1.7.7z"/><path data-waves d="M15.5 8.5a5 5 0 010 7M18.4 5.6a9 9 0 010 12.8"/><path data-cross d="M17 10l4 4m0-4l-4 4" style="display:none"/></svg>';
 
   function mount(g) {
@@ -131,7 +133,8 @@
         <div class="ss-state"><div class="ss-labelrow"><span class="pb-label" data-label></span><span class="pb-badge ss-mult" data-mult></span></div><div class="pb-lights" data-lights></div></div>
         <div class="ss-controls">
           <button class="pb-btn" data-style title="Flow or fidget (F)"></button>
-          <button class="pb-btn ss-track" data-track title="Switch track (Tab)"></button>
+          <button class="pb-btn ss-intensity" data-intensity title="Chill, normal or intense (\`)"></button>
+          <button class="pb-btn pb-icon" data-track title="Switch track (Tab)" aria-label="Switch track">${ICON_TRACK}</button>
           <button class="pb-btn pb-icon" data-pause title="Pause (Esc)" aria-label="Pause">${ICON_PAUSE}</button>
           <button class="pb-btn pb-icon" data-mute title="Mute (0)" aria-label="Mute">${ICON_SOUND}</button>
         </div></div></header>
@@ -140,7 +143,7 @@
       <div class="ss-over" data-pausecard><div style="text-align:center">
         <div class="pb-paused">Paused</div>
         <div class="pb-sub">Tap or ${kbd("Esc")} to resume</div>
-        <div style="display:flex;gap:10px;justify-content:center;margin-top:16px"><button class="pb-btn" data-ptrack></button><button class="pb-btn" data-pvoice></button></div></div></div>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap"><button class="pb-btn" data-pintensity></button><button class="pb-btn" data-ptrack></button><button class="pb-btn" data-pvoice></button></div></div></div>
       <div class="ss-over" data-keyscard><div class="pb-card" style="max-width:20rem">
         <div class="pb-kicker">Keys</div>
         <div class="pb-rows">
@@ -149,6 +152,7 @@
           <div><span>Flow / fidget</span>${kbd("F")}</div>
           <div><span>Pause</span>${kbd("Esc")}</div>
           <div><span>Autopilot</span>${kbd("Enter")}</div>
+          <div><span>Chill / normal / intense</span>${kbd("`")}</div>
           <div><span>Track / voice</span><span>${kbd("Tab")} ${kbd("Shift+Tab")}</span></div>
           <div><span>Volume / mute</span><span>${kbd("-")} ${kbd("=")} ${kbd("0")}</span></div>
           <div><span>Audio offset</span><span>${kbd("[")} ${kbd("]")}</span></div>
@@ -179,7 +183,13 @@
 
     let W = 0, H = 0, started = false, downAt = 0, flash = 0;
     let points = 0, combo = 0, mult = 1, clean = 0, hintTimer = 0;
-    let hi = parseInt(store(g.key + ".space.hi") || "0", 10) || 0;
+    // ---- Intensity: chosen, never imposed. Chill gives every arrival more room, intense less;
+    // within a session nothing ramps on its own. Each has its own high score.
+    const INTENSITIES = ["chill", "normal", "intense"];
+    const POINT_SCALE = { chill: 0.75, normal: 1, intense: 1.5 };
+    let intensity = INTENSITIES.includes(store(g.key + ".intensity")) ? store(g.key + ".intensity") : "normal";
+    const hiKey = () => g.key + ".space.hi" + (intensity === "normal" ? "" : "." + intensity);
+    let hi = parseInt(store(hiKey()) || "0", 10) || 0;
     const callouts = [], rings = [];
     const HOLD_SEC = 0.45; // longer than an ordinary press, even a thumb on a space bar
 
@@ -195,6 +205,9 @@
       get style() { return eng.style; }, // "flow" or "fidget"
       get rev() { return eng.rev; }, // Fidget: 0 calm .. 1 mashing flat out
       get points() { return points; },
+      get intensity() { return intensity; }, // "chill", "normal" or "intense"
+      // Pick a value by intensity: api.pick({ chill: 5, normal: 4, intense: 3 })
+      pick: (o) => (o[intensity] !== undefined ? o[intensity] : o.normal),
       // The hold's charge is Fidget's: in Flow a hold is just a press, so it never charges
       chargeOf: (held) => (eng.style === "fidget" ? Math.max(0, Math.min(1, (held - HOLD_SEC) / 0.7)) : 0),
       get charge() { return downAt ? api.chargeOf((performance.now() - downAt) / 1000) : 0; },
@@ -364,11 +377,11 @@
     if (new URLSearchParams(location.search).get("test") === "1") window.flowTest = { eng, api, trackers };
 
     function addPoints(n) {
-      const got = Math.round(n * mult);
+      const got = Math.round(n * mult * POINT_SCALE[intensity]);
       points += got;
       if (points > hi) {
         hi = points;
-        store(g.key + ".space.hi", hi);
+        store(hiKey(), hi);
       }
       return got;
     }
@@ -388,7 +401,9 @@
       else if (eng.auto && started) [label, c] = ["Autopilot · tap to take over", Skin.colors.yellow];
       q("[data-label]").textContent = label;
       q("[data-label]").style.color = c;
-      q("[data-track]").textContent = q("[data-ptrack]").textContent = eng.trackName;
+      q("[data-track]").title = `${eng.trackName} (Tab for the next track)`;
+      q("[data-ptrack]").textContent = eng.trackName;
+      q("[data-intensity]").textContent = q("[data-pintensity]").textContent = intensity;
       q("[data-pvoice]").textContent = eng.voiceName;
       q("[data-waves]").style.display = eng.muted ? "none" : "";
       q("[data-cross]").style.display = eng.muted ? "" : "none";
@@ -418,6 +433,7 @@
       eng.chime();
     });
     eng.on("signal", (label) => {
+      lastInput = performance.now(); // the music comes back for the cue; let it play a while
       api.callout(label, W / 2, H * 0.3, Skin.colors.yellow, 1.1);
       flash = 1.6;
       hud();
@@ -446,7 +462,9 @@
       hud();
     }
     function fire() {
-      downAt = performance.now();
+      downAt = lastInput = performance.now();
+      eng.rest(false);
+      wake();
       if (!started) start();
       if (eng.paused) return setPaused(false);
       // Fidget: the press is a note at once; slow ones get a wide ring of light
@@ -462,6 +480,24 @@
       downAt = 0;
       eng.release(held);
       if (started && !eng.paused && g.onRelease) g.onRelease(api, held);
+    }
+    const basePace = Object.assign({}, eng.pacer.o);
+    function applyIntensity() {
+      eng.pacer.o.slack = basePace.slack * { chill: 1.35, normal: 1, intense: 0.85 }[intensity];
+      eng.pacer.o.minBeats = Math.max(1, basePace.minBeats + { chill: 1, normal: 0, intense: -1 }[intensity]);
+      eng.pacer.o.startBeats = Math.max(eng.pacer.o.minBeats, basePace.startBeats + { chill: 1, normal: 0, intense: -1 }[intensity]);
+    }
+    applyIntensity();
+    function cycleIntensity() {
+      intensity = INTENSITIES[(INTENSITIES.indexOf(intensity) + 1) % INTENSITIES.length];
+      store(g.key + ".intensity", intensity);
+      applyIntensity();
+      hi = parseInt(store(hiKey()) || "0", 10) || 0;
+      points = 0;
+      combo = 0;
+      mult = 1;
+      api.callout(intensity, W / 2, 130, Skin.colors.yellow, 1);
+      hud();
     }
     function toggleStyle() {
       const style = eng.toggleStyle();
@@ -482,6 +518,8 @@
     press("[data-mute]", () => eng.toggleMute());
     press("[data-track]", () => note(eng.cycleTrack().toLowerCase(), Skin.colors.yellow));
     press("[data-ptrack]", () => eng.cycleTrack());
+    press("[data-intensity]", cycleIntensity);
+    press("[data-pintensity]", cycleIntensity);
     press("[data-pvoice]", () => eng.cycleVoice());
     q("[data-pausecard]").addEventListener("pointerdown", () => setPaused(false));
     q("[data-keyscard]").addEventListener("pointerdown", () => q("[data-keyscard]").classList.remove("show"));
@@ -494,6 +532,8 @@
     window.addEventListener("blur", release);
 
     function onKeyDown(e) {
+      lastInput = performance.now();
+      eng.rest(false);
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const keys = q("[data-keyscard]");
       if (keys.classList.contains("show") && e.key !== "?") {
@@ -518,6 +558,7 @@
         const ms = eng.adjustOffset(e.key === "[" ? -10 : 10);
         note(`Audio offset ${ms > 0 ? "+" : ""}${ms} ms`);
       } else if (e.key === "?") keys.classList.toggle("show");
+      else if (e.key === "`") cycleIntensity();
       else if (e.key === "f" || e.key === "F" || e.key === "\\") toggleStyle();
       else if (/^[1-9]$/.test(e.key) && window.parent !== window) window.parent.postMessage({ type: "flow:game", n: +e.key }, "*");
       else return;
@@ -548,13 +589,41 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (g.resize) g.resize(api);
     }
-    const FRAME_MS = 1000 / 60;
+    // The pocket's CPU budget (docs/build-on-the-engine.md): it sits beside your work all day.
+    // Playing: 30 frames a second in the pocket (60 in a browser); tap timing comes from input
+    // events and the audio clock, so only smoothness changes. Untouched (attract, autopilot,
+    // pause, or no input for 6 s): 10 in the pocket (30 in a browser). No input for a minute:
+    // the music rests (fades out and stops) until the next press. Motion runs on the beat clock,
+    // so it only gets choppier, never slower. ?fps=N fixes the rate and ?rest=S the rest delay, for measuring.
+    const FIXED_FPS = +new URLSearchParams(location.search).get("fps") || 0;
+    const [PLAY_FPS, IDLE_FPS] = pocket ? [30, 10] : [60, 30];
+    const REST_MS = (+new URLSearchParams(location.search).get("rest") || 60) * 1000;
+    let lastInput = -1e9;
+    const playing = () => started && !eng.auto && !eng.paused && (downAt || performance.now() - lastInput < 6000);
+    const frameMs = () => 1000 / (FIXED_FPS || (playing() ? PLAY_FPS : IDLE_FPS));
     let due = 0, last = performance.now(), chase = 0;
     let fpsFrames = 0, fpsWork = 0, fpsSince = performance.now();
+    // Between frames the page sleeps on a timer rather than asking for every vsync, so a slow
+    // frame rate really is cheap (each requested vsync costs the browser work even when nothing
+    // is drawn). A press wakes it at once.
+    let sleeper = 0;
+    function nextFrame() {
+      const wait = due - performance.now() - 6;
+      if (wait > 4) sleeper = setTimeout(() => ((sleeper = 0), requestAnimationFrame(frame)), wait);
+      else requestAnimationFrame(frame);
+    }
+    function wake() {
+      if (!sleeper) return;
+      clearTimeout(sleeper);
+      sleeper = 0;
+      due = 0;
+      requestAnimationFrame(frame);
+    }
     function frame(now) {
       if (now < due - 1) return requestAnimationFrame(frame);
-      due = Math.max(due + FRAME_MS, now);
-      const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
+      due = Math.max(due + frameMs(), now);
+      const dt = Math.min(0.12, Math.max(0.001, (now - last) / 1000));
+      if (started && !downAt) eng.rest(performance.now() - lastInput > REST_MS);
       last = now;
       eng.update(dt);
       if (!eng.paused) {
@@ -611,7 +680,7 @@
           fpsSince = now;
         }
       }
-      requestAnimationFrame(frame);
+      nextFrame();
     }
 
     window.addEventListener("resize", resize);
