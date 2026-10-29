@@ -2,134 +2,392 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Flow Engine</title>
 <link rel="icon" href="icon.png">
-<meta name="description" content="Rhythm micro-games for the gaps while code builds. They find your tempo, never end and never get harder.">
+<meta name="description" content="Tiny rhythm games for the minute you spend waiting. They find your tempo, you can't lose, and they play themselves when you look away.">
 <meta property="og:title" content="Flow Engine">
-<meta property="og:description" content="Rhythm micro-games for the gaps while code builds. They find your tempo, never end and never get harder.">
+<meta property="og:description" content="Tiny rhythm games for the minute you spend waiting. They find your tempo, you can't lose, and they play themselves when you look away.">
 <meta property="og:image" content="https://kyleillgen.github.io/flow-engine/og.png">
 <meta property="og:url" content="https://kyleillgen.github.io/flow-engine/">
 <meta name="twitter:card" content="summary_large_image">
 <style>
   @font-face { font-family: "Oswald"; src: url("skins/pinball/fonts/oswald-latin.woff2") format("woff2"); font-weight: 200 700; font-display: swap; }
   @font-face { font-family: "Inter"; src: url("skins/pinball/fonts/inter-latin.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
-  :root { --bg: #0e1124; --card: #171c38; --line: rgba(246, 230, 192, 0.12); --cream: #f6e6c0; --text: #e9e3d4; --muted: #9a97a6; --red: #e8231f; --yellow: #ffc400; }
+  :root {
+    --bg: #070916; --ink: #eef0ff; --muted: #9aa0c3; --dim: #5d6390; --line: rgba(190, 200, 255, 0.12);
+    --glow: #8fb4ff; --shelf: #161a33; --shelf-top: #262c55; --gold: #ffc85c;
+    --c1: #8fb4ff; --c2: #c79bff; /* the inserted cartridge's colours */
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: radial-gradient(120% 80% at 50% 0%, #1d2550 0%, var(--bg) 60%); color: var(--text); font: 16px/1.55 Inter, system-ui, sans-serif; min-height: 100vh; }
-  main { max-width: 1040px; margin: 0 auto; padding: 56px 16px 64px; }
-  h1 { font: 600 clamp(40px, 9vw, 64px)/1 Oswald, sans-serif; letter-spacing: 0.04em; text-transform: uppercase; color: var(--cream); margin: 0; }
-  h1 span { color: var(--yellow); }
-  .rule { width: 56px; height: 3px; background: var(--red); border-radius: 2px; margin: 18px 0 20px; }
-  p.lede { color: var(--muted); max-width: 60ch; margin: 0 0 40px; }
-  kbd { font: 500 13px Inter, sans-serif; color: var(--cream); padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; }
-  .shelf { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-  .cart { position: relative; padding: 22px 20px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
-  .cart::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; background: linear-gradient(90deg, var(--c1), var(--c2)); }
-  .cart h2 { font: 500 26px/1.1 Oswald, sans-serif; letter-spacing: 0.05em; text-transform: uppercase; color: var(--c1); text-shadow: 0 0 18px color-mix(in srgb, var(--c1) 45%, transparent); margin: 0 0 6px; }
-  .cart > p { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
-  .cart nav { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
-  .cart nav a { display: flex; align-items: baseline; gap: 12px; padding: 9px 4px; border-bottom: 1px solid var(--line); color: inherit; text-decoration: none; }
-  .cart nav a:last-child { border-bottom: 0; }
-  .cart nav b { flex: 0 0 64px; font: 500 16px/1.2 Oswald, sans-serif; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cream); }
-  .cart nav small { color: var(--muted); font-size: 13.5px; }
-  .cart nav a:hover b, .cart nav a:focus-visible b { color: var(--c2); }
-  .cart nav a:hover, .cart nav a:focus-visible { background: color-mix(in srgb, var(--c1) 8%, transparent); outline: none; }
-  h3 { font: 500 15px/1 Oswald, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 48px 0 14px; }
-  .more { display: flex; flex-wrap: wrap; gap: 8px 10px; }
-  .more a { padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--text); font-size: 14px; text-decoration: none; }
-  .more a:hover, .more a:focus-visible { border-color: rgba(255, 196, 0, 0.5); outline: none; }
-  .more a b { font-weight: 600; color: var(--cream); }
-  footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
-  footer a { color: var(--cream); }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 Inter, system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  a { color: inherit; }
+
+  /* ---- The room: deep space behind glass, still (no animation that never stops) ---------------- */
+  .sky { position: fixed; inset: 0; z-index: -1; overflow: hidden; background:
+      radial-gradient(60% 50% at 78% 18%, rgba(120, 90, 255, 0.22), transparent 70%),
+      radial-gradient(50% 45% at 12% 85%, rgba(40, 200, 255, 0.14), transparent 70%),
+      radial-gradient(120% 90% at 50% -10%, #182046 0%, #0b0e22 55%, var(--bg) 100%); }
+  .sky i { position: absolute; border-radius: 50%; background: #fff; }
+  .sky .planet { position: absolute; right: -120px; top: -140px; width: 420px; height: 420px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #6f5bd6, #2a2266 55%, #120f33 75%);
+    box-shadow: 0 0 120px 20px rgba(120, 90, 255, 0.25); opacity: 0.55; }
+  .sky .planet::after { content: ""; position: absolute; inset: 44% -30% 44% -30%; border-radius: 50%;
+    border: 2px solid rgba(200, 180, 255, 0.35); transform: rotate(-14deg); }
+
+  .page { min-height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 40px;
+    max-width: 1280px; margin: 0 auto; padding: 40px 32px 32px; align-items: start; }
+
+  /* ---- Header ---------------------------------------------------------------------------------- */
+  header h1 { margin: 0; font: 600 clamp(38px, 6vw, 68px)/0.95 Oswald, sans-serif; letter-spacing: 0.04em; text-transform: uppercase; }
+  header h1 span { background: linear-gradient(90deg, #8fe9ff, #c79bff 55%, #ff9bd2); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header p { margin: 14px 0 0; max-width: 46ch; color: var(--muted); font-size: 16px; }
+  header p b { color: var(--ink); font-weight: 600; }
+  .links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+  .links a { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 999px; text-decoration: none;
+    border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); font-size: 14px; transition: border-color 0.2s, background 0.2s; }
+  .links a:hover, .links a:focus-visible { border-color: rgba(143, 180, 255, 0.6); background: rgba(143, 180, 255, 0.1); outline: none; }
+  .links a.primary { background: linear-gradient(90deg, rgba(143, 233, 255, 0.18), rgba(199, 155, 255, 0.18)); border-color: rgba(199, 155, 255, 0.45); }
+  .keys { margin-top: 16px; color: var(--dim); font-size: 13px; }
+  kbd { font: 500 12px Inter, sans-serif; color: var(--ink); padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: rgba(255,255,255,0.04); }
+
+  /* ---- The shelf: two boards in perspective, cartridges standing on them -------------------------- */
+  .shelf-wrap { margin-top: 36px; perspective: 1400px; }
+  .shelf { transform: rotateX(8deg) rotateY(-6deg); transform-origin: 50% 100%; transform-style: preserve-3d; }
+  .board { position: relative; display: flex; gap: 18px; padding: 0 26px 18px; align-items: flex-end; width: max-content; max-width: 100%; }
+  .board + .board { margin-top: 26px; }
+  .board::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 18px; border-radius: 4px;
+    background: linear-gradient(180deg, var(--shelf-top), var(--shelf) 40%, #0c0f22);
+    box-shadow: 0 18px 30px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(190, 200, 255, 0.2); }
+  .board::after { content: ""; position: absolute; left: 6%; right: 6%; bottom: 17px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(143, 180, 255, 0.6), transparent); filter: blur(0.5px); }
+
+  /* A cartridge: a chunky plastic shell, its two colours on the label, grip ridges on top */
+  .cart { --w: 150px; position: relative; width: var(--w); height: calc(var(--w) * 1.42); flex: 0 0 auto; border-radius: 10px 10px 6px 6px;
+    background: linear-gradient(160deg, #2b3060, #171a36 70%); transform-style: preserve-3d;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -6px 0 rgba(0,0,0,0.35), 6px 0 0 #10132a, 0 16px 22px rgba(0,0,0,0.45);
+    transition: transform 0.25s cubic-bezier(.2,.8,.2,1), box-shadow 0.25s, opacity 0.2s; }
+  .cart:hover, .cart:focus-visible { transform: translateY(-10px) rotateX(-4deg); outline: none;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), inset 0 -6px 0 rgba(0,0,0,0.35), 6px 0 0 #10132a, 0 26px 30px rgba(0,0,0,0.5), 0 0 28px color-mix(in srgb, var(--c1) 35%, transparent); }
+  .cart:focus-visible { outline: 2px solid var(--c1); outline-offset: 4px; }
+  .cart .grip { position: absolute; left: 14%; right: 14%; top: 7px; height: 12px;
+    background: repeating-linear-gradient(90deg, rgba(255,255,255,0.12) 0 3px, transparent 3px 7px); border-radius: 2px; }
+  .cart .label { position: absolute; left: 9px; right: 9px; top: 26px; bottom: 22px; border-radius: 6px; overflow: hidden;
+    background: var(--art, none) center / cover, linear-gradient(150deg, var(--c1), var(--c2)); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.25); }
+  /* a little sheen across the art, like a printed sticker */
+  .cart .label::before { content: ""; position: absolute; inset: 0; background:
+      linear-gradient(125deg, rgba(255,255,255,0.22), transparent 38%); }
+  /* the name on a band in the cartridge's two colours */
+  .cart .label b { position: absolute; left: 0; right: 0; bottom: 0; padding: calc(var(--w) * 0.05) calc(var(--w) * 0.06) calc(var(--w) * 0.045);
+    font: 600 calc(var(--w) * 0.13)/1 Oswald, sans-serif; letter-spacing: 0.05em; text-transform: uppercase;
+    color: #0b0d1e; text-shadow: 0 1px 0 rgba(255,255,255,0.35); background: linear-gradient(90deg, var(--c1), var(--c2)); }
+  .cart .label small { position: absolute; left: 6px; top: 6px; padding: 3px 5px; border-radius: 4px; font: 600 calc(var(--w) * 0.062)/1 Inter, sans-serif; letter-spacing: 0.08em;
+    color: #fff; background: rgba(5, 7, 20, 0.55); text-transform: uppercase; }
+  .cart .pins { position: absolute; left: 22%; right: 22%; bottom: 6px; height: 8px;
+    background: repeating-linear-gradient(90deg, #c9a24a 0 4px, transparent 4px 7px); opacity: 0.7; border-radius: 1px; }
+  .cart.out { opacity: 0; pointer-events: none; }
+  .gap-glow { position: absolute; pointer-events: none; }
+
+  .also { margin-top: 30px; color: var(--dim); font-size: 13px; }
+  .also a { color: var(--muted); }
+
+  /* ---- The station: a console with a tall portrait screen and a cartridge slot on top ---------- */
+  .station { position: sticky; top: 0; padding-top: 128px; display: flex; flex-direction: column; align-items: center; }
+  .unit { --h: min(calc(100vh - 360px), 640px); position: relative; padding: 34px 16px 14px; border-radius: 26px 26px 30px 30px;
+    background: linear-gradient(165deg, #2c3264 0%, #1a1e40 45%, #10132b 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), inset 0 -8px 0 rgba(0,0,0,0.3), inset 0 0 0 1px rgba(255,255,255,0.06),
+      0 40px 70px rgba(0,0,0,0.6), 0 0 80px color-mix(in srgb, var(--c1) 14%, transparent);
+    transition: box-shadow 0.6s; }
+  /* the slot along the top edge */
+  .unit::before { content: ""; position: absolute; left: 50%; top: 13px; width: 136px; height: 11px; transform: translateX(-50%); border-radius: 4px;
+    background: #03040b; box-shadow: inset 0 3px 5px rgba(0,0,0,0.95), 0 1px 0 rgba(255,255,255,0.12); }
+  .screen { position: relative; height: var(--h); aspect-ratio: 9 / 17.5; border-radius: 12px; overflow: hidden; background: #03040c;
+    box-shadow: 0 0 0 6px #0a0c1d, 0 0 0 7px rgba(255,255,255,0.07), inset 0 0 30px rgba(0,0,0,0.8); transition: box-shadow 0.6s; }
+  .screen.on { box-shadow: 0 0 0 6px #0a0c1d, 0 0 0 7px color-mix(in srgb, var(--c1) 55%, transparent), 0 0 34px color-mix(in srgb, var(--c1) 30%, transparent); }
+  .screen iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; opacity: 0; transition: opacity 0.5s 0.15s; background: #03040c; }
+  .screen.on iframe { opacity: 1; }
+  .idle { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 10px; padding: 24px; transition: opacity 0.3s;
+    background: radial-gradient(80% 50% at 50% 40%, rgba(143,180,255,0.12), transparent 70%),
+      repeating-linear-gradient(0deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px); }
+  .idle b { font: 600 22px/1.1 Oswald, sans-serif; letter-spacing: 0.06em; text-transform: uppercase; }
+  .idle span { color: var(--muted); font-size: 13px; }
+  .idle .arrow { width: 0; height: 0; margin: 4px auto 0; border: 9px solid transparent; border-bottom-color: rgba(143,180,255,0.6); }
+  .screen.on .idle { opacity: 0; pointer-events: none; }
+  .flash { position: absolute; inset: 0; background: radial-gradient(circle, rgba(255,255,255,0.9), color-mix(in srgb, var(--c1) 40%, transparent) 40%, transparent 70%); opacity: 0; pointer-events: none; }
+  /* under the screen: the maker's mark, the power light and eject */
+  .panel { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; padding: 0 4px; }
+  .panel .mark { font: 600 12px/1 Oswald, sans-serif; letter-spacing: 0.22em; text-transform: uppercase; color: rgba(190,200,255,0.4); }
+  .panel .right { display: flex; align-items: center; gap: 12px; }
+  .led { width: 8px; height: 8px; border-radius: 50%; background: #2b2f50; transition: background 0.3s, box-shadow 0.3s; }
+  .unit.on .led { background: var(--c1); box-shadow: 0 0 10px var(--c1); }
+  .eject { font: 600 11px/1 Inter, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+    padding: 6px 10px; border-radius: 7px; border: 1px solid var(--line); background: rgba(0,0,0,0.2); opacity: 0.35; pointer-events: none; transition: opacity 0.2s; }
+  .unit.on .eject { opacity: 1; pointer-events: auto; }
+  .eject:hover, .eject:focus-visible { color: var(--ink); border-color: rgba(255,255,255,0.3); outline: none; }
+  /* Full screen: the screen alone fills the display (Esc comes back) */
+  .screen:fullscreen { height: 100%; width: 100%; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
+  .screen:-webkit-full-screen { height: 100%; width: 100%; border-radius: 0; box-shadow: none; }
+  /* The inserted cartridge stands in the slot, most of it showing above the console */
+  .docked { position: absolute; left: 50%; bottom: calc(100% - 19px); transform: translateX(-50%); width: 112px; height: 136px; overflow: hidden; pointer-events: none; }
+  .docked .cart { --w: 112px; position: absolute; left: 0; top: 0; transform: none; transition: none; box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 5px 0 0 #10132a; }
+
+  .games { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; max-width: 360px; min-height: 38px; }
+  .games button { padding: 7px 13px; border-radius: 999px; font: 500 14px/1 Oswald, sans-serif; letter-spacing: 0.07em; text-transform: uppercase;
+    border: 1px solid var(--line); background: rgba(255,255,255,0.04); transition: border-color 0.2s, background 0.2s, color 0.2s; }
+  .games button:hover, .games button:focus-visible { border-color: color-mix(in srgb, var(--c1) 60%, transparent); outline: none; }
+  .games button[aria-pressed="true"] { background: linear-gradient(90deg, var(--c1), var(--c2)); color: #0b0d1e; border-color: transparent; }
+  .hint { margin-top: 10px; min-height: 20px; color: var(--muted); font-size: 13px; text-align: center; max-width: 320px; }
+
+  .flyer { position: fixed; z-index: 50; pointer-events: none; margin: 0; }
+
+  footer { grid-column: 1 / -1; margin-top: 12px; color: var(--dim); font-size: 13px; }
+
+  /* ---- Phones and narrow windows: the station first, the shelf scrolls sideways beneath ---------- */
+  /* ---- Phones: just the cartridges; tapping one opens its game across the whole screen ------- */
+  @media (max-width: 900px) {
+    .page { grid-template-columns: 1fr; gap: 0; padding: 22px 16px 28px; }
+    .keys { display: none; }
+    .shelf-wrap { margin-top: 26px; perspective: none; }
+    .shelf { transform: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px 12px; }
+    .board { display: contents; }
+    .board::before, .board::after { display: none; }
+    .shelf .cart { --w: calc((100vw - 32px - 24px) / 3 - 6px); justify-self: center; }
+    .station { display: none; }
+    body.playing { overflow: hidden; }
+    body.playing .station { display: flex; position: fixed; inset: 0; z-index: 40; padding: 0; background: #03040c; }
+    body.playing .unit { --h: auto; flex: 1; display: flex; flex-direction: column; width: 100%; padding: 0; border-radius: 0; background: none; box-shadow: none; }
+    body.playing .unit::before, body.playing .docked, body.playing .mark, body.playing .led, body.playing .hint { display: none; }
+    body.playing .panel { order: -1; margin: 0; padding: max(10px, env(safe-area-inset-top)) 12px 10px; background: #0b0e22; border-bottom: 1px solid var(--line); }
+    body.playing .panel .right { width: 100%; justify-content: space-between; }
+    body.playing .screen { flex: 1; height: auto; width: 100%; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
+    body.playing .games { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; max-width: none; width: 100%; margin: 0; padding: 10px 12px max(10px, env(safe-area-inset-bottom)); background: #0b0e22; border-top: 1px solid var(--line); }
+    body.playing .games button { flex: 0 0 auto; }
+    .eject .d { display: none; }
+  }
+  @media (min-width: 901px) { .eject .m { display: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .cart, .screen iframe, .idle { transition: none; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>Flow <span>Engine</span></h1>
-  <div class="rule"></div>
-  <p class="lede">Rhythm micro-games for the gaps while code builds. They find your tempo, never end and never get harder. Seven cartridges, one button: <kbd>Space</kbd> or tap to play, <kbd>F</kbd> for Fidget, where every press lands, and <kbd>`</kbd> for chill, normal or intense.</p>
-  <div class="shelf">
-    <section class="cart" style="--c1: #7fe9ff; --c2: #ff8fd8">
-      <h2>Space</h2>
-      <p>Cozy neon space: little aliens, a glowing jellyfish, moons, a moon garden, a whale and the stars.</p>
-      <nav>
-        <a href="games/nova.html"><b>Nova</b><small>Fire as each diver drops into your sights</small></a>
-        <a href="games/tidelight.html"><b>Tide</b><small>Pulse while the hoop&#x27;s inner ring is gold</small></a>
-        <a href="games/skip.html"><b>Skip</b><small>Tap as Bobo lands on each moon</small></a>
-        <a href="games/bloom.html"><b>Bloom</b><small>Tap as each seed touches the soil</small></a>
-        <a href="games/hum.html"><b>Hum</b><small>Tap as each star krill reaches her</small></a>
-        <a href="games/stargaze.html"><b>Star</b><small>Tap as the thread reaches each star</small></a>
-      </nav>
-    </section>
-    <section class="cart" style="--c1: #3df5ff; --c2: #ff4f9a">
-      <h2>Arcade</h2>
-      <p>A late-night arcade cabinet: a brick-breaker, a maze, a highway, a rock field and a claw machine, on one button.</p>
-      <nav>
-        <a href="games/bonk.html"><b>Bonk</b><small>Tap as Pip lands on Slab</small></a>
-        <a href="games/lamp.html"><b>Lamp</b><small>Tap as Kip reaches a lantern to light the way</small></a>
-        <a href="games/hop.html"><b>Hop</b><small>Tap as the gap reaches the coin</small></a>
-        <a href="games/rocks.html"><b>Rocks</b><small>Tap as each Grump touches the ring</small></a>
-        <a href="games/claw.html"><b>Claw</b><small>Tap as Mitt stops over the wiggling plushie</small></a>
-      </nav>
-    </section>
-    <section class="cart" style="--c1: #ffb3cf; --c2: #ffd58a">
-      <h2>Cozy</h2>
-      <p>A moonlit garden: tea that blooms, a glowing axolotl&#x27;s pond, a cloud bakery, lanterns for a moon moth, and Tidelight.</p>
-      <nav>
-        <a href="games/cozy-steep.html"><b>Steep</b><small>Tap as a cup passes under the spout</small></a>
-        <a href="games/cozy-ripple.html"><b>Ripple</b><small>Tap as a drop meets the water</small></a>
-        <a href="games/cozy-frost.html"><b>Frost</b><small>Tap as each mark comes round to the nozzle</small></a>
-        <a href="games/cozy-lull.html"><b>Lull</b><small>Tap as a lantern reaches Tibbet</small></a>
-        <a href="games/tidelight.html"><b>Tide</b><small>Pulse while the hoop&#x27;s inner ring is gold</small></a>
-      </nav>
-    </section>
-    <section class="cart" style="--c1: #f2b56b; --c2: #d9a093">
-      <h2>Lo-fi Cafe</h2>
-      <p>A café at night: rain on the window, a warm lamp, latte art, steam off the cups and Biscuit the sleepy cat.</p>
-      <nav>
-        <a href="games/pour.html"><b>Pour</b><small>Tap as each cup passes under the pitcher</small></a>
-        <a href="games/rain.html"><b>Rain</b><small>Tap as each drop touches the sill</small></a>
-        <a href="games/paw.html"><b>Paw</b><small>Tap as the fish swings into Biscuit&#x27;s paw</small></a>
-      </nav>
-    </section>
-    <section class="cart" style="--c1: #ffb547; --c2: #ff6a2b">
-      <h2>Hunt</h2>
-      <p>A woods lodge at dusk: deer, birds, a roosting turkey and a gallery booth. The sights glide in by themselves; timing is the whole game.</p>
-      <nav>
-        <a href="games/leap.html"><b>Leap</b><small>Tap at the top of each deer&#x27;s leap</small></a>
-        <a href="games/flush.html"><b>Flush</b><small>Tap as each bird hangs at the top</small></a>
-        <a href="games/roost.html"><b>Roost</b><small>Tap as the turkey pops out</small></a>
-        <a href="games/range.html"><b>Range</b><small>Tap as each target crosses the brass mark</small></a>
-      </nav>
-    </section>
-    <section class="cart" style="--c1: #3ee8d0; --c2: #ffb35c">
-      <h2>Deep Sea</h2>
-      <p>A bioluminescent abyss: an anglerfish&#x27;s lantern, a siphonophore&#x27;s chain of light, a little submersible&#x27;s headlamp and a squid that talks in flashes.</p>
-      <nav>
-        <a href="games/deep-lantern.html"><b>Lure</b><small>Glow as each little one touches the lantern</small></a>
-        <a href="games/deep-siphon.html"><b>Chain</b><small>Tap as the light reaches the new bell</small></a>
-        <a href="games/deep-bathy.html"><b>Lamp</b><small>Snap as the headlamp finds each creature</small></a>
-        <a href="games/deep-glimmer.html"><b>Echo</b><small>Flash back as the far squid&#x27;s light reaches you</small></a>
-      </nav>
-    </section>
-    <section class="cart" style="--c1: #ffc400; --c2: #e8231f">
-      <h2>Classic</h2>
-      <p>The first four, on a pinball table: a ribbon through the pillars, a bumper orbit, a pair of flippers and a wall-kick shaft.</p>
-      <nav>
-        <a href="games/flow.html"><b>Flow</b><small>Tap or Space in a steady rhythm</small></a>
-        <a href="games/orbit.html"><b>Orbit</b><small>Tap to fling as the ball crosses the arrow</small></a>
-        <a href="games/flipper.html"><b>Flipper</b><small>Tap to flip as the ball comes down</small></a>
-        <a href="games/ricochet.html"><b>Ricochet</b><small>Tap to kick off the wall as the ball lands</small></a>
-      </nav>
-    </section>
+<div class="sky" aria-hidden="true"><div class="planet"></div></div>
+
+<div class="page">
+  <div class="side">
+    <header>
+      <h1>Flow <span>Engine</span></h1>
+      <p>Tiny rhythm games for the minute you spend waiting. <b>They find your tempo, you can't lose,</b> and they play themselves when you look away.</p>
+      <div class="links">
+        <a class="primary" href="https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip">Flow Pocket for Windows <span style="color:var(--muted)">2 MB</span></a>
+        <a href="https://github.com/kyleillgen/flow-engine">Source and docs</a>
+      </div>
+      <div class="keys"><kbd>Space</kbd> or tap to play &nbsp;·&nbsp; <kbd>F</kbd> Fidget, where every press lands &nbsp;·&nbsp; <kbd>`</kbd> chill, normal or intense</div>
+    </header>
+
+    <div class="shelf-wrap shelf-part">
+      <div class="shelf" data-shelf aria-label="Cartridges"></div>
+    </div>
+    <div class="also">Also on the engine: <a href="games/word-rain.html">Word Rain</a>, a typing game, and <a href="games/template.html">Drop Catch</a>, the smallest game to copy for your own.</div>
   </div>
-  <h3>Also on the engine</h3>
-  <div class="more">
-    <a href="games/word-rain.html"><b>Word Rain</b> · a typing game</a>
-    <a href="games/template.html"><b>Drop Catch</b> · the smallest game, to copy</a>
+
+  <div class="station" data-station>
+    <div class="unit" data-unit>
+      <div class="docked" data-docked></div>
+      <div class="screen" data-screen>
+        <div class="idle" data-idle>
+          <div class="arrow"></div>
+          <b>Pick a cartridge</b>
+          <span>Click one on the shelf and it drops into the slot.</span>
+        </div>
+        <iframe data-frame title="Game" allow="autoplay; fullscreen" tabindex="0"></iframe>
+        <div class="flash" data-flash></div>
+      </div>
+      <div class="panel">
+        <span class="mark">Flow station</span>
+        <span class="right"><button class="eject" data-full aria-label="Play full screen">Full screen</button><button class="eject" data-eject aria-label="Eject the cartridge"><span class="m">&larr; Cartridges</span><span class="d">Eject</span></button><span class="led"></span></span>
+      </div>
+    </div>
+    <div class="games" data-games></div>
+    <div class="hint" data-hint></div>
   </div>
-  <footer>Source, the build guide and Flow Pocket for Windows: <a href="https://github.com/kyleillgen/flow-engine">github.com/kyleillgen/flow-engine</a></footer>
-</main>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  // The shelf reads each cartridge's own cart.json, so the page and the pocket list the same games
+  const CARTS = ["space", "arcade", "cozy", "cafe", "hunt", "deepsea", "classic"];
+  const ROWS = [4, 3]; // cartridges per board
+  const q = (s) => document.querySelector(s);
+  const shelf = q("[data-shelf]"), screen = q("[data-screen]"), frame = q("[data-frame]"), flash = q("[data-flash]");
+  const unit = q("[data-unit]"), docked = q("[data-docked]"), gamesEl = q("[data-games]"), hintEl = q("[data-hint]");
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  let carts = [], current = null, busy = false;
+
+  // A sprinkle of still stars
+  const sky = q(".sky");
+  for (let i = 0; i < 140; i++) {
+    const s = document.createElement("i");
+    const r = Math.random() < 0.9 ? 1 : 2;
+    Object.assign(s.style, { left: Math.random() * 100 + "%", top: Math.random() * 100 + "%", width: r + "px", height: r + "px", opacity: 0.2 + Math.random() * 0.6 });
+    sky.appendChild(s);
+  }
+
+  function cartEl(c) {
+    const b = document.createElement("button");
+    b.className = "cart";
+    b.style.setProperty("--c1", c.colors[0]);
+    b.style.setProperty("--c2", c.colors[1]);
+    b.style.setProperty("--art", `url("site/labels/${c.id}.webp")`); // a frame from one of its games
+    b.innerHTML = `<span class="grip"></span><span class="label"><small>${c.games.length} games</small><b>${c.name}</b></span><span class="pins"></span>`;
+    b.setAttribute("aria-label", `${c.name}: ${c.blurb}`);
+    b.title = c.blurb;
+    return b;
+  }
+
+  function setColors(c) {
+    root.style.setProperty("--c1", c ? c.colors[0] : "#8fb4ff");
+    root.style.setProperty("--c2", c ? c.colors[1] : "#c79bff");
+  }
+
+  function play(c, i, push = true) {
+    const g = c.games[i];
+    [...gamesEl.children].forEach((b, j) => b.setAttribute("aria-pressed", j === i));
+    hintEl.textContent = g.hint;
+    screen.classList.remove("on");
+    frame.onload = () => {
+      screen.classList.add("on");
+      try { frame.contentWindow.focus(); } catch (e) {}
+    };
+    frame.src = g.file;
+    if (push) history.replaceState(history.state, "", `#${c.id}/${g.file.split("/").pop().replace(".html", "")}`);
+  }
+
+  function showGames(c, start) {
+    gamesEl.innerHTML = "";
+    c.games.forEach((g, i) => {
+      const b = document.createElement("button");
+      b.textContent = g.label;
+      b.title = g.hint;
+      b.onclick = () => play(c, i);
+      gamesEl.appendChild(b);
+    });
+    play(c, start);
+  }
+
+  // Click a cartridge: it flies off the shelf and drops into the dock's slot, then the screen comes on
+  const phone = () => matchMedia("(max-width: 900px)").matches;
+  async function insert(c, start = 0, animate = !reduced && !phone()) {
+    if (busy || current === c) return;
+    busy = true;
+    if (current) await eject(false);
+    current = c;
+    setColors(c);
+    const fromEl = c.el;
+    const slot = docked.getBoundingClientRect();
+    if (animate) {
+      const from = fromEl.getBoundingClientRect();
+      const fly = cartEl(c);
+      fly.classList.add("flyer");
+      Object.assign(fly.style, { left: from.left + "px", top: from.top + "px", width: from.width + "px", height: from.height + "px", "--w": from.width + "px" });
+      document.body.appendChild(fly);
+      fromEl.classList.add("out");
+      // Scaled from its top-left corner to the docked size, it swings up over the console, then
+      // drops into the slot on top, its bottom disappearing inside
+      fly.style.transformOrigin = "0 0";
+      const scale = 112 / from.width, sunk = 23 / scale;
+      const dx = slot.left - from.left, dy = slot.top - from.top;
+      await fly.animate([
+        { transform: "translate(0,0) rotate(0) scale(1)", clipPath: "inset(0 0 0 0)" },
+        { transform: `translate(${dx * 0.5}px, ${Math.min(dy, 0) - 140}px) rotate(-12deg) scale(${(1 + scale) / 2})`, clipPath: "inset(0 0 0 0)", offset: 0.5 },
+        { transform: `translate(${dx}px, ${dy - 46}px) rotate(0) scale(${scale})`, clipPath: "inset(0 0 0 0)", offset: 0.78 },
+        { transform: `translate(${dx}px, ${dy}px) rotate(0) scale(${scale})`, clipPath: `inset(0 0 ${sunk}px 0)` }
+      ], { duration: 780, easing: "cubic-bezier(.3,.7,.2,1)", fill: "forwards" }).finished;
+      fly.remove();
+    } else fromEl.classList.add("out");
+    docked.innerHTML = "";
+    const d = cartEl(c);
+    d.tabIndex = -1;
+    docked.appendChild(d);
+    unit.classList.add("on");
+    if (animate) {
+      unit.animate([{ transform: "translateY(0)" }, { transform: "translateY(4px)" }, { transform: "translateY(0)" }], { duration: 220, easing: "ease-out" });
+      flash.animate([{ opacity: 0.9 }, { opacity: 0 }], { duration: 500, easing: "ease-out" });
+    }
+    showGames(c, start);
+    // On a phone the station is below the shelf: bring the screen into view
+    // On a phone the game opens over the page; the back button closes it
+    if (phone()) {
+      document.body.classList.add("playing");
+      if (!history.state || !history.state.playing) history.pushState({ playing: true }, "", location.hash);
+    }
+    busy = false;
+  }
+
+  async function eject(clearHash = true) {
+    const c = current;
+    if (!c) return;
+    document.body.classList.remove("playing");
+    current = null;
+    screen.classList.remove("on");
+    frame.removeAttribute("src");
+    frame.src = "about:blank";
+    gamesEl.innerHTML = "";
+    hintEl.textContent = "";
+    unit.classList.remove("on");
+    const d = docked.firstChild;
+    if (d && !reduced) await d.animate([{ transform: "translateY(0)" }, { transform: "translateY(-60px)", opacity: 0 }], { duration: 260, easing: "ease-in" }).finished;
+    docked.innerHTML = "";
+    c.el.classList.remove("out");
+    if (clearHash) {
+      setColors(null);
+      history.replaceState(null, "", location.pathname + location.search);
+      c.el.focus();
+    }
+  }
+  q("[data-eject]").onclick = () => (history.state && history.state.playing ? history.back() : eject());
+  window.addEventListener("popstate", () => current && eject());
+  // Full screen takes the screen with the game in it; where a page can't go full screen (iPhone
+  // Safari), the game opens on its own instead
+  q("[data-full]").onclick = () => {
+    if (!current) return;
+    const go = screen.requestFullscreen || screen.webkitRequestFullscreen;
+    if (go) Promise.resolve(go.call(screen)).then(() => { try { frame.contentWindow.focus(); } catch (e) {} }, () => window.open(frame.src, "_blank"));
+    else window.open(frame.src, "_blank");
+  };
+
+  Promise.all(CARTS.map((id) => fetch(`carts/${id}/cart.json`).then((r) => r.json()))).then((list) => {
+    carts = list;
+    let n = 0;
+    for (const count of ROWS) {
+      const board = document.createElement("div");
+      board.className = "board";
+      for (const c of carts.slice(n, n + count)) {
+        c.el = cartEl(c);
+        c.el.onclick = () => insert(c);
+        board.appendChild(c.el);
+      }
+      n += count;
+      shelf.appendChild(board);
+    }
+    // #cart/game opens straight into a game, for sharing a link to one
+    const [id, game] = location.hash.slice(1).split("/");
+    const c = carts.find((x) => x.id === id);
+    if (c) {
+      const i = Math.max(0, c.games.findIndex((g) => g.file.endsWith(`/${game}.html`)));
+      insert(c, i, false);
+    }
+  });
+})();
+</script>
 </body>
 </html>
