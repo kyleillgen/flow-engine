@@ -1096,6 +1096,9 @@
     let offsetMs = Math.max(-150, Math.min(150, parseInt(store(OFFSET_KEY) || "0", 10) || 0));
     let started = false;
     let paused = false;
+    // Rest: after a long stretch with no input the music fades out and the audio context stops,
+    // so it costs no CPU; the beat carries on silently (silentBeat). Muted audio stops too.
+    let resting = false, restLevel = 1, restStop = 0;
     let beatCount = 0;
     let silentBeat = 0;
     const audioLive = () => started && synth.ctx && synth.ctx.state === "running";
@@ -1276,20 +1279,29 @@
     }
 
     if (o.autoOnBlur) window.addEventListener("blur", () => started && !paused && ctrl.setAuto(true));
+    // The audio runs only when someone could hear it: not paused, hidden, muted or resting
+    function syncAudio() {
+      if (!synth.ctx) return;
+      clearTimeout(restStop);
+      const hidden = document.visibilityState === "hidden";
+      if (paused || hidden) synth.ctx.suspend().catch(() => {});
+      // Muted or resting: let the fade finish, then stop
+      else if (synth.isMuted || resting) restStop = setTimeout(() => (synth.isMuted || resting) && synth.ctx.suspend().catch(() => {}), resting ? 4000 : 300);
+      else synth.ctx.resume().catch(() => {});
+    }
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         if (started) ctrl.setAuto(true);
         drainEvents();
-        if (synth.ctx) synth.ctx.suspend().catch(() => {});
-      } else if (synth.ctx && !paused) {
-        synth.ctx.resume().catch(() => {});
       }
+      syncAudio();
     });
     // Build-done hook: a wrapper (the pocket app, an extension) posts
     // {type: "flow:build-done", label?}. Autopilot takes over and winds down, and a chime plays
     // even if autopilot was already on, since that's the cue to switch back to your work.
     window.addEventListener("message", (e) => {
       if (e.data && e.data.type === "flow:build-done" && started) {
+        eng.rest(false); // the chime has to be heard
         ctrl.setAuto(true);
         drainEvents();
         synth.playGoldenOrbShimmer();
@@ -1342,6 +1354,7 @@
         if (synth.isMuted && synth.masterGain) synth.masterGain.gain.value = 0.0001;
         started = true;
         ctrl.idle = 0;
+        syncAudio();
       },
       // A rhythmic action: a tap, a keystroke. height 0 (top) .. 1 (bottom) picks the note;
       // note:false counts toward cadence without a lead note (e.g. a wrong key)
@@ -1396,7 +1409,8 @@
           }
           return;
         }
-        if (synth.masterGain && !synth.isMuted) synth.masterGain.gain.value = level * (1 - 0.35 * ctrl.windDown);
+        restLevel = Math.max(0, Math.min(1, restLevel + (resting ? -dt / 3 : dt / 1.5)));
+        if (synth.masterGain && !synth.isMuted) synth.masterGain.gain.value = Math.max(0.0001, level * (1 - 0.35 * ctrl.windDown) * restLevel);
         synth.updateScheduler(ctrl.bpm * (1 - 0.05 * ctrl.windDown), ctrl.flowIndex, ctrl.tier, {
           onQuarterBeat: () => {
             beatCount++;
@@ -1460,7 +1474,7 @@
       pause(on) {
         if (!started || paused === on) return;
         paused = on;
-        if (synth.ctx) (on ? synth.ctx.suspend() : synth.ctx.resume()).catch(() => {});
+        syncAudio();
         if (on) saveTelemetry();
         emit("pause", on);
       },
@@ -1479,8 +1493,17 @@
         synth.init();
         const muted = synth.toggleMute();
         savePrefs();
+        syncAudio();
         return muted;
       },
+      // Rest the music (on) after a long stretch without input, or wake it (off). The shell
+      // decides when; the beat never stops, so games keep moving in time.
+      rest(on) {
+        if (resting === on) return;
+        resting = on;
+        syncAudio();
+      },
+      get resting() { return resting; },
       changeVolume(delta) {
         level = Math.round(Math.max(0.1, Math.min(1, level + delta)) * 10) / 10;
         savePrefs();

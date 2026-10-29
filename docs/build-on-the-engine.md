@@ -55,7 +55,18 @@ The shell also runs the reward loop and the variety for every game:
 
 ## Cartridges, and the space shell's shortcuts
 
-A cartridge is a themed pack of up to six games for Flow Pocket: `node carts/cart.mjs new <id> "<Name>"` writes `carts/<id>/cart.json`, a build log and a working starter game in `carts/<id>/games/`. Add `--skin <file>` and `--shell <file>` to start from another look. Then `check` (rules and size), `play` (drawing time and memory, headless), `shots` (phone, desktop and top-tier screenshots in `dist/shots/<id>/`) and `npm run smoke -- <id>`.
+A cartridge is a themed pack of up to six games for Flow Pocket: `node carts/cart.mjs new <id> "<Name>"` writes `carts/<id>/cart.json`, a build log and a working starter game in `carts/<id>/games/`. Add `--skin <file>` and `--shell <file>` to start from another look. Then `check` (rules and size), `play` (drawing time, memory and CPU, headless), `shots` (phone, desktop, top-tier and pocket-size screenshots in `dist/shots/<id>/`) and `npm run smoke -- <id>`.
+
+**The budget.** The pocket sits beside your work all day, so a cartridge has to stay quiet:
+
+| | Limit | Checked by |
+|---|---|---|
+| Size | 512 KB unpacked, no images, audio or network | `check` |
+| Drawing | 4 ms a frame | `play` |
+| Memory | 48 MB of heap | `play` |
+| CPU while it plays itself | 15% of one core for the page and GPU, at the pocket's size | `play` |
+
+The space shell does most of the work: in the pocket it draws 30 frames a second while you play and 10 while the game plays itself, sleeps between frames, and after a minute without input lets the music fade out and stop. Measured on the author's machine, the whole pocket left alone used about 9% of one core. The usual way over the CPU limit is a CSS animation that never stops (it keeps the browser repainting at any frame rate) or drawing that runs outside the shell's frame loop.
 
 On the space shell (`shell/space-shell.js`):
 - **`api.track({ spawn, hit, miss, note })`** runs the whole arrive-on-the-beat loop: spawning at the pacer's rate, judging, scoring, misses, autopilot and Fidget. `onFire: () => things.fire()` is all a tap needs. The starter game shows it in about 80 lines. For games that need more:
