@@ -6,7 +6,7 @@ It runs on [Neutralinojs](https://neutralino.js.org), which uses the WebView2 en
 
 ## Download
 
-Get [Flow-Pocket-windows.zip](https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip) (2 MB), unzip it anywhere and double-click **Flow Pocket.cmd**. It has the runtime and all six cartridges; nothing else is needed. The first time, Windows says "Windows protected your PC" because the exe isn't code-signed: click **More info**, then **Run anyway**.
+Get [Flow-Pocket-windows.zip](https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip) (2 MB), unzip it anywhere and double-click **Flow Pocket.cmd**. It has the runtime and all seven cartridges; nothing else is needed. The first time, Windows says "Windows protected your PC" because the exe isn't code-signed: click **More info**, then **Run anyway**.
 
 ## Or set it up from a clone
 

@@ -1,0 +1,20 @@
+{
+  "id": "classic",
+  "name": "Classic",
+  "version": "0.1.0",
+  "engine": 1,
+  "blurb": "The first four, on a pinball table: a ribbon through the pillars, a bumper orbit, a pair of flippers and a wall-kick shaft.",
+  "colors": ["#ffc400", "#e8231f"],
+  "files": [
+    "shell/flow-shell.js",
+    "skins/pinball/pinball-skin.js",
+    "skins/pinball/fonts/oswald-latin.woff2",
+    "skins/pinball/fonts/inter-latin.woff2"
+  ],
+  "games": [
+    { "file": "games/flow.html", "label": "Flow", "hint": "Tap or Space in a steady rhythm" },
+    { "file": "games/orbit.html", "label": "Orbit", "hint": "Tap to fling as the ball crosses the arrow" },
+    { "file": "games/flipper.html", "label": "Flipper", "hint": "Tap to flip as the ball comes down" },
+    { "file": "games/ricochet.html", "label": "Ricochet", "hint": "Tap to kick off the wall as the ball lands" }
+  ]
+}
