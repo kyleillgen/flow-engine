@@ -2,7 +2,11 @@
 
 Little rhythm games for the minute you're waiting: a build, a test run, an AI assistant thinking. Tap along and the music falls into your rhythm. You can't lose, nothing speeds up, and when you look away it keeps playing by itself.
 
-![Leap, a deer at dusk, and Chain, a glowing siphonophore in the deep sea](docs/media/demo.webp)
+<p>
+  <img src="docs/media/tide.webp" width="32%" alt="Tide: a little jellyfish pulses up through hoops of light, glow fish trailing behind">
+  <img src="docs/media/lure.webp" width="32%" alt="Lure: an old anglerfish lights up the little ones that touch her lantern">
+  <img src="docs/media/leap.webp" width="32%" alt="Leap: deer leap across a clearing at dusk and are tagged at the top">
+</p>
 
 **[Play in your browser](https://kyleillgen.github.io/flow-engine/)** · **[Download Flow Pocket for Windows](https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip)** (2 MB)
 
