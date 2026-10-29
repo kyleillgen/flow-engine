@@ -433,6 +433,7 @@
       eng.chime();
     });
     eng.on("signal", (label) => {
+      lastInput = performance.now(); // the music comes back for the cue; let it play a while
       api.callout(label, W / 2, H * 0.3, Skin.colors.yellow, 1.1);
       flash = 1.6;
       hud();
@@ -462,6 +463,8 @@
     }
     function fire() {
       downAt = lastInput = performance.now();
+      eng.rest(false);
+      wake();
       if (!started) start();
       if (eng.paused) return setPaused(false);
       // Fidget: the press is a note at once; slow ones get a wide ring of light
@@ -530,6 +533,7 @@
 
     function onKeyDown(e) {
       lastInput = performance.now();
+      eng.rest(false);
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const keys = q("[data-keyscard]");
       if (keys.classList.contains("show") && e.key !== "?") {
@@ -585,20 +589,41 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (g.resize) g.resize(api);
     }
-    // Full speed only while someone is playing. Attract, autopilot, pause, or no input for 6 s:
-    // 20 frames a second in the pocket (30 in a browser), which roughly halves the CPU while the
-    // game plays itself beside your work. Motion runs on the beat clock, so it only gets choppier,
-    // never slower. ?fps=N fixes the rate, for measuring.
+    // The pocket's CPU budget (docs/build-on-the-engine.md): it sits beside your work all day.
+    // Playing: 30 frames a second in the pocket (60 in a browser); tap timing comes from input
+    // events and the audio clock, so only smoothness changes. Untouched (attract, autopilot,
+    // pause, or no input for 6 s): 10 in the pocket (30 in a browser). No input for a minute:
+    // the music rests (fades out and stops) until the next press. Motion runs on the beat clock,
+    // so it only gets choppier, never slower. ?fps=N fixes the rate and ?rest=S the rest delay, for measuring.
     const FIXED_FPS = +new URLSearchParams(location.search).get("fps") || 0;
-    const IDLE_FPS = pocket ? 20 : 30;
+    const [PLAY_FPS, IDLE_FPS] = pocket ? [30, 10] : [60, 30];
+    const REST_MS = (+new URLSearchParams(location.search).get("rest") || 60) * 1000;
     let lastInput = -1e9;
-    const frameMs = () => 1000 / (FIXED_FPS || (started && !eng.auto && !eng.paused && (downAt || performance.now() - lastInput < 6000) ? 60 : IDLE_FPS));
+    const playing = () => started && !eng.auto && !eng.paused && (downAt || performance.now() - lastInput < 6000);
+    const frameMs = () => 1000 / (FIXED_FPS || (playing() ? PLAY_FPS : IDLE_FPS));
     let due = 0, last = performance.now(), chase = 0;
     let fpsFrames = 0, fpsWork = 0, fpsSince = performance.now();
+    // Between frames the page sleeps on a timer rather than asking for every vsync, so a slow
+    // frame rate really is cheap (each requested vsync costs the browser work even when nothing
+    // is drawn). A press wakes it at once.
+    let sleeper = 0;
+    function nextFrame() {
+      const wait = due - performance.now() - 6;
+      if (wait > 4) sleeper = setTimeout(() => ((sleeper = 0), requestAnimationFrame(frame)), wait);
+      else requestAnimationFrame(frame);
+    }
+    function wake() {
+      if (!sleeper) return;
+      clearTimeout(sleeper);
+      sleeper = 0;
+      due = 0;
+      requestAnimationFrame(frame);
+    }
     function frame(now) {
       if (now < due - 1) return requestAnimationFrame(frame);
       due = Math.max(due + frameMs(), now);
-      const dt = Math.min(0.06, Math.max(0.001, (now - last) / 1000));
+      const dt = Math.min(0.12, Math.max(0.001, (now - last) / 1000));
+      if (started && !downAt) eng.rest(performance.now() - lastInput > REST_MS);
       last = now;
       eng.update(dt);
       if (!eng.paused) {
@@ -655,7 +680,7 @@
           fpsSince = now;
         }
       }
-      requestAnimationFrame(frame);
+      nextFrame();
     }
 
     window.addEventListener("resize", resize);
