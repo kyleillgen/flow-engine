@@ -69,6 +69,7 @@ It summarises each game and flags anything out of range, naming the knob to adju
 | `setup.mjs` | Downloads the runtime and installs the cartridges |
 | `package.mjs` | Builds the download, `dist/Flow-Pocket-windows.zip` |
 | `signal.mjs` | Writes the signal for Claude Code hooks or build scripts |
+| `flow-pocket.ico` | The logo as a Windows icon, for a desktop or taskbar shortcut |
 | `report.mjs` | The tuning report from `sessions.log` |
 | `Flow Pocket.cmd` | Starts the app |
 | `flow-pocket.exe`, `bin/`, `resources/{carts,js}/` | Downloaded or installed by setup; not in git |
