@@ -748,7 +748,7 @@
     for (const f of hoops) {
       if (f.state === "drift" && now > f.arriveAt + f.window) {
         done(f, now, "gone"); // she glides softly on past it all the same
-        if (api.miss()) api.hint("glow", "Pulse while the inner ring is gold");
+        if (api.miss()) api.hint("glow", "Pulse as Wisp swims into each hoop");
       }
       if (f.state !== "drift") f.fade -= dt * (f.state === "lit" ? 0.9 : 0.7);
     }
@@ -1038,7 +1038,7 @@
   SpaceShell.mount({
     key: "tidelight",
     title: "Tidelight",
-    hint: "Pulse when the inner ring turns gold",
+    hint: "Pulse as Wisp swims into each hoop",
     engine: {},
     tierNames: ["Finding your rhythm", "Shimmer", "Bloom", "Starsea"],
     onPhrase: () => (loopAt = clock),

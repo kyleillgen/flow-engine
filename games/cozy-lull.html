@@ -411,7 +411,7 @@
       miss(l, counted) {
         l.state = "pale";
         missAt = clock;
-        if (counted) api.hint("light", "Tap as a lantern rises between Tibbet's antennae, when the ring turns gold");
+        if (counted) api.hint("light", "Tap as a lantern rises between Tibbet's antennae");
       },
       keep: (l, now) => riverY(l, now) >= -80 || !lanT.list.some((o) => o.at > l.at && o.at < now),
       ready: false, // Fidget lights the nearest one in view, below
@@ -770,7 +770,7 @@
     setup,
     key: "cozy-lull",
     title: "Lull",
-    hint: "Tap when a lantern rises between Tibbet's glowing antennae",
+    hint: "Tap as a lantern rises between Tibbet's antennae",
     engine: {},
     tierNames: ["Finding your rhythm", "Lantern light", "Aurora", "Wishing night"],
     fidgetPoint: (api) => ({ x: mothAt(api.eng.beatPos()).x, y: L.meet }),

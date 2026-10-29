@@ -16,7 +16,7 @@
     { "file": "games/cozy-steep.html", "label": "Steep", "hint": "Tap as a cup passes under the spout" },
     { "file": "games/cozy-ripple.html", "label": "Ripple", "hint": "Tap as a drop meets the water" },
     { "file": "games/cozy-frost.html", "label": "Frost", "hint": "Tap as each mark comes round to the nozzle" },
-    { "file": "games/cozy-lull.html", "label": "Lull", "hint": "Tap as a lantern reaches Tibbet" },
-    { "file": "games/tidelight.html", "label": "Tide", "hint": "Pulse while the hoop's inner ring is gold" }
+    { "file": "games/cozy-lull.html", "label": "Lull", "hint": "Tap as a lantern rises between Tibbet's antennae" },
+    { "file": "games/tidelight.html", "label": "Tide", "hint": "Pulse as Wisp swims into each hoop" }
   ]
 }

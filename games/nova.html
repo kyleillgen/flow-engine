@@ -793,7 +793,7 @@
       if (d.state === "dive" && now > d.arriveAt + d.window) {
         d.state = "gone";
         react = { x: d.tx, y: L.sightY, until: now + 1, mood: "giggle" }; // a friend got away: the fleet giggles
-        if (api.miss()) api.hint("sights", "Fire as the ring closes on the sights");
+        if (api.miss()) api.hint("sights", "Fire as each diver drops into your sights");
       }
       if (d.state !== "dive") d.fade -= d.state === "hit" ? 1 : dt * 0.8;
     }
