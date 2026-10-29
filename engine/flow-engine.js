@@ -158,6 +158,8 @@
           }
           const AudioCtx = window.AudioContext || window.webkitAudioContext;
           if (!AudioCtx) return;
+          // Safari: play like media, so the phone's silent switch doesn't mute the game
+          try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
 
           this.ctx = new AudioCtx();
 
@@ -1335,6 +1337,12 @@
       // Muted or resting: let the fade finish, then stop
       else if (synth.isMuted || resting) restStop = setTimeout(() => (synth.isMuted || resting) && synth.ctx.suspend().catch(() => {}), resting ? 4000 : 300);
       else synth.ctx.resume().catch(() => {});
+    }
+    // A game starts on the press, but a touch screen only lets audio start when the finger lifts
+    // (and Safari keeps a context made on the press suspended), so try again on the gestures that
+    // do count until it runs
+    for (const type of ["pointerup", "touchend", "click", "keydown"]) {
+      window.addEventListener(type, () => started && synth.ctx && synth.ctx.state !== "running" && syncAudio(), { capture: true, passive: true });
     }
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
