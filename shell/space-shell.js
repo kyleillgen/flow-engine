@@ -87,6 +87,10 @@
   .ss-controls { display: flex; gap: 5px; pointer-events: auto; }
   @media (max-width: 520px) { .pb-best { display: none; } }
   @media (max-width: 400px) { .ss-intensity { padding-left: 6px; padding-right: 6px; } }
+  /* Narrow screens (the site's station, the pocket's Mini dock): the extra buttons go so pause and
+     mute stay on screen; intensity and the track are still in the pause card and on their keys */
+  @media (max-width: 360px) { .ss-intensity, .ss-controls [data-track] { display: none; } }
+  @media (max-width: 240px) { .ss-controls [data-style] { display: none; } }
   .ss-over { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; padding: 16px; background: var(--ss-veil); }
   .ss-over.show { display: flex; }
   .ss-hint { position: fixed; bottom: 30px; left: 0; right: 0; z-index: 10; text-align: center; pointer-events: none; transition: opacity .7s; }

@@ -1003,11 +1003,14 @@
         const down = LADDER.find((r) => r < now - 0.5);
         if (down !== undefined) f.cap = Math.max(down, o.rest);
         f.calm = 0;
-      } else if (share < o.budget / 2 && onTime > 0.9 && f.cap !== Infinity && (f.calm += f.span) >= o.calmSec) {
-        const up = LADDER.slice().reverse().find((r) => r > f.cap);
-        f.cap = up === undefined || up >= LADDER[0] ? Infinity : up;
-        f.calm = 0;
-      }
+      } else if (share < o.budget / 2 && onTime > 0.9 && f.cap !== Infinity) {
+        if ((f.calm += f.span) >= o.calmSec) {
+          const up = LADDER.slice().reverse().find((r) => r > f.cap);
+          f.cap = up === undefined || up >= LADDER[0] ? Infinity : up;
+          f.calm = 0;
+        }
+      } else f.calm = 0; // calm has to be in a row
+
       f.work = f.frames = f.span = f.asked = 0;
     };
     f.reset = () => {
@@ -1149,7 +1152,7 @@
     // so it costs no CPU; the beat carries on silently (silentBeat). Muted audio stops too.
     let resting = false, restLevel = 1, restStop = 0;
     let beatCount = 0;
-    let silentBeat = 0;
+    let silentBeat = 0, wasLive = false;
     const audioLive = () => started && synth.ctx && synth.ctx.state === "running";
     const timingLive = () => audioLive() && !!synth.lastBeatTime && !!synth.beatSec;
     let handoverAt = null;
@@ -1456,8 +1459,14 @@
         // Until audio is running (browsers need a gesture first), a silent clock keeps the
         // same tempo, so games can play themselves in attract mode before anyone taps. It keeps
         // running until the audio clock has scheduled its first beat, so motion never freezes
-        // at the moment you take over.
-        if (!timingLive()) silentBeat += dt / eng.beatSec;
+        // at the moment you take over. While the music plays, the silent clock keeps pace with it,
+        // so when a rest or mute stops the audio the beat carries on from where it was, and when
+        // the audio comes back it hands over again.
+        const live = timingLive();
+        if (live && !wasLive) handoverAt = null;
+        wasLive = live;
+        if (live) silentBeat = eng.beatPos();
+        else silentBeat += dt / eng.beatSec;
         if (!audioLive()) {
           while (silentBeat >= beatCount + 1) {
             beatCount++;
