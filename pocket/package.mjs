@@ -30,7 +30,7 @@ The first time, Windows may say "Windows protected your PC" because the app isn'
 Click "More info", then "Run anyway".
 
 Keys: Space or click to play. F switches between Flow and Fidget (every press lands).
-\` cycles chill, normal and intense. 1-6 pick a game.
+\` cycles chill, normal and intense. 1-6 pick a game in the cartridge.
 
 Light up when Claude Code finishes (needs Node, which Claude Code already uses): add hooks that
 run  node "<this folder>\\signal.mjs" start | done | needs.  The full setup is at

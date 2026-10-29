@@ -6,7 +6,7 @@ Little rhythm games for the minute you're waiting: a build, a test run, an AI as
 
 **[Play in your browser](https://kyleillgen.github.io/flow-engine/)** · **[Download Flow Pocket for Windows](https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip)** (2 MB)
 
-## Six cartridges
+## Seven cartridges
 
 | | |
 |---|---|
@@ -16,6 +16,7 @@ Little rhythm games for the minute you're waiting: a build, a test run, an AI as
 | **Lo-fi Cafe** | Rain on the window, latte art, steam off the cups and Biscuit the sleepy cat. |
 | **Hunt** | A woods lodge at dusk: deer, birds, a wild turkey and a gallery booth. |
 | **Deep Sea** | An anglerfish's lantern, a chain of living light and a squid that talks in flashes. |
+| **Classic** | The first four, on a pinball table: a ribbon, a bumper orbit, flippers and a wall-kick shaft. |
 
 Every game is one button. **Space** or tap to play, **F** for Fidget (every press lands, just for the feel of it), and **`** for chill, normal or intense.
 
