@@ -204,7 +204,7 @@ async function browse() {
       throw new Error("this needs puppeteer: npm install --no-save puppeteer-core (and a Chrome or Edge), or puppeteer");
     }
   }
-  const guess = ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Google/Chrome/Application/chrome.exe", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome"].find(existsSync);
+  const guess = ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Google/Chrome/Application/chrome.exe", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "/usr/bin/google-chrome", "/usr/bin/chromium"].find(existsSync);
   const TYPES = { ".html": "text/html", ".js": "text/javascript", ".woff2": "font/woff2", ".png": "image/png", ".json": "application/json" };
   const server = createServer((req, res) => {
     const file = join(ROOT, decodeURIComponent(new URL(req.url, "http://x").pathname));

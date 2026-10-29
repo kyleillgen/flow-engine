@@ -2,11 +2,11 @@
 // short bursts (30 s to 3 min, e.g. while code compiles). It calibrates the beat to the
 // player, never punishes, flies itself when the player stops, and winds the music down so
 // there's a natural place to stop. Design and evidence: docs/flow-engine-research.md;
-// audit: docs/flow-engine-audit.md; API: docs/flow-engine.md.
+// API: docs/flow-engine.md.
 //
 // The synth below (tracks, CHORD_PROGRESSION, GROOVE_VOICES, CoCreationResonanceSynth) is
-// copied unchanged from games/flow-resonance.html, including its beat bookkeeping
-// (getBeatOffset, nudgePhase, setAutopilot and the drift arrangement). Keep the two in step until Flow runs on this file.
+// Flow // Resonance's own, including its beat bookkeeping (getBeatOffset, nudgePhase,
+// setAutopilot and the drift arrangement). Flow (games/flow.html) now runs on this file.
 //
 //   const eng = FlowEngine.create({ key: "myGame" });
 //   eng.start();                 // first user gesture
@@ -278,10 +278,6 @@
 
       getCurrentVoiceName() {
           return GROOVE_VOICES[this.voiceIndex];
-      }
-
-      getCurrentChordName() {
-          return CHORD_PROGRESSION[this.chordIndex].name;
       }
 
       toggleMute() {

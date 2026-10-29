@@ -107,7 +107,6 @@
     if (camCache.at !== now) camCache = { at: now, y: reach(now).s - H * 0.62 };
     return camCache.y;
   }
-  const nextWaiting = () => track.next();
 
   // ---- Sprites --------------------------------------------------------------------------------
   // A bell: a translucent cup opening downward, lit from inside; dim when asleep

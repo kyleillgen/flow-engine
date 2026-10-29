@@ -1,6 +1,6 @@
 # Flow science check: the October 2026 changes
 
-This checks everything added since the engine audit ([flow-engine-audit.md](flow-engine-audit.md)) against the research brief ([flow-engine-research.md](flow-engine-research.md)) and the design rules (never die, never harder over time, the beat calibrated to the player). The changes covered are Fidget and Flow, hold shots, table modes and scoring, intensity, the new games (Orbit, Flipper, Ricochet) and the cleaner art.
+This checks everything added since the engine audit against the research brief ([flow-engine-research.md](flow-engine-research.md)) and the design rules (never die, never harder over time, the beat calibrated to the player). The changes covered are Fidget and Flow, hold shots, table modes and scoring, intensity, the new games (Orbit, Flipper, Ricochet) and the cleaner art.
 
 **Verdict:** the core science is intact. The engine still finds the player's tempo, follows it lightly, keeps a fixed perfect window, and nothing ramps on its own. Five things had drifted, and all five are fixed (table below).
 

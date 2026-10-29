@@ -263,7 +263,6 @@
   // One small thing at a time, every few seconds, a different one each time; none of it is a
   // target and none of it crosses where the sights go
   const across = (u, e, pad) => (e.dir > 0 ? -pad + u * (W + 2 * pad) : W + pad - u * (W + 2 * pad));
-  const moodNow = () => MOODS[(lastTier - 1) % 4];
   const amb = S.ambience([
     // a moth visits the bulbs
     { dur: 6, draw: (ctx, u, e) => {
