@@ -116,6 +116,9 @@
   .cart.out { opacity: 0; pointer-events: none; }
   .gap-glow { position: absolute; pointer-events: none; }
 
+  /* Between phone and wide desktop the shelf column is narrower: smaller cartridges so a row of
+     four doesn't run under the station */
+  @media (min-width: 901px) and (max-width: 1180px) { .shelf .cart { --w: 118px; } }
   .also { margin-top: 30px; color: var(--dim); font-size: 13px; }
   .also a { color: var(--muted); }
 
@@ -394,6 +397,13 @@
     root.style.setProperty("--c2", c ? c.colors[1] : "#c79bff");
   }
 
+  // Load a page into a frame without adding to the browser's history: setting src would add an
+  // entry, and Back would step through earlier games
+  function load(f, url) {
+    try { f.contentWindow.location.replace(new URL(url, location.href).href); } catch (e) { f.src = url; }
+  }
+  let playing = null; // the game file on the screen
+
   function play(c, i, push = true) {
     const g = c.games[i];
     [...gamesEl.children].forEach((b, j) => b.setAttribute("aria-pressed", j === i));
@@ -403,7 +413,8 @@
       screen.classList.add("on");
       try { frame.contentWindow.focus(); } catch (e) {}
     };
-    frame.src = g.file;
+    playing = g.file;
+    load(frame, g.file);
     if (push) history.replaceState(history.state, "", `#${c.id}/${g.file.split("/").pop().replace(".html", "")}`);
   }
 
@@ -460,11 +471,14 @@
       flash.animate([{ opacity: 0.9 }, { opacity: 0 }], { duration: 500, easing: "ease-out" });
     }
     showGames(c, start);
-    // On a phone the station is below the shelf: bring the screen into view
     // On a phone the game opens over the page; the back button closes it
     if (phone()) {
       document.body.classList.add("playing");
-      if (!history.state || !history.state.playing) history.pushState({ playing: true }, "", location.hash);
+      if (!history.state || !history.state.playing) {
+        const hash = location.hash;
+        history.replaceState(null, "", location.pathname + location.search);
+        history.pushState({ playing: true }, "", hash);
+      }
     }
     busy = false;
   }
@@ -475,8 +489,9 @@
     document.body.classList.remove("playing");
     current = null;
     screen.classList.remove("on");
-    frame.removeAttribute("src");
-    frame.src = "about:blank";
+    frame.onload = null;
+    playing = null;
+    load(frame, "about:blank");
     gamesEl.innerHTML = "";
     hintEl.textContent = "";
     unit.classList.remove("on");
@@ -484,14 +499,27 @@
     if (d && !reduced) await d.animate([{ transform: "translateY(0)" }, { transform: "translateY(-60px)", opacity: 0 }], { duration: 260, easing: "ease-in" }).finished;
     docked.innerHTML = "";
     c.el.classList.remove("out");
-    if (clearHash) {
+    if (clearHash && !current) {
       setColors(null);
       history.replaceState(null, "", location.pathname + location.search);
       c.el.focus();
     }
   }
-  q("[data-eject]").onclick = () => (history.state && history.state.playing ? history.back() : eject());
-  window.addEventListener("popstate", () => current && eject());
+  async function ejectNow() {
+    if (busy) return;
+    busy = true;
+    await eject();
+    busy = false;
+  }
+  q("[data-eject]").onclick = () => (history.state && history.state.playing ? history.back() : ejectNow());
+  window.addEventListener("popstate", () => {
+    const [id, game] = location.hash.slice(1).split("/");
+    const c = carts.find((x) => x.id === id);
+    if (!c) return current && ejectNow();
+    const i = Math.max(0, c.games.findIndex((g) => g.file.endsWith(`/${game}.html`)));
+    if (c !== current) insert(c, i);
+    else if (playing !== c.games[i].file) play(c, i, false);
+  });
   // Full screen takes the screen with the game in it; where a page can't go full screen (iPhone
   // Safari), the game opens on its own instead
   // ---- The laptop: click it and it swaps to the front with the game in its pocket window --------
@@ -517,11 +545,11 @@
   }
   function toLaptop() {
     if (station.classList.contains("swapped") || busy) return;
-    const file = current ? frame.getAttribute("src") : carts[0] && carts[0].games[0].file;
+    const file = current ? playing : carts[0] && carts[0].games[0].file;
     saved = current ? file : null;
-    if (current) frame.src = "about:blank"; // one game at a time: it moves to the laptop
+    if (current) (frame.onload = null), load(frame, "about:blank"); // one game at a time: it moves to the laptop
     station.classList.add("swapped");
-    if (file) mini.src = file + (file.includes("?") ? "&" : "?") + "pocket=1";
+    if (file) load(mini, file + (file.includes("?") ? "&" : "?") + "pocket=1");
     mini.onload = () => { try { mini.contentWindow.focus(); } catch (e) {} };
     fitMini();
     tell();
@@ -534,9 +562,9 @@
   function toConsole() {
     if (!station.classList.contains("swapped")) return;
     clearInterval(story);
-    mini.src = "about:blank";
+    load(mini, "about:blank");
     station.classList.remove("swapped");
-    if (saved) frame.src = saved;
+    if (saved) load(frame, saved);
   }
   laptop.onclick = toLaptop;
   laptop.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toLaptop());
@@ -581,8 +609,8 @@
   q("[data-full]").onclick = () => {
     if (!current) return;
     const go = screen.requestFullscreen || screen.webkitRequestFullscreen;
-    if (go) Promise.resolve(go.call(screen)).then(() => { try { frame.contentWindow.focus(); } catch (e) {} }, () => window.open(frame.src, "_blank"));
-    else window.open(frame.src, "_blank");
+    if (go) Promise.resolve(go.call(screen)).then(() => { try { frame.contentWindow.focus(); } catch (e) {} }, () => window.open(playing, "_blank"));
+    else window.open(playing, "_blank");
   };
 
   Promise.all(CARTS.map((id) => fetch(`carts/${id}/cart.json`).then((r) => r.json()))).then((list) => {
