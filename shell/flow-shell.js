@@ -128,14 +128,19 @@
     const reduced = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
 
     let W = 0, H = 0, started = false, flash = 0, bulbFlash = 0;
-    // Frame pacing: a steady 60 fps on average, scheduled by time rather than by counting
-    // display ticks. Measured in the pocket app, the browser's ticks weren't tied to any screen
-    // (about 180 a second), and a tick-counting cap drew an uneven 48 on a 144 Hz screen; a
-    // deadline that advances by exactly 1/60 s keeps the average at 60 whatever the tick rate.
+    // Frame pacing: scheduled by time rather than by counting display ticks. Measured in the
+    // pocket app, the browser's ticks weren't tied to any screen (about 180 a second), and a
+    // tick-counting cap drew an uneven 48 on a 144 Hz screen; a deadline that advances by exactly
+    // one frame keeps the average whatever the tick rate. The rate comes from the engine
+    // (eng.frames, see createFrames), as in the space shell: 60 while someone plays, 30 while
+    // the game plays itself, 10 after ten minutes untouched, stepped down by its governor under
+    // load. No input for a minute: the music rests until the next press.
     // Pocket mode (the pocket app, or ?pocket=1) draws at 0.75x resolution, because the
     // browser's raster and compositing, not the game's code (~0.15 ms a frame), costs the most.
     const pocket = /[?&]pocket=1/.test(location.search) || !!window.NL_OS;
-    const FRAME_MS = 1000 / 60;
+    const FIXED_FPS = +new URLSearchParams(location.search).get("fps") || 0;
+    const REST_MS = (+new URLSearchParams(location.search).get("rest") || 60) * 1000;
+    let lastInput = performance.now();
     let due = 0;
     let fpsFrames = 0;
     let fpsWork = 0; // ms spent drawing, to tell slow JS apart from a slow compositor
@@ -513,6 +518,7 @@
     eng.on("pause", hud);
     // "Claude is done", "Build done": the cue to switch back; the bulbs blink with it
     eng.on("signal", (label) => {
+      lastInput = performance.now(); // the music comes back for the cue; let it play a while
       api.callout(label, W / 2, H * 0.3, "#ffc400", 1.1);
       bulbFlash = 1.6;
       hud();
@@ -594,13 +600,18 @@
       if (g.onRelease) g.onRelease(api, held, e || {});
     }
     function action(e) {
-      downAt = performance.now();
+      downAt = lastInput = performance.now();
+      eng.rest(false);
+      wake();
       if (!started) start();
       if (eng.paused) return setPaused(false);
       fidgetPress(e);
       if (g.onAction) g.onAction(api, e || {});
     }
     function letter(ch) {
+      lastInput = performance.now();
+      eng.rest(false);
+      wake();
       if (!started) start();
       if (eng.paused) return;
       fidgetPress();
@@ -691,11 +702,32 @@
       });
     }
 
+    const playing = () => started && !eng.auto && !eng.paused && (downAt || performance.now() - lastInput < 6000);
+    const frameState = () => (playing() ? "play" : performance.now() - lastInput > eng.frames.o.restSec * 1000 ? "rest" : "auto");
+    const frameRate = () => FIXED_FPS || eng.frames.want(frameState());
+    // Between frames the page sleeps on a timer rather than asking for every vsync, so a slow
+    // frame rate really is cheap. A press wakes it at once.
+    let sleeper = 0;
+    function nextFrame() {
+      const wait = due - performance.now() - 6;
+      if (wait > 4) sleeper = setTimeout(() => ((sleeper = 0), requestAnimationFrame(frame)), wait);
+      else requestAnimationFrame(frame);
+    }
+    function wake() {
+      if (!sleeper) return;
+      clearTimeout(sleeper);
+      sleeper = 0;
+      due = 0;
+      requestAnimationFrame(frame);
+    }
     let last = performance.now();
     function frame(now) {
       if (now < due - 1) return requestAnimationFrame(frame);
-      due = Math.max(due + FRAME_MS, now); // never bank more than one late frame
-      const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
+      due = Math.max(due + 1000 / frameRate(), now); // never bank more than one late frame
+      const frameStart = performance.now();
+      const gap = (now - last) / 1000;
+      const dt = Math.min(0.05, Math.max(0.001, gap));
+      if (started && !downAt) eng.rest(performance.now() - lastInput > REST_MS);
       last = now;
       eng.update(dt);
       if (!eng.paused) {
@@ -767,8 +799,9 @@
           ctx.fillStyle = `rgba(232, 35, 31, ${flash * 0.16})`;
           ctx.fillRect(0, 0, W, H);
         }
+        if (!FIXED_FPS) eng.frames.record(performance.now() - frameStart, gap, frameRate());
       }
-      requestAnimationFrame(frame);
+      nextFrame();
     }
 
     window.addEventListener("resize", resize);
