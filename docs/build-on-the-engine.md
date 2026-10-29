@@ -82,37 +82,39 @@ On the space shell (`shell/space-shell.js`):
 
 ## Prompt kit
 
-Paste this into any AI coding assistant along with `games/template.html` and this guide, then add your idea at the bottom:
+Paste this into Claude or any AI assistant (the site's **Make your own game** button copies the same thing). It gets the files, asks what game you want, and builds it with you:
 
 ```text
-Build a new game for the flow engine (github.com/kyleillgen/flow-engine). Copy
-games/template.html and change only the game section. Do not edit engine/, shell/ or skins/.
+Help me make a small rhythm game on Flow Engine: https://github.com/kyleillgen/flow-engine
 
-Rules:
-- One HTML file in games/, loading ../engine/flow-engine.js, ../skins/pinball/pinball-skin.js,
-  then ../shell/flow-shell.js, then calling FlowShell.mount({ ... }) like the template.
-- Look: a real pinball machine, drawn clean. Pinball parts (pop bumpers via
-  PinballSkin.bumper, drop targets, rubber, rails, inserts, a steel ball via api.ballStops()),
-  70s colours (api.color() is the tier's insert colour; cream #f6e6c0, red #e8231f, yellow
-  #ffc400). No thick black outlines, hard offset shadows or neon glows; soft shadows only.
-- Spawn things in onBeat(n, api) when api.eng.paceBeats() beats have passed since the last
-  spawn. Things arrive or land on a whole beat, at least two beats apart.
-- Move things only as a function of api.eng.beatPos(), never with timers, and never change
-  the speed of something mid-flight.
-- Call api.eng.tap({ height }) on every player action, even one that does nothing.
-- Report results only through api.score(1, quality, handleSec) and api.miss(). Never end
-  the game, never reset the streak, never make anything harder over time.
-- Use api.eng.assist (0 to 1) only to widen margins on things not yet on screen.
-- Write autopilot(dt, api) so the game plays itself calmly when the player stops.
-- Fidget: when api.style === "fidget", make every press succeed (the world bends to the
-  player's hands). A hold then release is a trick shot that never scores: draw api.charge
-  as an arc round the ball and fire it in onRelease(api, held) using api.chargeOf(held).
-- Draw everything in draw(ctx, api, t). Canvas 2D only, no shadowBlur, nothing built per
-  frame that could be cached (use api.cached). Keep it light: it runs beside real work.
-- input: "tap" (Space / up / pointer) or "type" (letters). Extra keys go in onKey and must
-  not use Esc, Enter, Tab, F, -, =, 0-9, [, ], ` or ? (the shell and the pocket own those).
+1. Get the files first.
+   - If you can run commands, clone the repo and work in it.
+   - If you can only browse, read these three:
+     https://raw.githubusercontent.com/kyleillgen/flow-engine/main/docs/build-on-the-engine.md (the rules)
+     https://raw.githubusercontent.com/kyleillgen/flow-engine/main/carts/starter.html (the starting point)
+     https://raw.githubusercontent.com/kyleillgen/flow-engine/main/games/bloom.html (a finished game)
+   Read the rules before anything else.
 
-My idea: <one or two sentences: what appears on the beat, and what the player does>
+2. Before writing any code, ask me what game I want, one question at a time:
+   - What arrives on the beat, and what do I do as it arrives?
+   - What's the world and the mood (space, a cafe, the deep sea, something else)?
+   - Is there a character I should meet?
+   If I'm not sure, offer three short ideas to pick from.
+
+3. Build it as one HTML file on the space shell, keeping the engine's promises:
+   - things arrive on whole beats, at least two apart, and move only with the beat;
+   - nothing gets harder over time, and I can't lose;
+   - it plays itself calmly when I stop (autopilot);
+   - in Fidget (the F key) every press lands.
+   Don't edit engine/, shell/ or skins/. Keep it light: it runs beside real work.
+
+4. Let me play it.
+   - If you can run commands: start a cartridge with npm run cart new <id> "<Name>", make its
+     starter game into mine, run npm run cart check and npm run smoke -- <id>, then serve the
+     repo with python -m http.server 4180 and give me the link
+     (http://localhost:4180/carts/<id>/games/<id>.html).
+   - Otherwise: give me the whole file, and tell me to save it in carts/<id>/games/ in a
+     downloaded copy of the repo and open it the same way.
 ```
 
 ## Choosing engine options

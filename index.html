@@ -54,6 +54,22 @@
   .links a { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 999px; text-decoration: none;
     border: 1px solid var(--line); background: rgba(255, 255, 255, 0.04); font-size: 14px; transition: border-color 0.2s, background 0.2s; }
   .links a:hover, .links a:focus-visible { border-color: rgba(143, 180, 255, 0.6); background: rgba(143, 180, 255, 0.1); outline: none; }
+  .links .make { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 999px; border: 1px dashed rgba(199, 155, 255, 0.55);
+    background: rgba(199, 155, 255, 0.06); font-size: 14px; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+  .links .make:hover, .links .make:focus-visible { border-color: #c79bff; background: rgba(199, 155, 255, 0.14); outline: none; }
+  /* the prompt, shown as it's copied */
+  .prompt { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--line); border-radius: 16px;
+    background: #0d1028; color: var(--ink); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); }
+  .prompt::backdrop { background: rgba(3, 4, 12, 0.7); }
+  .prompt-in { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+  .prompt h2 { margin: 0; font: 600 22px/1.1 Oswald, sans-serif; letter-spacing: 0.05em; text-transform: uppercase; }
+  .prompt p { margin: 0; color: var(--muted); font-size: 14px; }
+  .prompt textarea { width: 100%; height: min(46vh, 360px); resize: vertical; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: #070916; color: #d8dcf5; font: 12.5px/1.5 ui-monospace, Consolas, monospace; }
+  .prompt .row { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+  .prompt .row span { margin-right: auto; color: #6be08a; font-size: 13px; }
+  .prompt button { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05); font-size: 14px; }
+  .prompt button.go { background: linear-gradient(90deg, #8fe9ff, #c79bff); color: #0b0d1e; border-color: transparent; font-weight: 600; }
   .links a.primary { background: linear-gradient(90deg, rgba(143, 233, 255, 0.18), rgba(199, 155, 255, 0.18)); border-color: rgba(199, 155, 255, 0.45); }
   .keys { margin-top: 16px; color: var(--dim); font-size: 13px; }
   kbd { font: 500 12px Inter, sans-serif; color: var(--ink); padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: rgba(255,255,255,0.04); }
@@ -233,6 +249,7 @@
       <p>Tiny rhythm games for the minutes you spend waiting on your agent. <b>They keep your focus, you can't lose,</b> and they play themselves when you look away.</p>
       <div class="links">
         <a class="primary" href="https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip">Flow Pocket for Windows <span style="color:var(--muted)">2 MB</span></a>
+        <button class="make" data-make>Make your own game</button>
         <a href="https://github.com/kyleillgen/flow-engine">Source and docs</a>
       </div>
       <div class="keys"><kbd>Space</kbd> or tap to play &nbsp;·&nbsp; <kbd>F</kbd> Fidget, where every press lands &nbsp;·&nbsp; <kbd>`</kbd> chill, normal or intense</div>
@@ -241,6 +258,43 @@
     <div class="shelf-wrap shelf-part">
       <div class="shelf" data-shelf aria-label="Cartridges"></div>
     </div>
+    <dialog class="prompt" data-prompt aria-labelledby="prompt-title">
+      <div class="prompt-in">
+        <h2 id="prompt-title">Make your own game</h2>
+        <p>Paste this into Claude or any AI assistant. It gets the files it needs, asks what game you want, and builds it with you.</p>
+        <textarea data-prompt-text readonly>Help me make a small rhythm game on Flow Engine: https://github.com/kyleillgen/flow-engine
+
+1. Get the files first.
+   - If you can run commands, clone the repo and work in it.
+   - If you can only browse, read these three:
+     https://raw.githubusercontent.com/kyleillgen/flow-engine/main/docs/build-on-the-engine.md (the rules)
+     https://raw.githubusercontent.com/kyleillgen/flow-engine/main/carts/starter.html (the starting point)
+     https://raw.githubusercontent.com/kyleillgen/flow-engine/main/games/bloom.html (a finished game)
+   Read the rules before anything else.
+
+2. Before writing any code, ask me what game I want, one question at a time:
+   - What arrives on the beat, and what do I do as it arrives?
+   - What's the world and the mood (space, a cafe, the deep sea, something else)?
+   - Is there a character I should meet?
+   If I'm not sure, offer three short ideas to pick from.
+
+3. Build it as one HTML file on the space shell, keeping the engine's promises:
+   - things arrive on whole beats, at least two apart, and move only with the beat;
+   - nothing gets harder over time, and I can't lose;
+   - it plays itself calmly when I stop (autopilot);
+   - in Fidget (the F key) every press lands.
+   Don't edit engine/, shell/ or skins/. Keep it light: it runs beside real work.
+
+4. Let me play it.
+   - If you can run commands: start a cartridge with npm run cart new <id> "<Name>", make its
+     starter game into mine, run npm run cart check and npm run smoke -- <id>, then serve the
+     repo with python -m http.server 4180 and give me the link
+     (http://localhost:4180/carts/<id>/games/<id>.html).
+   - Otherwise: give me the whole file, and tell me to save it in carts/<id>/games/ in a
+     downloaded copy of the repo and open it the same way.</textarea>
+        <div class="row"><span data-copied></span><button data-prompt-close>Close</button><button class="go" data-prompt-copy>Copy prompt</button></div>
+      </div>
+    </dialog>
     <div class="also">Also on the engine: <a href="games/word-rain.html">Word Rain</a>, a typing game, and <a href="games/template.html">Drop Catch</a>, the smallest game to copy for your own.</div>
   </div>
 
@@ -476,6 +530,27 @@
   laptop.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toLaptop());
   q("[data-catch]").onclick = toConsole;
   window.addEventListener("resize", fitMini);
+
+  // ---- Make your own game: copy the prompt, and show it ------------------------------------------
+  const promptBox = q("[data-prompt]"), promptText = q("[data-prompt-text]"), copied = q("[data-copied]");
+  async function copyPrompt() {
+    try {
+      await navigator.clipboard.writeText(promptText.value);
+      copied.textContent = "Copied. Paste it into your assistant.";
+    } catch (e) {
+      promptText.focus();
+      promptText.select(); // no clipboard here: it's selected to copy by hand
+      copied.textContent = "Select all and copy it by hand.";
+    }
+  }
+  q("[data-make]").onclick = () => {
+    copied.textContent = "";
+    promptBox.showModal();
+    copyPrompt();
+  };
+  q("[data-prompt-copy]").onclick = copyPrompt;
+  q("[data-prompt-close]").onclick = () => promptBox.close();
+  promptBox.addEventListener("click", (e) => e.target === promptBox && promptBox.close());
 
   q("[data-full]").onclick = () => {
     if (!current) return;
