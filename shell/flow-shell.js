@@ -46,6 +46,7 @@
   .fs .pb-mult:not(.ready) { display: none; }
   .fs-controls { display: flex; gap: 5px; pointer-events: auto; }
   @media (max-width: 520px) { .fs-voice, .pb-best { display: none; } .fs-controls { gap: 4px; } }
+  @media (max-width: 240px) { .fs-controls [data-style] { display: none; } } /* keep pause and mute on screen */
   .fs-over { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; padding: 16px; background: rgba(20,15,12,.72); }
   .fs-over.show { display: flex; }
   .fs-hint { position: fixed; bottom: 26px; left: 0; right: 0; z-index: 10; text-align: center; pointer-events: none; transition: opacity .7s; }
