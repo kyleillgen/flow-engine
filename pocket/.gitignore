@@ -1,12 +1,13 @@
 bin/
 flow-pocket.exe
-resources/games/
 resources/js/
 *.log
 .storage/
 .tmp/
 # copied in by setup.mjs
+resources/carts/
+# copies from before cartridges (setup.mjs deletes them)
 resources/engine/
 resources/shell/
 resources/skins/
-resources/carts/
+resources/games/

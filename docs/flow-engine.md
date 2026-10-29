@@ -7,7 +7,7 @@
 - Nothing gets harder over time.
 - The game flies itself when the player stops.
 
-The evidence behind each rule is in [flow-engine-research.md](flow-engine-research.md). Where the code meets each recommendation is in [flow-engine-audit.md](flow-engine-audit.md).
+The evidence behind each rule is in [flow-engine-research.md](flow-engine-research.md).
 
 To build a game on it, start with [build-on-the-engine.md](build-on-the-engine.md): it covers the three layers (engine, shell, game), the built-in rules, the five questions a game answers, and a copy-paste prompt kit. Word Rain (`games/word-rain.html`) and Drop Catch (`games/template.html`) are built on it. Flow // Resonance (`games/flow.html`), Orbit, Flipper and Ricochet run on it too.
 
