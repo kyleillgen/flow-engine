@@ -26,7 +26,8 @@
 // arriving at the crosswalk on its beat. The shell's timing ring closes on the coin there, gold
 // on the perfect beat, and a pad on the island beyond shows where Peep lands. Clean is ±0.3 beat
 // (wider with assist, for gaps not yet scheduled), perfect ±0.1.
-// Fidget (F): every press is a happy flap that takes the next coin early. Hold then let go for a
+// Fidget (F): every press brings the next gap to the crosswalk at once and Peep hops through it,
+// lane after lane, with a happy flap. Hold then let go for a
 // super hop; a full charge sets off fireworks. Trick shots never score.
 (() => {
   "use strict";
@@ -133,10 +134,14 @@
     gaps = api.track({
       spawn: () => ({ lane: ++laneCounter }),
       note: (g) => (api.style === "fidget" ? 0.3 + Math.random() * 0.4 : 0.25 + (g.lane % 4) * 0.12),
-      // Fidget crosses only once the gap is here, so Peep never hops into traffic
-      ready: (g, now) => now >= g.at - g.window,
+      // Fidget takes the next gap however far off and brings it to the crosswalk now, so Peep
+      // moves on at every press and still never hops into traffic
+      ready: () => true,
       hit: (g, { perfect, ghost, fidget }) => {
-        if (fidget) happyFlap(api);
+        if (fidget) {
+          g.at = api.eng.beatPos();
+          happyFlap(api);
+        }
         if (!ghost && ++hits === 16) api.hint("super", 'Hold <span class="pb-kbd">Space</span>, let go: a super hop');
         return cross(api, g, true, perfect, ghost);
       },
@@ -148,9 +153,7 @@
       empty: () => {
         flap = clock;
         if (api.style !== "fidget") return;
-        // A Fidget press before the gap is here: a happy flap and the next coin, early
-        const g = gaps.list.find((q) => q.state === "wait" && !q.taken);
-        if (g) take(api, g, false, true);
+        // A Fidget press with no gap coming yet: a happy flap
         happyFlap(api);
       },
       perfect: PERFECT,

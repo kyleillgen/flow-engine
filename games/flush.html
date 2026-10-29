@@ -22,7 +22,8 @@
 // Paths are functions of the beat position. A bird rises for one beat and eases into the top; a
 // clay flies a parabola for a beat and a half up to it. Clean is ±0.3 beat (wider with assist,
 // for ones not yet spawned), perfect ±0.1.
-// Fidget (F): every press tags the nearest one; if none is near, a bird pops up in the sights.
+// Fidget (F): every press moves on to the next one: it tops out then and there, where it is, the
+// sights jump to it and it's tagged. With none coming, a bird bursts out somewhere else.
 // Hold then let go: a whistle that lifts a little flock from the grass; a full charge brings a
 // skein of geese across the sun. Trick shots never score.
 (() => {
@@ -367,14 +368,16 @@
     }
   }
 
-  // 3. A tap: the tracker tags whatever is in reach. In Fidget, with nothing within 1 beat,
-  // one springs up right in the sights instead (from the tracker's empty())
+  // 3. A tap: the tracker tags whatever is in reach. In Fidget it takes the next one however far
+  // off (hit() tops it out where it is now), and with none coming a bird bursts out away from
+  // the sights (from the tracker's empty()), so the sights always move on
   function springUp(api) {
     if (track.list.length >= 14) return;
     const now = api.eng.beatPos();
     const sp = sights(now);
-    const dir = sp.x < W / 2 ? 1 : -1;
-    const m = { kind: "bird", at: now, x0: sp.x - dir * W * 0.1, y0: L.grass + L.b, xa: sp.x, ya: sp.y, dir, look: Math.floor(Math.random() * BIRDS.length), state: "wait", tagAt: -99, window: 0 };
+    const x = sp.x < W / 2 ? W * (0.55 + Math.random() * 0.3) : W * (0.15 + Math.random() * 0.3);
+    const dir = x < W / 2 ? 1 : -1;
+    const m = { kind: "bird", at: now, x0: x - dir * W * 0.1, y0: L.grass + L.b, xa: x, ya: L.topHi + Math.random() * (L.topLo - L.topHi), dir, look: Math.floor(Math.random() * BIRDS.length), state: "wait", tagAt: -99, window: 0 };
     track.list.push(m);
     tag(api, m, false, true);
   }
@@ -384,9 +387,14 @@
   function setup(api) {
     track = api.track({
       spawn,
-      ready: (m, now) => Math.abs(m.at - now) < 1,
+      ready: () => true,
       note: (m) => m.kind === "clay" ? 0.1 : 0.35 + m.look * 0.15,
-      hit: (m, { perfect, ghost }) => {
+      hit: (m, { perfect, ghost, fidget }) => {
+        if (fidget) {
+          // its top is wherever it is now (a bird still in the grass bursts out of its tuft)
+          const now = api.eng.beatPos(), q = posOf(m, now), p = q.out ? q : { x: m.x0, y: m.y0 };
+          Object.assign(m, { xa: p.x, ya: Math.min(p.y, L.grass), at: now });
+        }
         const at = tag(api, m, perfect, ghost);
         if (!ghost && ++hits === 16) api.hint("whistle", 'Hold <span class="pb-kbd">Space</span>, let go: a whistle');
         return at;
