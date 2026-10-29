@@ -13,7 +13,7 @@
   ],
   "games": [
     { "file": "games/nova.html", "label": "Nova", "hint": "Fire as each diver drops into your sights" },
-    { "file": "games/tidelight.html", "label": "Tide", "hint": "Pulse while the hoop's inner ring is gold" },
+    { "file": "games/tidelight.html", "label": "Tide", "hint": "Pulse as Wisp swims into each hoop" },
     { "file": "games/skip.html", "label": "Skip", "hint": "Tap as Bobo lands on each moon" },
     { "file": "games/bloom.html", "label": "Bloom", "hint": "Tap as each seed touches the soil" },
     { "file": "games/hum.html", "label": "Hum", "hint": "Tap as each star krill reaches her" },

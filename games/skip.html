@@ -25,7 +25,8 @@
 // Bobo's flight is a function of the beat position: he leaves one moon on a whole beat and lands
 // on the next on a whole beat, up to two beats in the air, hopping in place while he waits.
 // Clean is ±0.3 beat (wider with assist, for moons not yet spawned), perfect ±0.1.
-// Fidget (F): every press wakes the next moon at once and Bobo does a flip. Hold then let go
+// Fidget (F): every press sends Bobo hopping to the next moon at once (half a beat in the air),
+// and it wakes as he goes; a press while he's in the air does a flip. Hold then let go
 // for a moonshot loop; a full charge sends a shower of shooting stars. Trick shots never score.
 (() => {
   "use strict";
@@ -94,7 +95,7 @@
     }
     const perch = (m) => m.y - m.r - L.bobo * 0.9;
     if (!b) return { x: a.x, y: perch(a) - Math.abs(Math.sin(Math.PI * frac(now))) * L.r * 0.35, air: false, from: a, to: null };
-    const fly = Math.min(2, b.at - a.at);
+    const fly = b.hopFrom !== undefined ? b.at - b.hopFrom : Math.min(2, b.at - a.at); // a Fidget hop is its own length
     const t0 = b.at - fly;
     if (now < t0) return { x: a.x, y: perch(a) - Math.abs(Math.sin(Math.PI * frac(now))) * L.r * 0.35, air: false, from: a, to: b };
     const u = (now - t0) / fly;
@@ -262,8 +263,12 @@
     const now = api.eng.beatPos();
     if (api.style === "fidget") {
       const m = nextWaiting();
+      if (m && !boboAt(now).air) {
+        // off to it now, rather than waiting for its beat
+        m.hopFrom = now;
+        m.at = now + 0.5;
+      } else flip = { t0: clock, turns: 1 };
       if (m) wake(api, m, false, true);
-      flip = { t0: clock, turns: 1 };
       api.eng.tap({ height: m ? m.kind / MOONS.length : 0.5 });
       return;
     }

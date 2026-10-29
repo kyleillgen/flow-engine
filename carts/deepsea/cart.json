@@ -13,8 +13,8 @@
   ],
   "games": [
     { "file": "games/deep-lantern.html", "label": "Lure", "hint": "Glow as each little one touches the lantern" },
-    { "file": "games/deep-siphon.html", "label": "Chain", "hint": "Tap as the light reaches the new bell" },
+    { "file": "games/deep-siphon.html", "label": "Chain", "hint": "Tap as the light reaches the new bud" },
     { "file": "games/deep-bathy.html", "label": "Lamp", "hint": "Snap as the headlamp finds each creature" },
-    { "file": "games/deep-glimmer.html", "label": "Echo", "hint": "Flash back as the far squid's light reaches you" }
+    { "file": "games/deep-glimmer.html", "label": "Echo", "hint": "Flash back as the far squid's light reaches Sela" }
   ]
 }
