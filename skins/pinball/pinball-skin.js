@@ -1,7 +1,7 @@
 // Pinball skin: the shared look for Flow // Resonance and every game on the flow shell.
 // A real machine's parts, drawn clean: a black backbox with an orange 7-segment score,
-// insert lights for the flow meter, quiet glass buttons, a sunburst backglass for the start
-// screen, condensed Oswald type, and a row of chaser bulbs that runs on the beat.
+// insert lights for the flow meter, quiet glass buttons, condensed Oswald type, and a row of
+// chaser bulbs that runs on the beat.
 // No thick black outlines, hard offset shadows or script lettering: those read as clip art.
 // Depth comes from soft shadows, subtle gradients and specular highlights, all baked once into
 // small offscreen sprites, so a frame only stamps images (no per-frame gradients or blur).
@@ -40,7 +40,6 @@
 
   const CSS = `
   .pb-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: linear-gradient(#221a15, #120d0a); border: 0; box-shadow: 0 0 0 1px rgba(246,230,192,.07), 0 1px 0 rgba(255,255,255,.05) inset, 0 10px 28px rgba(0,0,0,.45); border-radius: 14px; padding: 6px 7px 6px 8px; }
-  .pb-cap { display: block; font: 500 9px/1 Oswald, Impact, sans-serif; letter-spacing: .16em; text-transform: uppercase; color: ${C.cream}; opacity: .5; margin-bottom: 3px; }
   .pb-window { display: inline-flex; align-items: center; background: #050302; border-radius: 7px; padding: 4px 6px; line-height: 0; box-shadow: 0 1px 2px rgba(0,0,0,.6) inset, 0 0 0 1px rgba(255,255,255,.04); }
   .pb-best { font: 500 10px Oswald, Impact, sans-serif; letter-spacing: .1em; text-transform: uppercase; color: ${C.cream}; opacity: .45; margin-left: 8px; }
   .pb-label { display: block; font: 500 11px/1.15 Oswald, Impact, sans-serif !important; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -62,11 +61,6 @@
   .pb-bar .pb-icon { padding: 5px 6px !important; }
   .pb-badge { display: inline-block; font: 600 9px/1 Oswald, Impact, sans-serif; letter-spacing: .1em; text-transform: uppercase; padding: 2px 4px; border-radius: 4px; background: rgba(246,230,192,.1); color: ${C.cream}; opacity: .75; vertical-align: 1px; }
   .pb-badge.ready { background: ${C.yellow}; color: ${C.black}; opacity: 1; }
-  .pb-backglass { overflow: hidden; background: ${C.red} !important; }
-  /* The sunburst stays still: turning it cost ~10 fps in the pocket app on a busy GPU's screen */
-  .pb-backglass::before { content: ""; position: absolute; left: 50%; top: 45%; width: 260vmax; height: 260vmax; margin: -130vmax 0 0 -130vmax; background: repeating-conic-gradient(from 0deg, ${C.red} 0 10deg, #f0401c 10deg 20deg); }
-  .pb-backglass::after { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at 50% 45%, transparent 0 35%, rgba(20,15,12,.55) 75%); }
-  .pb-backglass > * { position: relative; z-index: 1; }
   @media (prefers-reduced-motion: reduce) { .pb-card, .pb-paused { animation: none; } }
   .pb-card { max-width: 24rem; width: 100%; background: linear-gradient(#fbf0d6, ${C.cream}); color: #3a2a1c; border: 0; border-radius: 18px; box-shadow: 0 1px 0 rgba(255,255,255,.7) inset, 0 24px 60px rgba(0,0,0,.55); padding: 22px 22px 18px; animation: pb-pop .45s cubic-bezier(.34,1.56,.64,1) both; }
   @keyframes pb-pop { from { opacity: 0; transform: translateY(12px) scale(.96); } to { opacity: 1; transform: none; } }
@@ -81,18 +75,12 @@
   .pb-title { margin: 6px 0 10px; font: 600 38px/1 Oswald, Impact, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: ${C.cream}; text-shadow: 0 2px 18px rgba(0,0,0,.5); }
   .pb-card .pb-title { color: ${C.red}; text-shadow: none; }
   .pb-card p { margin: 0 0 14px; font: 400 14px/1.5 Inter, system-ui, sans-serif; color: #3a2a1c; }
-  .pb-keys { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font: 500 12px Oswald, Impact, sans-serif; letter-spacing: .05em; text-transform: uppercase; color: #3a2a1c; margin-bottom: 16px; }
   .pb-kbd { display: inline-block; min-width: 1.7em; padding: 0 .4em; background: #fffaf0; border: 0; border-radius: 5px; box-shadow: 0 0 0 1px rgba(20,15,12,.16), 0 1px 0 rgba(20,15,12,.2); color: ${C.black}; font: 600 10px/1.6 Oswald, Impact, sans-serif; letter-spacing: .04em; text-align: center; text-transform: none; }
-  .pb-start { width: 100%; padding: 12px; font: 600 20px/1 Oswald, Impact, sans-serif !important; letter-spacing: .16em; text-transform: uppercase; color: #fff !important; background: linear-gradient(#f0332d, ${C.red}) !important; border: 0 !important; border-radius: 12px !important; box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 6px 16px rgba(232,35,31,.3); cursor: pointer; }
-  .pb-start { transition: transform .18s cubic-bezier(.34,1.56,.64,1), box-shadow .18s ease; }
-  .pb-start:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 8px 22px rgba(232,35,31,.4); }
-  .pb-start:active { transform: translateY(1px) scale(.99); box-shadow: 0 2px 6px rgba(232,35,31,.35); transition-duration: .05s; }
-  .pb-or { margin-top: 10px; text-align: center; font: 500 11px Oswald, Impact, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: #7a5a3c; }
   .pb-paused { font: 600 40px/1 Oswald, Impact, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: ${C.cream}; text-shadow: 0 2px 20px rgba(0,0,0,.5); }
   .pb-sub { margin-top: 10px; font: 500 12px Oswald, Impact, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: ${C.cream}; opacity: .7; }
   .pb-rows div { display: flex; justify-content: space-between; gap: 12px; margin: 7px 0; font: 500 12px Oswald, Impact, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: #3a2a1c; }
   .pb-note { margin-top: 10px; font: 400 12px/1.45 Inter, system-ui, sans-serif; color: #6b4c30; }
-  @media (max-width: 520px) { .pb-bar { gap: 7px; padding: 5px 6px; } .pb-window { padding: 3px 5px; } .pb-window svg { width: auto; height: 17px; } .pb-lights { gap: 2px; } .pb-btn { padding: 5px 7px !important; } .pb-bar .pb-btn { padding: 5px 6px !important; font-size: 10px !important; } .pb-cap .pb-badge { display: none; } }
+  @media (max-width: 520px) { .pb-bar { gap: 7px; padding: 5px 6px; } .pb-window { padding: 3px 5px; } .pb-window svg { width: auto; height: 17px; } .pb-lights { gap: 2px; } .pb-btn { padding: 5px 7px !important; } .pb-bar .pb-btn { padding: 5px 6px !important; font-size: 10px !important; } }
   @media (max-width: 360px) { .pb-label { letter-spacing: .03em; } .pb-window svg { height: 15px; } }
   /* Tips and the attract line: a dark glass pill with cream type, quiet over any playfield */
   .pb-hint { display: inline-block; max-width: calc(100vw - 32px); padding: 6px 12px; background: rgba(14,10,8,.78); color: ${C.cream}; border-radius: 999px; box-shadow: 0 0 0 1px rgba(246,230,192,.12) inset, 0 6px 18px rgba(0,0,0,.35); font: 500 11px/1.3 Oswald, Impact, sans-serif; letter-spacing: .1em; text-transform: uppercase; }
