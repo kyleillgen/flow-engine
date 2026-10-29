@@ -7,7 +7,7 @@ const path = require("node:path");
 
 globalThis.window = {};
 require(path.join(__dirname, "..", "engine", "flow-engine.js"));
-const { createController, fitTempo, BAND_MIN, BAND_MAX } = window.FlowEngine;
+const { createController, createFrames, fitTempo, BAND_MIN, BAND_MAX } = window.FlowEngine;
 
 // phases: [{ every: ms between actions, secs, jitter: ms (uniform ±), skip }]
 function run(phases, options, seed = 1) {
@@ -359,4 +359,40 @@ test("a lo-fi game can lower the tempo floor and settle at 76 BPM", () => {
   // and the default floor still holds it up at the band's bottom
   const d = run([{ every: 60000 / 76, secs: 20 }], { perBeat: [1] }).c;
   assert.ok(d.bpm >= BAND_MIN - 0.01, `default floor: ${d.bpm.toFixed(1)}`);
+});
+
+test("frame rates follow the player, and the governor steps down under load and back up when calm", () => {
+  const f = createFrames();
+  assert.equal(f.want("play"), 60);
+  assert.equal(f.want("auto"), 30);
+  assert.equal(f.want("rest"), 10);
+  // seconds of frames at the asked rate, each taking workMs; delivered: the share actually drawn
+  const run = (secs, state, workMs, delivered = 1) => {
+    for (let t = 0; t < secs; ) {
+      const fps = f.want(state) * delivered;
+      f.record(workMs, 1 / fps, f.want(state));
+      t += 1 / fps;
+    }
+  };
+  run(4, "play", 1); // 6% of a core: fine
+  assert.equal(f.want("play"), 60);
+  run(2.1, "play", 3); // 18%: one rung down
+  assert.equal(f.want("play"), 45);
+  run(2.1, "play", 5); // still heavy: another
+  assert.equal(f.want("play"), 30);
+  assert.equal(f.want("auto"), 30, "the cap only lowers");
+  run(30, "play", 0.5); // calm: back up a rung every 8 s
+  assert.equal(f.want("play"), 60);
+  // A busy machine: frames come at half the rate asked
+  run(2.1, "auto", 0.5, 0.5);
+  assert.ok(f.want("auto") < 30, `busy: ${f.want("auto")}`);
+  // Never below rest, however heavy
+  for (let i = 0; i < 10; i++) run(2.1, "play", 50);
+  assert.equal(f.want("play"), 10);
+  // A hidden page's long gap isn't counted
+  const g = createFrames();
+  g.record(1, 5, 60);
+  assert.equal(g.want("play"), 60);
+  // Options
+  assert.equal(createFrames({ play: 30, rest: 5 }).want("play"), 30);
 });

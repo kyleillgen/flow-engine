@@ -35,9 +35,9 @@ import zlib from "node:zlib";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // idleCpu: percent of one core for a game's page and GPU work while it plays itself in the
-// pocket's frame, measured headless. Every game measured 7-10 when this was set; the real
-// pocket, untouched, came to about 9% of a core in all. See docs/build-on-the-engine.md.
-const BUDGET = { bytes: 512 * 1024, drawMs: 4, heapMB: 48, games: 6, idleCpu: 15 };
+// pocket's frame at the default 30 frames a second, measured headless. Every game measured 21-36
+// when this was set. See docs/build-on-the-engine.md.
+const BUDGET = { bytes: 512 * 1024, drawMs: 4, heapMB: 48, games: 6, idleCpu: 45 };
 const ALWAYS = ["engine/flow-engine.js", "icon.png"];
 const FORBIDDEN_EXT = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".ogg", ".wav", ".m4a", ".mp4", ".webm"];
 
