@@ -65,9 +65,18 @@ Add these hooks to `~/.claude/settings.json`, merged with any you already have. 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"C:/path/to/Flow Pocket/signal.mjs\" start", "async": true, "timeout": 5 }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "node \"C:/path/to/Flow Pocket/signal.mjs\" done", "async": true, "timeout": 5 }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "node \"C:/path/to/Flow Pocket/signal.mjs\" needs", "async": true, "timeout": 5 }] }]
+    "UserPromptSubmit": [{ "hooks": [{
+      "type": "command", "async": true, "timeout": 5,
+      "command": "node \"C:/path/to/Flow Pocket/signal.mjs\" start"
+    }] }],
+    "Stop": [{ "hooks": [{
+      "type": "command", "async": true, "timeout": 5,
+      "command": "node \"C:/path/to/Flow Pocket/signal.mjs\" done"
+    }] }],
+    "Notification": [{ "hooks": [{
+      "type": "command", "async": true, "timeout": 5,
+      "command": "node \"C:/path/to/Flow Pocket/signal.mjs\" needs"
+    }] }]
   }
 }
 ```
