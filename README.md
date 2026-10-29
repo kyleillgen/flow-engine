@@ -43,6 +43,8 @@ The browser version runs on desktop and phone. In a game, **?** shows the keys.
 
 ## Flow Pocket: play beside your editor
 
+![Flow Pocket docked beside Claude Code: Claude works on a task with its timer running while Orbit, then Tide, plays in the pocket](docs/media/coding.webp)
+
 A small always-on-top window that docks at the side of your screen, in a corner, or as a tiny square.
 
 1. [Download the zip](https://github.com/kyleillgen/flow-engine/releases/latest/download/Flow-Pocket-windows.zip) and unzip it anywhere.
