@@ -24,7 +24,9 @@ const README = `Flow Pocket
 Rhythm micro-games in a small always-on-top window, for the minute while code builds or an
 AI assistant works. You can't lose, nothing speeds up, and it plays itself when you look away.
 
-Start it: double-click "Flow Pocket.cmd".
+Start it: double-click "Flow Pocket.cmd". For a desktop shortcut, right-click it, choose
+Show more options > Send to > Desktop, then give the shortcut flow-pocket.ico (Properties >
+Change Icon).
 
 The first time, Windows may say "Windows protected your PC" because the app isn't code-signed.
 Click "More info", then "Run anyway".
@@ -44,7 +46,7 @@ syncCarts({ dropped: false });
 
 rmSync(DIST, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
-for (const f of ["flow-pocket.exe", "neutralino.config.json", "Flow Pocket.cmd", "signal.mjs"]) copyFileSync(join(HERE, f), join(OUT, f));
+for (const f of ["flow-pocket.exe", "neutralino.config.json", "Flow Pocket.cmd", "signal.mjs", "flow-pocket.ico"]) copyFileSync(join(HERE, f), join(OUT, f));
 for (const d of ["js", "carts"]) cpSync(join(HERE, "resources", d), join(OUT, "resources", d), { recursive: true });
 for (const f of ["index.html", "icon.png"]) copyFileSync(join(HERE, "resources", f), join(OUT, "resources", f));
 writeFileSync(join(OUT, "README.txt"), README.replace(/\n/g, "\r\n"));
