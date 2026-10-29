@@ -80,7 +80,7 @@
   .pb-paused { animation: cf-drop .5s cubic-bezier(.34,1.4,.64,1) both; }
   @keyframes cf-drop { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
   .pb-vignette { position: fixed; inset: 0; z-index: 5; pointer-events: none; background: radial-gradient(ellipse at 50% 42%, transparent 55%, rgba(12,8,9,.55) 100%); }
-  .cf-grain { position: fixed; inset: -64px; z-index: 6; pointer-events: none; opacity: .09; mix-blend-mode: overlay; animation: cf-grain .5s steps(4) infinite; }
+  .cf-grain { position: fixed; inset: -64px; z-index: 6; pointer-events: none; opacity: .09; mix-blend-mode: overlay; }
   @keyframes cf-grain { 0% { transform: translate(0,0); } 25% { transform: translate(-23px,17px); } 50% { transform: translate(31px,-9px); } 75% { transform: translate(-11px,-29px); } 100% { transform: translate(0,0); } }
   .pb-kicker { font: 600 11px Inter, system-ui, sans-serif; letter-spacing: .2em; text-transform: lowercase; color: ${C.amber}; }
   .pb-title { margin: 6px 0 10px; font: 400 40px/1 Oswald, Impact, sans-serif; letter-spacing: .2em; text-transform: lowercase; color: #fbefdc; text-shadow: 0 0 14px rgba(242,181,107,.55), 0 0 40px rgba(242,181,107,.25); }

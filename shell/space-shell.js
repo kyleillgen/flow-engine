@@ -461,7 +461,7 @@
       hud();
     }
     function fire() {
-      downAt = performance.now();
+      downAt = lastInput = performance.now();
       if (!started) start();
       if (eng.paused) return setPaused(false);
       // Fidget: the press is a note at once; slow ones get a wide ring of light
@@ -529,6 +529,7 @@
     window.addEventListener("blur", release);
 
     function onKeyDown(e) {
+      lastInput = performance.now();
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const keys = q("[data-keyscard]");
       if (keys.classList.contains("show") && e.key !== "?") {
@@ -584,13 +585,20 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (g.resize) g.resize(api);
     }
-    const FRAME_MS = 1000 / 60;
+    // Full speed only while someone is playing. Attract, autopilot, pause, or no input for 6 s:
+    // 20 frames a second in the pocket (30 in a browser), which roughly halves the CPU while the
+    // game plays itself beside your work. Motion runs on the beat clock, so it only gets choppier,
+    // never slower. ?fps=N fixes the rate, for measuring.
+    const FIXED_FPS = +new URLSearchParams(location.search).get("fps") || 0;
+    const IDLE_FPS = pocket ? 20 : 30;
+    let lastInput = -1e9;
+    const frameMs = () => 1000 / (FIXED_FPS || (started && !eng.auto && !eng.paused && (downAt || performance.now() - lastInput < 6000) ? 60 : IDLE_FPS));
     let due = 0, last = performance.now(), chase = 0;
     let fpsFrames = 0, fpsWork = 0, fpsSince = performance.now();
     function frame(now) {
       if (now < due - 1) return requestAnimationFrame(frame);
-      due = Math.max(due + FRAME_MS, now);
-      const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
+      due = Math.max(due + frameMs(), now);
+      const dt = Math.min(0.06, Math.max(0.001, (now - last) / 1000));
       last = now;
       eng.update(dt);
       if (!eng.paused) {
