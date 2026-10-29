@@ -589,18 +589,19 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (g.resize) g.resize(api);
     }
-    // The pocket's CPU budget (docs/build-on-the-engine.md): it sits beside your work all day.
-    // Playing: 30 frames a second in the pocket (60 in a browser); tap timing comes from input
-    // events and the audio clock, so only smoothness changes. Untouched (attract, autopilot,
-    // pause, or no input for 6 s): 10 in the pocket (30 in a browser). No input for a minute:
-    // the music rests (fades out and stops) until the next press. Motion runs on the beat clock,
-    // so it only gets choppier, never slower. ?fps=N fixes the rate and ?rest=S the rest delay, for measuring.
+    // Frame rates come from the engine (eng.frames, see createFrames): 60 while someone plays,
+    // 30 while the game plays itself (attract, autopilot, pause, or no input for 6 s), 10 after
+    // ten minutes untouched, and its governor steps them down when the frames get heavy or the
+    // machine is busy. Tap timing comes from input events and the audio clock, so the rate only
+    // changes smoothness. No input for a minute: the music rests (fades out and stops) until the
+    // next press. ?fps=N fixes the rate and ?rest=S the music's rest delay, for measuring.
     const FIXED_FPS = +new URLSearchParams(location.search).get("fps") || 0;
-    const [PLAY_FPS, IDLE_FPS] = pocket ? [30, 10] : [60, 30];
     const REST_MS = (+new URLSearchParams(location.search).get("rest") || 60) * 1000;
-    let lastInput = -1e9;
+    let lastInput = performance.now();
     const playing = () => started && !eng.auto && !eng.paused && (downAt || performance.now() - lastInput < 6000);
-    const frameMs = () => 1000 / (FIXED_FPS || (playing() ? PLAY_FPS : IDLE_FPS));
+    const frameState = () => (playing() ? "play" : performance.now() - lastInput > eng.frames.o.restSec * 1000 ? "rest" : "auto");
+    const frameRate = () => FIXED_FPS || eng.frames.want(frameState());
+    const frameMs = () => 1000 / frameRate();
     let due = 0, last = performance.now(), chase = 0;
     let fpsFrames = 0, fpsWork = 0, fpsSince = performance.now();
     // Between frames the page sleeps on a timer rather than asking for every vsync, so a slow
@@ -622,7 +623,9 @@
     function frame(now) {
       if (now < due - 1) return requestAnimationFrame(frame);
       due = Math.max(due + frameMs(), now);
-      const dt = Math.min(0.12, Math.max(0.001, (now - last) / 1000));
+      const frameStart = performance.now();
+      const gap = (now - last) / 1000;
+      const dt = Math.min(0.12, Math.max(0.001, gap));
       if (started && !downAt) eng.rest(performance.now() - lastInput > REST_MS);
       last = now;
       eng.update(dt);
@@ -674,6 +677,7 @@
         Skin.bulbs(ctx, W, H - 9, chase / 2, flash > 0 && Math.floor(flash * 10) % 2 === 0 ? 1 : 0);
         fpsFrames++;
         fpsWork += performance.now() - workStart;
+        if (!FIXED_FPS) eng.frames.record(performance.now() - frameStart, gap, frameRate());
         if (now - fpsSince > 2000) {
           if (window.parent !== window) window.parent.postMessage({ type: "flow:fps", fps: Math.round((fpsFrames * 1000) / (now - fpsSince)), workMs: +(fpsWork / fpsFrames).toFixed(2), canvas: canvas.width + "x" + canvas.height }, "*");
           fpsFrames = fpsWork = 0;

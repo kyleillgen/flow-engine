@@ -2,7 +2,7 @@
 
 A small always-on-top desktop window for playing the flow-engine games beside your editor while code builds or an AI assistant works, without running a browser.
 
-It runs on [Neutralinojs](https://neutralino.js.org), which uses the WebView2 engine already built into Windows 11 instead of bundling a browser. It's one borderless window with no tabs or extensions. Games draw at 0.75× resolution and pause their audio while hidden, and the launcher passes WebView2 a few options: one renderer process, GPU work in the main process, no background networking. Games draw at 30 frames a second while you play and 10 while one plays itself, and the music rests after a minute untouched. Measured on the author's machine with a game playing itself, the whole app used about 9% of one CPU core and 128 MB of private memory. Nothing loads from the network: the games, engine and fonts all ship inside it.
+It runs on [Neutralinojs](https://neutralino.js.org), which uses the WebView2 engine already built into Windows 11 instead of bundling a browser. It's one borderless window with no tabs or extensions. Games draw at 0.75× resolution and pause their audio while hidden, and the launcher passes WebView2 a few options: one renderer process, GPU work in the main process, no background networking. Games draw at 60 frames a second while you play, 30 while one plays itself and 10 after ten minutes untouched, and step down by themselves when the computer is busy; the music rests after a minute untouched. Frame rates are an engine option (docs/flow-engine.md). Nothing loads from the network: the games, engine and fonts all ship inside it.
 
 ## Download
 
