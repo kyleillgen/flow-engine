@@ -972,6 +972,53 @@
   }
 
   // ==========================================================================
+  // Frame rates: how often the shell draws. Smoothness costs CPU (headless, one game left alone
+  // used 24-34% of a core at 30 frames a second, about 8% at 10), so the rate follows what the
+  // player is doing:
+  //   play 60 while someone plays, auto 30 while the game plays itself, rest 10 once nobody has
+  //   touched it for restSec (600 s, ten minutes).
+  // And a governor follows the machine. A page can't read CPU usage, so it watches what it can:
+  // the share of a core its own frames take, and whether frames arrive as often as asked (a
+  // busy machine delivers them late). Every `window` seconds, over budget (0.12 of a core) or
+  // under 80% of the asked rate steps the cap down one rung of LADDER; `calmSec` in a row at
+  // under half the budget and on time steps it back up. The cap only ever lowers the rate, and
+  // never below rest. Pure, like the pacer: the shell reports each frame and asks for the rate.
+  // ==========================================================================
+  const LADDER = [60, 45, 30, 20, 15, 10];
+  function createFrames(options) {
+    const o = Object.assign({ play: 60, auto: 30, rest: 10, restSec: 600, budget: 0.12, window: 2, calmSec: 8 }, options || {});
+    const f = { o, cap: Infinity, work: 0, frames: 0, span: 0, asked: 0, calm: 0 };
+    // state: "play", "auto" or "rest"
+    f.want = (state) => Math.max(Math.min(o.rest, o[state]), Math.min(o[state], f.cap));
+    // workMs: time the frame took; dtSec: time since the last one; asked: the rate it was drawn at
+    f.record = (workMs, dtSec, asked) => {
+      if (dtSec > 0.5) return f.reset(); // hidden or stalled: not a measurement
+      f.work += workMs;
+      f.frames++;
+      f.span += dtSec;
+      f.asked += asked * dtSec;
+      if (f.span < o.window) return;
+      const share = f.work / 1000 / f.span;
+      const onTime = f.frames / f.asked; // frames delivered per frame asked for
+      const now = Math.min(f.cap, f.asked / f.span);
+      if (share > o.budget || onTime < 0.8) {
+        const down = LADDER.find((r) => r < now - 0.5);
+        if (down !== undefined) f.cap = Math.max(down, o.rest);
+        f.calm = 0;
+      } else if (share < o.budget / 2 && onTime > 0.9 && f.cap !== Infinity && (f.calm += f.span) >= o.calmSec) {
+        const up = LADDER.slice().reverse().find((r) => r > f.cap);
+        f.cap = up === undefined || up >= LADDER[0] ? Infinity : up;
+        f.calm = 0;
+      }
+      f.work = f.frames = f.span = f.asked = 0;
+    };
+    f.reset = () => {
+      f.work = f.frames = f.span = f.asked = 0;
+    };
+    return f;
+  }
+
+  // ==========================================================================
   // Play style: Flow (the game, with score and stakes) or Fidget (a toy). Pure, like the
   // controller; the engine plays its notes and saves the choice. Fidget turns the table around:
   // the world bends to the player's hands instead of the hands fitting the world, so every press
@@ -1061,7 +1108,8 @@
         track: null, // the starting track, by name ("RAIN ON GLASS") or index; the player's choice wins
         voice: null, // the starting voice, by name ("LO-FI RHODES") or index; the player's choice wins
         lofi: false, // swung 16ths, a softer kit, vinyl crackle, tape wow and a muffled master
-        rain: false // a rain-on-glass room tone under the music
+        rain: false, // a rain-on-glass room tone under the music
+        frames: null // frame rates and the governor (see createFrames), e.g. { play: 30 }
       },
       options || {}
     );
@@ -1071,6 +1119,9 @@
 
     const ctrl = createController(o);
     const pacer = createPacer(o.pacing);
+    // ?frames=60,30,10 sets play, auto and rest for one page
+    const fr = (params.get("frames") || "").split(",").map(Number);
+    const frames = createFrames(Object.assign({}, o.frames, fr[0] ? { play: fr[0] } : {}, fr[1] ? { auto: fr[1] } : {}, fr[2] ? { rest: fr[2] } : {}));
     const style = createStyle(ctrl);
     const synth = new CoCreationResonanceSynth();
     synth.lofi = !!o.lofi;
@@ -1314,6 +1365,7 @@
       ctrl,
       synth,
       pacer,
+      frames,
       quietLead: false,
       holdTempo: false, // true: actions don't queue the grid-snapped lead note (Fidget plays its own)
       // An immediate note for Fidget: no waiting for the grid, in key with the current chord.
@@ -1590,5 +1642,5 @@
     return eng;
   }
 
-  window.FlowEngine = { create, createController, createPacer, createStyle, fitTempo, BAND_MIN, BAND_MAX, TRACKS, version: 1 };
+  window.FlowEngine = { create, createController, createPacer, createFrames, createStyle, fitTempo, BAND_MIN, BAND_MAX, TRACKS, version: 1 };
 })();
