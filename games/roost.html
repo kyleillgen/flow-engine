@@ -21,7 +21,8 @@
 // The peek is a function of the beat position: the wattle from 1.5 beats before, out with a little
 // overshoot in the quarter beat before its beat, held, then back in by 0.9 beat after. Clean is
 // ±0.3 beat (wider with assist, for turkeys not yet spawned), perfect ±0.1.
-// Fidget (F): every press tags a turkey; if none is close, one pops out by the sights.
+// Fidget (F): every press moves on to the next turkey: it pops out then and there, the sights
+// jump to it and it's tagged. With none coming, one pops out at another trunk.
 // Hold then let go: a gobble call that rings out and shakes leaves down; a full charge also lights the
 // moon and sends a shooting star. Trick shots never score.
 (() => {
@@ -412,16 +413,18 @@
     return { trunk, side, perch: H * (0.42 + Math.random() * 0.26), look: Math.floor(Math.random() * TURKEYS.length), tagAt: -99 };
   }
 
-  // 3. A tap: the tracker tags whatever is in reach. In Fidget, with nothing within 1 beat,
-  // one springs up right in the sights instead (from the tracker's empty())
+  // 3. A tap: the tracker tags whatever is in reach. In Fidget it takes the next turkey however
+  // far off (hit() brings its beat to now), and with none coming one pops out at another trunk
+  // (from the tracker's empty()), so the sights always move on
   function springUp(api) {
     if (track.list.length >= 10) return;
     const now = api.eng.beatPos();
     const sp = sights(now);
-    let trunk = 0;
-    L.trunks.forEach((t, i) => Math.abs(t.x - sp.x) < Math.abs(L.trunks[trunk].x - sp.x) && (trunk = i));
-    const side = sp.x >= L.trunks[trunk].x ? 1 : -1;
-    const m = { at: now, trunk, side, perch: clamp(sp.y, H * 0.4, H * 0.7), look: Math.floor(Math.random() * TURKEYS.length), state: "wait", tagAt: -99, window: 0 };
+    let near = 0;
+    L.trunks.forEach((t, i) => Math.abs(t.x - sp.x) < Math.abs(L.trunks[near].x - sp.x) && (near = i));
+    const trunk = (near + 1 + Math.floor(Math.random() * (L.n - 1))) % L.n;
+    const side = trunk === 0 ? 1 : trunk === L.n - 1 ? -1 : Math.random() < 0.5 ? 1 : -1;
+    const m = { at: now, trunk, side, perch: H * (0.42 + Math.random() * 0.26), look: Math.floor(Math.random() * TURKEYS.length), state: "wait", tagAt: -99, window: 0 };
     track.list.push(m);
     tag(api, m, false, true);
   }
@@ -431,9 +434,10 @@
   function setup(api) {
     track = api.track({
       spawn,
-      ready: (m, now) => Math.abs(m.at - now) < 1,
+      ready: () => true,
       note: (m) => (m.perch - H * 0.4) / (H * 0.3),
-      hit: (m, { perfect, ghost }) => {
+      hit: (m, { perfect, ghost, fidget }) => {
+        if (fidget) m.at = api.eng.beatPos(); // out now, wherever it was going to be
         const at = tag(api, m, perfect, ghost);
         if (!ghost && ++hits === 16) api.hint("gobble", 'Hold <span class="pb-kbd">Space</span>, let go: a gobble call');
         return at;
