@@ -602,10 +602,9 @@
     // it moves with the station, which stays put as the page scrolls, so it has to fit the window
     top = Math.min(top, innerHeight - 64 - laptop.offsetHeight * scale);
     station.style.setProperty("--ly", `${top - (st.top + 150)}px`);
-    // Forward, it sits just under the console, which shrinks to 0.42 and lifts by 14% of its height
-    // (so its bottom lands 28% of the way down), overlapping the console's edge a little
-    const con = q("[data-console]"), conBottom = st.top + con.offsetTop + con.offsetHeight * 0.28;
-    const sy = Math.min(conBottom - 24, innerHeight - 24 - laptop.offsetHeight) - (st.top + 150);
+    // Forward, its base comes down level with the bottom shelf (as far as the window allows)
+    const floor = Math.min(boards[boards.length - 1].getBoundingClientRect().bottom, innerHeight - 24);
+    const sy = floor - laptop.offsetHeight - (st.top + 150);
     station.style.setProperty("--sy", `${Math.max(0, sy)}px`);
   }
   window.addEventListener("resize", () => (fitMini(), placeLaptop()));
