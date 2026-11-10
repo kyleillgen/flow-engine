@@ -1,8 +1,8 @@
 // Space shell: the body for neon space games on the flow engine. A second shell beside
 // flow-shell.js (the pinball one), built only on what engine/flow-engine.js exposes. It owns the
 // cockpit HUD, one fire button (tap, or hold and let go), Flow and Fidget, the standard keys,
-// pause, the attract marquee, points and the frame loop. Table modes and ranks belong to the
-// pinball shell and aren't here. Fidget's rules are the engine's (eng.style); this shell shows
+// pause, the attract marquee, points, stamps and the frame loop. Table modes and ranks belong to
+// the pinball shell and aren't here. Fidget's rules are the engine's (eng.style); this shell shows
 // the switch, lights the meter with eng.rev, and passes presses on. A game makes every press
 // work by checking api.style in onFire.
 //
@@ -28,6 +28,12 @@
 //      hit(quality, handleSec, x, y), miss(), bonus(n, label, x, y), callout(text, x, y, color, scale),
 //      ring(x, y, color, size), hint(id, html), track({...}), drawCharge(x, y, r, color, full),
 //      cue(x, y, beatsToGo, perfect, size)   the timing ring, gold on the perfect beat
+//
+// Stamps: every game keeps a small collection for good, with nothing to lose. Six stamps are the
+// shell's (taps and perfects by hand, the top tier, bars it played while you were away), and a
+// game's own named moments are its finds: any api.bonus label or api.callout at scale 1 or more
+// that happens in the player's hands is kept the first time, with no extra code in the game.
+// Autoplay only ever fills its own tally, one a bar, and never finds anything.
 //
 // api.track() runs the usual "something arrives on a beat, tap as it does" loop for you, so a
 // game only says what arrives and how it looks:
@@ -97,6 +103,13 @@
   .ss-marquee { position: fixed; left: 0; right: 0; top: var(--ss-marqueeTop); z-index: 15; text-align: center; pointer-events: none; transition: opacity .6s, transform .6s cubic-bezier(.34,1.56,.64,1); }
   .ss-marquee.gone { opacity: 0; transform: translateY(-12px) scale(.96); }
   .ss-marquee .pb-title { font-size: 44px; letter-spacing: .14em; margin: 0 0 14px; animation: var(--ss-strike) 1.4s linear both; }
+  .ss-pips { margin-top: 16px; font: 500 13px var(--ss-head); letter-spacing: .3em; color: var(--ss-c1); opacity: .85; }
+  .ss-stamps { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; max-width: 21rem; margin: 20px auto 0; }
+  .ss-stamp { padding: 4px 9px; border-radius: 999px; font: 500 11px var(--ss-head); letter-spacing: .08em; text-transform: var(--ss-headCase); color: var(--ss-dim); box-shadow: 0 0 0 1px var(--ss-line) inset; }
+  .ss-stamp.on { color: var(--ss-bg); background: var(--ss-c1); box-shadow: 0 0 12px var(--ss-glow); }
+  .ss-finds { max-width: 21rem; margin: 12px auto 0; font: 400 12px/1.5 var(--ss-body); color: var(--ss-text2); }
+  .ss-finds:empty { display: none; }
+  @media (max-height: 430px), (max-width: 300px) { .ss-stamps, .ss-finds, .ss-tally { display: none; } }
   .ss-rule { width: 72px; height: 2px; margin: -4px auto 14px; background: linear-gradient(90deg, var(--ss-c1), var(--ss-c2)); box-shadow: 0 0 8px var(--ss-c2), 0 0 16px var(--ss-c1); }
   @keyframes nn-strike { 0% { opacity: .08; } 7% { opacity: 1; } 10% { opacity: .15; } 15% { opacity: .9; } 18% { opacity: .3; } 26% { opacity: 1; } 100% { opacity: 1; } }
   @media (prefers-reduced-motion: reduce) { .ss-marquee .pb-title { animation: none; } }
@@ -147,7 +160,8 @@
       <div class="ss-over" data-pausecard><div style="text-align:center">
         <div class="pb-paused">Paused</div>
         <div class="pb-sub">Tap or ${kbd("Esc")} to resume</div>
-        <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap"><button class="pb-btn" data-pintensity></button><button class="pb-btn" data-ptrack></button><button class="pb-btn" data-pvoice></button></div></div></div>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap"><button class="pb-btn" data-pintensity></button><button class="pb-btn" data-ptrack></button><button class="pb-btn" data-pvoice></button></div>
+        <div class="ss-stamps" data-stamps></div><div class="ss-finds" data-finds></div><div class="pb-sub ss-tally" data-tally></div></div></div>
       <div class="ss-over" data-keyscard><div class="pb-card" style="max-width:20rem">
         <div class="pb-kicker">Keys</div>
         <div class="pb-rows">
@@ -170,6 +184,7 @@
       q("[data-marquee]").innerHTML = "";
       g.marquee(q("[data-marquee]"), g.title, g.hint);
     }
+    q("[data-marquee]").insertAdjacentHTML("beforeend", '<div class="ss-pips" data-pips></div>');
 
     const eng = FlowEngine.create(Object.assign({ key: g.key }, g.engine || {}));
     window.flowTelemetry = () => eng.history();
@@ -195,6 +210,71 @@
     const hiKey = () => g.key + ".space.hi" + (intensity === "normal" ? "" : "." + intensity);
     let hi = parseInt(store(hiKey()) || "0", 10) || 0;
     const callouts = [], rings = [];
+    const say = (text, x, y, color = Skin.colors.cream, scale = 1) => callouts.push({ text, x, y, vy: -0.55, a: 1, color, scale });
+
+    // ---- Stamps (see the header). log: n taps and p perfects by hand, run the longest perfect
+    // run, t the top tier reached, a bars played while away, away the longest single spell,
+    // got the stamps earned, f the finds
+    const log = { n: 0, p: 0, run: 0, t: 1, a: 0, away: 0, got: {}, f: [] };
+    try { Object.assign(log, JSON.parse(store(g.key + ".log") || "{}")); } catch (e) {}
+    const STAMPS = [
+      ["n25", "25 by hand", () => log.n >= 25],
+      ["n500", "500 by hand", () => log.n >= 500],
+      ["run8", "8 perfect in a row", () => log.run >= 8],
+      ["p100", "100 perfect", () => log.p >= 100],
+      ["top", tierNames[3], () => log.t >= 4],
+      ["a300", "300 bars while away", () => log.a >= 300]
+    ];
+    const AWAY_BEATS = 4; // autoplay earns one a bar, about a quarter of what hands do, on its own tally
+    let perfectRun = 0, awayNow = 0, autoBeats = 0, logDirty = false;
+    function saveLog() {
+      if (!logDirty) return;
+      logDirty = false;
+      store(g.key + ".log", JSON.stringify(log));
+      // One number per game for a host page's shelf
+      try {
+        const all = JSON.parse(store("flow.stamps") || "{}");
+        all[location.pathname.split("/").pop().replace(".html", "")] = Object.keys(log.got).length + log.f.length;
+        store("flow.stamps", JSON.stringify(all));
+      } catch (e) {}
+    }
+    function showStamps() {
+      const box = q("[data-stamps]");
+      box.textContent = "";
+      for (const [id, label] of STAMPS) {
+        const el = document.createElement("span");
+        el.className = "ss-stamp" + (log.got[id] ? " on" : "");
+        el.textContent = label;
+        box.appendChild(el);
+      }
+      q("[data-finds]").textContent = log.f.length ? "Found: " + log.f.join(" \u00b7 ") : "";
+      q("[data-tally]").textContent = log.n || log.a ? `${log.n.toLocaleString()} by hand \u00b7 ${log.a.toLocaleString()} bars while away` : "";
+      q("[data-pips]").textContent = STAMPS.map(([id]) => (log.got[id] ? "\u25c6" : "\u25c7")).join("") + (log.f.length ? " +" + log.f.length : "");
+    }
+    function stamps() {
+      for (const [id, label, earned] of STAMPS) {
+        if (log.got[id] || !earned()) continue;
+        log.got[id] = 1;
+        say("Stamp \u00b7 " + label, W / 2, H * 0.2, Skin.colors.yellow, 1.05);
+        api.ring(W / 2, H * 0.2, Skin.colors.yellow, Math.min(W, H) * 0.3);
+        eng.chime();
+        flash = Math.max(flash, 0.8);
+        logDirty = true;
+        saveLog();
+        showStamps();
+      }
+    }
+    // A game's named moment, kept the first time it happens in the player's hands
+    function find(text, y) {
+      if (!started || eng.auto || typeof text !== "string" || !/^[A-Za-z]/.test(text) || log.f.includes(text) || log.f.length >= 40) return;
+      log.f.push(text);
+      say("New find", W / 2, (y === undefined ? H * 0.38 : y) + 26, Skin.colors.cream, 0.7);
+      logDirty = true;
+      saveLog();
+      showStamps();
+    }
+    setInterval(saveLog, 5000);
+    window.addEventListener("pagehide", saveLog);
     const HOLD_SEC = 0.45; // longer than an ordinary press, even a thumb on a space bar
 
     const api = {
@@ -221,14 +301,21 @@
       hit(quality = "CLEAN", handleSec, x, y) {
         if (!started || eng.auto || eng.style === "fidget") return false;
         const tierUp = eng.score(1, quality, handleSec);
+        log.n++;
+        perfectRun = quality === "PERFECT" ? perfectRun + 1 : 0;
+        if (perfectRun) log.p++;
+        log.run = Math.max(log.run, perfectRun);
+        if (tierUp) log.t = Math.max(log.t, eng.tier);
+        logDirty = true;
+        stamps();
         combo++;
         const m = Math.min(4, 1 + Math.floor(combo / 8));
-        if (m > mult) api.callout(m + "×", W / 2, H * 0.42, Skin.colors.yellow, 1.1);
+        if (m > mult) say(m + "×", W / 2, H * 0.42, Skin.colors.yellow, 1.1);
         mult = m;
         const got = addPoints(100 * (quality === "PERFECT" ? 2 : 1));
-        if (x !== undefined) api.callout("+" + got, x, y - 18, quality === "PERFECT" ? Skin.colors.yellow : Skin.colors.cream, 0.7);
+        if (x !== undefined) say("+" + got, x, y - 18, quality === "PERFECT" ? Skin.colors.yellow : Skin.colors.cream, 0.7);
         if (tierUp) {
-          api.callout(tierNames[eng.tier - 1], W / 2, H * 0.3, api.color(), 1.2);
+          say(tierNames[eng.tier - 1], W / 2, H * 0.3, api.color(), 1.2);
           flash = 1.2;
         }
         // A phrase of eight clean hits chimes, like the engine's own celebration
@@ -249,7 +336,7 @@
         if (counted) {
           combo = Math.max(0, combo - 8);
           mult = Math.min(4, 1 + Math.floor(combo / 8));
-          clean = 0;
+          clean = perfectRun = 0;
         }
         hud();
         return counted;
@@ -259,8 +346,10 @@
         if (eng.style !== "fidget") addPoints(n); // Fidget: the moment, not the points
         if (label) api.callout(label, x === undefined ? W / 2 : x, y === undefined ? H * 0.38 : y, Skin.colors.yellow, 1.1);
       },
-      callout(text, x, y, color = Skin.colors.cream, scale = 1) {
-        callouts.push({ text, x, y, vy: -0.55, a: 1, color, scale });
+      // A game's callout; the big ones are its named moments, and the first of each is a find
+      callout(text, x, y, color, scale = 1) {
+        say(text, x, y, color, scale);
+        if (scale >= 1) find(text, y);
       },
       ring(x, y, color, size = 44) {
         if (rings.length < 12) rings.push({ x, y, color, size, t: 0 });
@@ -378,7 +467,7 @@
       }
     };
     const trackers = [];
-    if (new URLSearchParams(location.search).get("test") === "1") window.flowTest = { eng, api, trackers };
+    if (new URLSearchParams(location.search).get("test") === "1") window.flowTest = { eng, api, trackers, log };
 
     function addPoints(n) {
       const got = Math.round(n * mult * POINT_SCALE[intensity]);
@@ -421,24 +510,36 @@
       if (eng.paused || !W) return;
       for (const t of trackers) t.beat(n);
       if (g.onBeat) g.onBeat(n, api);
+      // Left to play itself, it fills its own tally, one a bar
+      if (started && eng.auto && ++autoBeats % AWAY_BEATS === 0) {
+        log.a++;
+        log.away = Math.max(log.away, ++awayNow);
+        logDirty = true;
+        stamps();
+      }
     });
-    eng.on("lock", () => api.callout("In sync", W / 2, H * 0.3, Skin.colors.yellow, 1.05));
+    eng.on("lock", () => say("In sync", W / 2, H * 0.3, Skin.colors.yellow, 1.05));
     eng.on("auto", () => {
       hud();
       report();
     });
-    eng.on("manual", hud);
+    eng.on("manual", () => {
+      if (awayNow >= 8) say(`While you were away \u00b7 ${awayNow} bars`, W / 2, H * 0.2, Skin.colors.cream, 0.9);
+      awayNow = autoBeats = 0;
+      showStamps();
+      hud();
+    });
     eng.on("pause", hud);
     // Fidget climbing a tier (Flow's tier-ups come back from hit())
     eng.on("tier", (t) => {
-      api.callout(tierNames[t - 1], W / 2, H * 0.3, Skin.tiers[t - 1], 1.2);
+      say(tierNames[t - 1], W / 2, H * 0.3, Skin.tiers[t - 1], 1.2);
       api.ring(W / 2, H * 0.45, Skin.tiers[t - 1], Math.min(W, H) * 0.45);
       flash = 1.2;
       eng.chime();
     });
     eng.on("signal", (label) => {
       lastInput = performance.now(); // the music comes back for the cue; let it play a while
-      api.callout(label, W / 2, H * 0.3, Skin.colors.yellow, 1.1);
+      say(label, W / 2, H * 0.3, Skin.colors.yellow, 1.1);
       flash = 1.6;
       hud();
     });
@@ -500,16 +601,16 @@
       points = 0;
       combo = 0;
       mult = 1;
-      api.callout(intensity, W / 2, 130, Skin.colors.yellow, 1);
+      say(intensity, W / 2, 130, Skin.colors.yellow, 1);
       hud();
     }
     function toggleStyle() {
       const style = eng.toggleStyle();
-      api.callout(style, W / 2, 130, Skin.colors.yellow, 1);
+      say(style, W / 2, 130, Skin.colors.yellow, 1);
       api.ring(W / 2, H * 0.5, style === "fidget" ? Skin.colors.yellow : api.color(), Math.min(W, H) * 0.5);
       hud();
     }
-    const note = (text, color) => api.callout(text, W / 2, 130, color || Skin.colors.cream, 0.95);
+    const note = (text, color) => say(text, W / 2, 130, color || Skin.colors.cream, 0.95);
     const press = (sel, fn) =>
       q(sel).addEventListener("pointerdown", (e) => {
         e.stopPropagation();
@@ -696,6 +797,7 @@
     resize();
     if (g.setup) g.setup(api);
     hud();
+    showStamps();
     requestAnimationFrame(frame);
     return api;
   }

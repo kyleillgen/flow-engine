@@ -388,13 +388,27 @@
     sky.appendChild(s);
   }
 
+  // A cartridge's tag: how many games, and the stamps and finds collected in them so far (the
+  // games keep one number each in flow.stamps)
+  function tag(c) {
+    let got = 0;
+    try {
+      const all = JSON.parse(localStorage.getItem("flow.stamps") || "{}");
+      for (const g of c.games) got += all[g.file.split("/").pop().replace(".html", "")] || 0;
+    } catch (e) {}
+    return c.games.length + " games" + (got ? " · ◆ " + got : "");
+  }
+  window.addEventListener("storage", (e) => {
+    if (e.key === "flow.stamps") carts.forEach((c) => c.el && (c.el.querySelector("small").textContent = tag(c)));
+  });
+
   function cartEl(c) {
     const b = document.createElement("button");
     b.className = "cart";
     b.style.setProperty("--c1", c.colors[0]);
     b.style.setProperty("--c2", c.colors[1]);
     b.style.setProperty("--art", `url("site/labels/${c.id}.webp")`); // a frame from one of its games
-    b.innerHTML = `<span class="grip"></span><span class="label"><small>${c.games.length} games</small><b>${c.name}</b></span><span class="pins"></span>`;
+    b.innerHTML = `<span class="grip"></span><span class="label"><small>${tag(c)}</small><b>${c.name}</b></span><span class="pins"></span>`;
     b.setAttribute("aria-label", `${c.name}: ${c.blurb}`);
     b.title = c.blurb;
     return b;
